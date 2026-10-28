@@ -6,6 +6,10 @@ const CORE_REPO = 'D:/projectradom/AntigravityManager';
 const PROFILE_DIR = 'D:/projectradom/geminirouter/core-profile';
 const API_KEY = fs.readFileSync(path.join(PROFILE_DIR, 'API_KEY.txt'), 'utf8').trim();
 
+const cleanEnv = { ...process.env };
+delete cleanEnv.ANTIGRAVITY_OAUTH_CLIENTS;
+delete cleanEnv.ANTIGRAVITY_OAUTH_CLIENT_KEY;
+
 // 1. Start core
 console.log('[1/2] Spawning standalone core (port 8046)...');
 const core = spawn(process.execPath, ['dist/core/main.cjs'], {
@@ -13,7 +17,7 @@ const core = spawn(process.execPath, ['dist/core/main.cjs'], {
   detached: true,
   stdio: 'inherit',
   env: {
-    ...process.env,
+    ...cleanEnv,
     USERPROFILE: PROFILE_DIR,
     HOME: PROFILE_DIR,
   },
@@ -30,7 +34,7 @@ const bridge = spawn(process.execPath, ['dist/index.js'], {
   detached: true,
   stdio: 'inherit',
   env: {
-    ...process.env,
+    ...cleanEnv,
     PORT: '3000',
     HOST: '0.0.0.0',
     USERPROFILE: PROFILE_DIR,
