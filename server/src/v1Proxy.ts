@@ -219,10 +219,18 @@ export async function handleV1ProxyRequest(
           }
         });
 
-        // Handle client connection abort
-        request.raw.on('close', () => {
-          safeRelease();
-          upstreamReq.destroy();
+        // Abort the upstream only when the client truly disconnects before
+        // the response finishes. Node >= 18 emits 'close' on the REQUEST
+        // stream as soon as the body has been read, so listening on
+        // request.raw here destroyed every upstream call before any response
+        // arrived (the "502 socket hang up" bug). reply.raw closes only when
+        // the connection is actually done; writableFinished distinguishes a
+        // completed response from an aborted one.
+        reply.raw.on('close', () => {
+          if (!reply.raw.writableFinished) {
+            safeRelease();
+            upstreamReq.destroy();
+          }
         });
 
         // Send request body
