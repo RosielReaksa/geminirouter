@@ -69,4 +69,32 @@ geminirouter supports $N$ Google accounts in a single pool, serving many concurr
 ### Outbound Proxy Support
 - The AntigravityManager core natively supports per-account outbound proxies via `account.proxy_url` (stored in the SQLite database and passed to the upstream Google HTTP client). Per-account proxying is optional.
 
+## Per-Request Account Pinning
+
+Upstream account choice must ultimately be made by the core, because only the core holds the Google OAuth tokens. Two designs exist:
+
+### Option A — ACTIVE: core patch honoring the `x-account-id` header
+
+The core (local patched clone of `Draculabo/AntigravityManager`, commit "feat: per-request account pinning via x-account-id header") accepts the account the bridge chose:
+
+1. `src/modules/proxy-gateway/server/common/pinned-account-context.ts` — an `AsyncLocalStorage` request context. A Fastify `onRequest` hook reads `x-account-id` and enters the scope for the whole request (`done()` called synchronously inside `.run()`, the same pattern as the traffic-audit context).
+2. `account-lease.service.ts` `getNextToken()` passes `pinnedAccountId: getPinnedAccountId()` into the selection request.
+3. `account-lease-selection.policy.ts` `selectCandidate()` returns the pinned account **when it is still eligible** (not in cooldown, not rate-limited for the model). An ineligible or unknown pin falls back to normal selection, so the request still succeeds.
+4. The bridge (`server/src/v1Proxy.ts`) already sends `x-account-id` / `x-account-email` on every forwarded request — no bridge change needed.
+
+Result: the bridge's least-in-flight balancing is authoritative and its lease counts match the account that actually serves each request. All accounts work in parallel continuously; no account is "filled first".
+
+Verified by: `src/tests/unit/pinned-account-selection.test.ts` (8 tests: pin honored, pin beats sticky sessions and account-first, cooldown/rate-limit/unknown fallbacks, ALS scoping) plus the 12 pre-existing policy tests (no regression). `pnpm run type-check` and `pnpm run build:core` pass.
+
+**Activation note:** the patch lives in the patched core source (`dist/core/main.cjs` is rebuilt). An installed Antigravity Manager desktop app runs its own unpatched build — to activate pinning, run the standalone core from the patched clone (or the desktop app from this source) instead of the installed app.
+
+### Option B — FUTURE (not built): one core process per account
+
+If per-account process isolation or multi-core CPU parallelism is ever needed (e.g. very large-context payloads saturating a single event loop):
+
+- Run $N$ standalone core instances, each with its own profile directory holding exactly one account and its own gateway port (8045, 8046, ...).
+- The bridge already selects the account per request; it would map `account.id -> port` and route to that core.
+- Trade-offs vs Option A: ~100–150 MB RAM per account, $N$ profile directories and OAuth setups, $N$ ports to firewall — but per-account crash isolation and real multi-core scaling.
+- Option A does not block this later: a patched core can also be run per-account.
+
 - It does not fabricate accounts, quotas, or OAuth sessions. With the core offline, `/api/oauth/start` and `/api/oauth/complete` return 503 errors, and quota refresh returns the last known data unchanged.
