@@ -182,11 +182,13 @@ export async function createServer(): Promise<{
 
   // 2. GET /api/accounts
   app.get('/api/accounts', async () => {
-    // Attempt to query real core accounts if connected
+    // Real core accounts whenever the core is reachable — including an empty
+    // pool. The demo fallback is ONLY for core-offline demo mode; it must
+    // never mask the real pool state.
     if (await coreClient.isCoreAlive()) {
       try {
         const coreViews = await coreClient.callRpc<any[]>('accountViews');
-        if (Array.isArray(coreViews) && coreViews.length > 0) {
+        if (Array.isArray(coreViews)) {
           // Map core views to GoogleAccount format
           const mapped: GoogleAccount[] = coreViews.map((cv: any) => {
             const quotas = cv.quota?.models
@@ -278,15 +280,19 @@ export async function createServer(): Promise<{
     }
 
     const coreOAuth = await coreClient.startOAuth(oauthClientKey);
-    if (!coreOAuth) {
-      return reply.code(502).send({
-        error: 'Core did not return an authorization URL',
-        message: 'The OAuth session could not be started. Check the core logs and retry.',
+    if (!coreOAuth.ok) {
+      return reply.code(coreOAuth.status === 409 ? 409 : 502).send({
+        error: coreOAuth.error,
+        message:
+          coreOAuth.status === 409
+            ? 'Another login is already in progress. It was cancelled — try again now.'
+            : 'The OAuth session could not be started. Check the core logs and retry.',
       });
     }
 
     return {
-      ...coreOAuth,
+      authorizationUrl: coreOAuth.authorizationUrl,
+      sessionId: coreOAuth.sessionId,
       expiresInSeconds: 600,
     };
   });

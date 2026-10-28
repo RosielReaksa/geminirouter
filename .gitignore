@@ -22,3 +22,6 @@ tmpwebapp-node-modulesprepare.log
 # Environment
 .env
 .env.local
+
+# Patched-core side profile (contains account tokens)
+core-profile/

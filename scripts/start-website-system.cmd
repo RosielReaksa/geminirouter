@@ -1,0 +1,40 @@
+@echo off
+REM ============================================================
+REM  geminirouter website system launcher (fully parallel to
+REM  the installed Antigravity Manager desktop app)
+REM
+REM  Starts:
+REM    1) The patched core with its OWN profile at
+REM       core-profile\.antigravity-agent (fresh accounts, added
+REM       via the website) and gateway on port 8046
+REM    2) The web bridge on port 3000, connected to that core
+REM
+REM  Your installed desktop app (port 8045, its own accounts)
+REM  keeps running independently. No connection between them.
+REM ============================================================
+setlocal
+set "ROOT=%~dp0.."
+set "CORE_REPO=D:\projectradom\AntigravityManager"
+set "SITE_HOME=%ROOT%\core-profile"
+
+REM Read the website system's API key (gitignored file)
+set "API_KEY="
+for /f "usebackq delims=" %%k in (`type "%SITE_HOME%\API_KEY.txt"`) do set "API_KEY=%%k"
+if "%API_KEY%"=="" (
+  echo [ERROR] %SITE_HOME%\API_KEY.txt not found.
+  pause
+  exit /b 1
+)
+
+echo [1/2] Starting patched core (profile: core-profile, gateway: 8046)...
+start "geminirouter-core" cmd /k "cd /d %CORE_REPO% && set USERPROFILE=%SITE_HOME%&& set HOME=%SITE_HOME%&& node dist\core\main.cjs"
+
+timeout /t 6 /nobreak >nul
+
+echo [2/2] Starting web bridge (dashboard: http://localhost:3000)...
+start "geminirouter-bridge" cmd /k "cd /d %ROOT%\server && set USERPROFILE=%SITE_HOME%&& set HOME=%SITE_HOME%&& set GEMINIROUTER_GATEWAY_PORT=8046&& set GEMINIROUTER_GATEWAY_API_KEY=%API_KEY%&& node dist\index.js"
+
+echo.
+echo Done. Dashboard: http://localhost:3000  (gateway on 8046)
+echo Add Google accounts from the website: Accounts ^> Add Google Account.
+pause
