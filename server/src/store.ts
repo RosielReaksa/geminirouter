@@ -42,6 +42,9 @@ export interface GatewayConfig {
   enableThinkingTagPassthrough: boolean;
   rateLimitPerMinute: number;
   logRetentionDays: number;
+  maxConcurrentRequestsPerAccount: number;
+  capacityPolicy: 'queue' | 'reject_429';
+  queueTimeoutMs: number;
 }
 
 export interface TrafficRecord {
@@ -91,6 +94,9 @@ const DEFAULT_CONFIG: GatewayConfig = {
   enableThinkingTagPassthrough: true,
   rateLimitPerMinute: 120,
   logRetentionDays: 14,
+  maxConcurrentRequestsPerAccount: parseInt(process.env.MAX_CONCURRENT_REQUESTS_PER_ACCOUNT || '10', 10),
+  capacityPolicy: 'queue',
+  queueTimeoutMs: 5000,
 };
 
 const DEFAULT_ACCOUNTS: GoogleAccount[] = [
@@ -324,16 +330,12 @@ export class LocalStateStore {
   }
 
   refreshQuotas(): GoogleAccount[] {
+    // Real quota refresh happens in the core (accountRefreshQuota RPC).
+    // Locally we only touch the observation timestamp — quota numbers are
+    // never mutated or fabricated here.
     this.accounts = this.accounts.map((acc) => ({
       ...acc,
       lastUsedAt: new Date().toISOString(),
-      quotas: acc.quotas.map((q) => ({
-        ...q,
-        requestsIn5h: Math.min(
-          q.limitIn5h,
-          Math.max(2, q.requestsIn5h + Math.floor(Math.random() * 3) - 1)
-        ),
-      })),
     }));
     this.saveState();
     return this.getAccounts();

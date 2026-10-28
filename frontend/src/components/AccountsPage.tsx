@@ -15,6 +15,8 @@ import { GoogleAccount } from '../types';
 
 interface AccountsPageProps {
   accounts: GoogleAccount[];
+  inFlightPerAccount?: Record<string, number>;
+  maxCap?: number;
   onOpenOAuthModal: () => void;
   onRefreshQuotas: () => void;
   onDeleteAccount: (id: string) => void;
@@ -24,6 +26,8 @@ interface AccountsPageProps {
 
 export const AccountsPage: React.FC<AccountsPageProps> = ({
   accounts,
+  inFlightPerAccount,
+  maxCap = 10,
   onOpenOAuthModal,
   onRefreshQuotas,
   onDeleteAccount,
@@ -184,6 +188,20 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
                       <span className="text-[11px] text-[#9E988F]">
                         {acc.credits ?? 0} credits
                       </span>
+
+                      <span className="text-[#DDD7CE]">·</span>
+                      {(() => {
+                        const inFlight = inFlightPerAccount?.[acc.id] ?? 0;
+                        return (
+                          <span
+                            className="inline-flex items-center gap-1 text-[11px] font-mono-code px-2 py-0.5 rounded bg-[#FAF7F2] border border-[#EAE5DE] text-[#706B65]"
+                            title={`Current concurrent in-flight requests on this account: ${inFlight} of max ${maxCap}`}
+                          >
+                            <span className={`w-1.5 h-1.5 rounded-full ${inFlight > 0 ? 'bg-emerald-500 animate-pulse' : 'bg-stone-300'}`} />
+                            <span>Leases: {inFlight} / {maxCap}</span>
+                          </span>
+                        );
+                      })()}
                     </div>
                   </div>
                 </div>

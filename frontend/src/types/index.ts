@@ -57,9 +57,14 @@ export interface GatewayStatus {
   totalAccountsCount: number;
   requestsLast24h: number;
   tokensLast24h: number;
-  averageLatencyMs: number;
-  successRate: number; // percentage, e.g. 99.4
-  activeBackingAccountEmail?: string;
+  averageLatencyMs: number | null;
+  successRate: number | null; // percentage, e.g. 99.4
+  activeBackingAccountEmail?: string | null;
+  inFlightPerAccount?: Record<string, number>;
+  totalInFlight?: number;
+  totalCapacity?: number;
+  maxConcurrentRequestsPerAccount?: number;
+  capacityPolicy?: 'queue' | 'reject_429';
   version: string;
   healthy: boolean;
 }

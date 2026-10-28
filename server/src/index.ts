@@ -11,8 +11,17 @@ import { CoreClient } from './coreClient.js';
 import { CoreProcessManager } from './coreProcess.js';
 import { LocalStateStore, type GoogleAccount } from './store.js';
 import { createAuthMiddleware } from './auth.js';
+import { derivePoolState, bridgeToCoreProxy, coreProxyToBridge } from './pool-state.js';
+import { readCoreProxyConfig, applyCoreProxyConfig } from './coreConfig.js';
+import { ConcurrencyLeaseManager } from './leaseManager.js';
+import { handleV1ProxyRequest } from './v1Proxy.js';
 
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
+
+const require_ = createRequire(import.meta.url);
+const BRIDGE_VERSION =
+  (require_('../package.json') as { version?: string })?.version || 'unknown';
 
 // Load environment variables
 dotenv.config();
@@ -25,7 +34,12 @@ const HOST = process.env.HOST || '0.0.0.0';
 const ADMIN_PASSWORD = process.env.GEMINIROUTER_ADMIN_PASSWORD || '';
 const INTERNAL_GATEWAY_PORT = parseInt(process.env.INTERNAL_GATEWAY_PORT || '8045', 10);
 
-export async function createServer(): Promise<{ app: FastifyInstance; coreClient: CoreClient; store: LocalStateStore }> {
+export async function createServer(): Promise<{
+  app: FastifyInstance;
+  coreClient: CoreClient;
+  store: LocalStateStore;
+  leaseManager: ConcurrencyLeaseManager;
+}> {
   const app = Fastify({
     logger: {
       level: process.env.LOG_LEVEL || 'info',
@@ -36,6 +50,12 @@ export async function createServer(): Promise<{ app: FastifyInstance; coreClient
   const coreClient = new CoreClient();
   const processManager = new CoreProcessManager();
   const store = new LocalStateStore();
+  const initialCfg = store.getConfig();
+  const leaseManager = new ConcurrencyLeaseManager({
+    maxConcurrentRequestsPerAccount: initialCfg.maxConcurrentRequestsPerAccount,
+    capacityPolicy: initialCfg.capacityPolicy,
+    queueTimeoutMs: initialCfg.queueTimeoutMs,
+  });
 
   // Enable CORS
   await app.register(fastifyCors, {
@@ -75,30 +95,27 @@ export async function createServer(): Promise<{ app: FastifyInstance; coreClient
   }
 
   // Reverse proxy for coding tools on /v1/*
-  // Proxy to internal gateway port (e.g. http://127.0.0.1:8045)
-  await app.register(fastifyHttpProxy, {
-    upstream: `http://127.0.0.1:${store.getGatewayPort() || INTERNAL_GATEWAY_PORT}`,
-    prefix: '/v1',
-    rewritePrefix: '/v1',
-    httpMethods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD'],
-    replyOptions: {
-      onError: (reply, errPayload: any) => {
-        const errMsg = errPayload?.error?.message || errPayload?.message || String(errPayload);
-        app.log.warn(`Gateway proxy error: ${errMsg}`);
-        reply.code(502).send({
-          error: {
-            message: `Gateway at 127.0.0.1:${store.getGatewayPort()} is unreachable or paused. Start the gateway via dashboard or POST /api/gateway/start`,
-            type: 'gateway_unreachable',
-            code: 502,
-          },
-        });
-      },
-    },
+  // Dispatches requests across N accounts using ConcurrencyLeaseManager:
+  // - Picks healthy account with fewest in-flight leases (min in-flight)
+  // - Breaks ties by least quota used
+  // - Enforces maxConcurrentRequestsPerAccount cap
+  // - If at capacity: queues briefly or returns 429 Retry-After
+  // - Transparently retries on next account if upstream 429 before streaming
+  // - Never retries once first streamed byte is emitted
+  app.all('/v1/*', async (request, reply) => {
+    await handleV1ProxyRequest(request, reply, {
+      leaseManager,
+      store,
+      getGatewayPort: () => resolveGateway().port,
+    });
   });
 
   // REST API Routes
 
-  // 1. GET /api/status
+  // 1. GET /api/status — real state only. Numbers are derived from real
+  // traffic records; nothing here is fabricated. Per-request failover and
+  // cooldowns are owned by the core (docs/ACCOUNT-FAILOVER.md); the bridge
+  // reports what it can observe.
   app.get('/api/status', async () => {
     const isCoreAlive = await coreClient.isCoreAlive();
     let coreStatus = null;
@@ -109,27 +126,57 @@ export async function createServer(): Promise<{ app: FastifyInstance; coreClient
       }
     }
 
+    // Probe the real gateway port instead of trusting stored flags.
+    const { port: gatewayPort, apiKey } = resolveGateway();
+    let gatewayResponding = false;
+    try {
+      await axios.get(`http://127.0.0.1:${gatewayPort}/v1/models`, {
+        timeout: 2500,
+        // Any HTTP answer (200 or 401) proves the gateway is up.
+        validateStatus: () => true,
+        headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+      }).then((r) => {
+        gatewayResponding = r.status >= 200 && r.status < 500;
+      });
+    } catch {
+      gatewayResponding = false;
+    }
+    if (gatewayResponding !== store.isGatewayRunning()) {
+      store.setGatewayRunning(gatewayResponding, gatewayPort);
+    }
+
     const accounts = store.getAccounts();
+    const traffic = store.getTraffic();
+    const pool = derivePoolState(accounts, traffic);
     const activeAccounts = accounts.filter((a) => a.status === 'active');
-    const primaryAcc = accounts.find((a) => a.isDefaultRouting) || activeAccounts[0];
 
     return {
-      isRunning: store.isGatewayRunning(),
-      port: store.getGatewayPort(),
+      isRunning: gatewayResponding,
+      port: gatewayPort,
       host: store.getConfig().host,
       uptimeSeconds: store.getUptimeSeconds(),
       activeAccountsCount: activeAccounts.length,
       totalAccountsCount: accounts.length,
-      requestsLast24h: 530,
-      tokensLast24h: 3260000,
-      averageLatencyMs: 640,
-      successRate: 99.4,
-      activeBackingAccountEmail: primaryAcc?.email,
-      version: '0.27.0',
-      healthy: true,
+      requestsLast24h: pool.requestsLast24h,
+      tokensLast24h: pool.tokensLast24h,
+      averageLatencyMs: pool.averageLatencyMs,
+      successRate: pool.successRate,
+      activeBackingAccountEmail: pool.activeBackingAccountEmail,
+      cooldownAccounts: pool.cooldownAccounts,
+      lastSwitch: pool.lastSwitch,
+      inFlightPerAccount: leaseManager.getAllInFlight(),
+      totalInFlight: leaseManager.getTotalInFlight(),
+      totalCapacity: leaseManager.getTotalCapacity(activeAccounts.length),
+      maxConcurrentRequestsPerAccount: leaseManager.getMaxConcurrentRequestsPerAccount(),
+      capacityPolicy: leaseManager.getCapacityPolicy(),
+      queueTimeoutMs: leaseManager.getQueueTimeoutMs(),
+      // Real health: gateway answering AND at least one usable account,
+      // or a reachable core that can still serve its own error states.
+      healthy: gatewayResponding && (activeAccounts.length > 0 || isCoreAlive),
       coreConnected: isCoreAlive,
       coreEndpoint: coreClient.getEndpoint(),
       corePid: coreStatus?.pid,
+      version: BRIDGE_VERSION,
     };
   });
 
@@ -181,9 +228,24 @@ export async function createServer(): Promise<{ app: FastifyInstance; coreClient
     return store.getAccounts();
   });
 
-  // 3. POST /api/accounts/refresh
+  // 3. POST /api/accounts/refresh — real refresh via the core; never mutates
+  // quota numbers locally when the core is unreachable.
   app.post('/api/accounts/refresh', async () => {
-    return store.refreshQuotas();
+    if (await coreClient.isCoreAlive()) {
+      try {
+        await coreClient.callRpc('accountRefreshQuota', {});
+      } catch {
+        app.log.warn('accountRefreshQuota RPC failed; returning last known accounts');
+      }
+      const accountsAfter = await (app as any).inject({
+        method: 'GET',
+        url: '/api/accounts',
+      });
+      return JSON.parse(accountsAfter.body);
+    }
+
+    // Core offline: keep last known data untouched. Do not invent numbers.
+    return store.getAccounts();
   });
 
   // 4. DELETE /api/accounts/:id
@@ -204,104 +266,64 @@ export async function createServer(): Promise<{ app: FastifyInstance; coreClient
     };
   });
 
-  // 5. POST /api/oauth/start
-  app.post<{ Body: { oauthClientKey?: string } }>('/api/oauth/start', async (request) => {
+  // 5. POST /api/oauth/start — requires the core; no fake authorization URLs.
+  app.post<{ Body: { oauthClientKey?: string } }>('/api/oauth/start', async (request, reply) => {
     const { oauthClientKey } = request.body || {};
-    if (await coreClient.isCoreAlive()) {
-      const coreOAuth = await coreClient.startOAuth(oauthClientKey);
-      if (coreOAuth) {
-        return {
-          ...coreOAuth,
-          expiresInSeconds: 600,
-        };
-      }
+    if (!(await coreClient.isCoreAlive())) {
+      return reply.code(503).send({
+        error: 'Core is offline',
+        message:
+          'Google OAuth requires the AntigravityManager core. Start the core (POST /api/core/start) and try again.',
+      });
     }
 
-    // Fallback demo/mock oauth start
-    const sessionId = `sess_${Math.random().toString(36).substring(2, 10)}`;
-    const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?response_type=code&client_id=geminirouter-client&scope=openid%20profile%20email&state=${sessionId}`;
+    const coreOAuth = await coreClient.startOAuth(oauthClientKey);
+    if (!coreOAuth) {
+      return reply.code(502).send({
+        error: 'Core did not return an authorization URL',
+        message: 'The OAuth session could not be started. Check the core logs and retry.',
+      });
+    }
+
     return {
-      authorizationUrl: authUrl,
-      sessionId,
+      ...coreOAuth,
       expiresInSeconds: 600,
     };
   });
 
-  // 6. POST /api/oauth/complete
+  // 6. POST /api/oauth/complete — requires the core; never fabricates an account.
   app.post<{ Body: { sessionId: string; codeOrUrl?: string; code?: string } }>(
     '/api/oauth/complete',
-    async (request) => {
+    async (request, reply) => {
       const { sessionId, codeOrUrl, code } = request.body || {};
       const actualCode = code || codeOrUrl || '';
 
-      if (await coreClient.isCoreAlive()) {
-        const ok = await coreClient.completeOAuth(sessionId, actualCode);
-        if (ok) {
-          return { success: true };
-        }
+      if (!sessionId || !actualCode) {
+        return reply.code(400).send({
+          error: 'sessionId and code are required',
+        });
       }
 
-      // Demo/Fallback: create a new active account in rotation pool
-      let derivedEmail = 'gemini.user.' + Math.floor(100 + Math.random() * 900) + '@gmail.com';
-      if (actualCode.includes('@')) {
-        const match = actualCode.match(/[\w.-]+@[\w.-]+\.\w+/);
-        if (match) derivedEmail = match[0];
+      if (!(await coreClient.isCoreAlive())) {
+        return reply.code(503).send({
+          error: 'Core is offline',
+          message:
+            'Google OAuth cannot be completed without the AntigravityManager core. Start the core and restart the flow.',
+        });
       }
 
-      const newAccount: GoogleAccount = {
-        id: `acc-${Date.now().toString(36)}`,
-        email: derivedEmail,
-        name: derivedEmail.split('@')[0].replace(/[._]/g, ' '),
-        avatarUrl: `https://api.dicebear.com/7.x/bottts/svg?seed=${derivedEmail}`,
-        status: 'active',
-        addedAt: new Date().toISOString(),
-        lastUsedAt: new Date().toISOString(),
-        tier: 'Google AI Studio',
-        isDefaultRouting: false,
-        totalRequests24h: 0,
-        quotas: [
-          {
-            modelId: 'gemini-2.5-pro',
-            modelName: 'Gemini 2.5 Pro',
-            requestsIn5h: 0,
-            limitIn5h: 50,
-            resetTime5h: 'in 5h 00m',
-            tokensIn7d: 0,
-            limitIn7d: 2000000,
-            resetTime7d: 'in 7 days',
-            isThrottled: false,
-          },
-          {
-            modelId: 'gemini-2.5-flash',
-            modelName: 'Gemini 2.5 Flash',
-            requestsIn5h: 0,
-            limitIn5h: 500,
-            resetTime5h: 'in 5h 00m',
-            tokensIn7d: 0,
-            limitIn7d: 10000000,
-            resetTime7d: 'in 7 days',
-            isThrottled: false,
-          },
-          {
-            modelId: 'gemini-2.5-flash-thinking',
-            modelName: 'Gemini 2.5 Flash Thinking',
-            requestsIn5h: 0,
-            limitIn5h: 100,
-            resetTime5h: 'in 5h 00m',
-            tokensIn7d: 0,
-            limitIn7d: 5000000,
-            resetTime7d: 'in 7 days',
-            isThrottled: false,
-          },
-        ],
-      };
+      const ok = await coreClient.completeOAuth(sessionId, actualCode);
+      if (!ok) {
+        return reply.code(400).send({
+          success: false,
+          error: 'The core rejected the authorization code',
+          message:
+            'Verify the code was copied from the OAuth redirect for this session, then retry.',
+        });
+      }
 
-      store.addAccount(newAccount);
-      return {
-        success: true,
-        account: newAccount,
-      };
-    }
+      return { success: true };
+    },
   );
 
   // 7. POST /api/gateway/start
@@ -341,15 +363,40 @@ export async function createServer(): Promise<{ app: FastifyInstance; coreClient
     };
   });
 
-  // 9. GET /api/config
+  // 9. GET /api/config — bridge config merged with the core's real scheduling
+  // settings (read from the core profile; the API key is never included).
   app.get('/api/config', async () => {
-    return store.getConfig();
+    const coreProxy = readCoreProxyConfig();
+    return coreProxyToBridge(coreProxy, store.getConfig());
   });
 
-  // 10. POST /api/config
+  // 10. POST /api/config — saves bridge fields AND applies the routing fields
+  // to the core's scheduling config (quota-aware switching, strategy, pinned
+  // account). Per-request failover itself is core-owned; these are its knobs.
   app.post<{ Body: Partial<ReturnType<typeof store.getConfig>> }>('/api/config', async (request) => {
     const updated = store.updateConfig(request.body || {});
-    return updated;
+    if (updated.maxConcurrentRequestsPerAccount) {
+      leaseManager.setMaxConcurrentRequestsPerAccount(updated.maxConcurrentRequestsPerAccount);
+    }
+    if (updated.capacityPolicy) {
+      leaseManager.setCapacityPolicy(updated.capacityPolicy);
+    }
+    if (updated.queueTimeoutMs) {
+      leaseManager.setQueueTimeoutMs(updated.queueTimeoutMs);
+    }
+    const corePatch = bridgeToCoreProxy(request.body || {});
+    let coreApply = null;
+    if (Object.keys(corePatch).length > 0) {
+      coreApply = applyCoreProxyConfig(corePatch);
+      app.log.info(
+        `Core scheduling config ${coreApply.appliedToFile ? 'written to profile' : 'NOT written'}: ${Object.keys(corePatch).join(', ')}`,
+      );
+    }
+    const coreProxy = readCoreProxyConfig();
+    return {
+      ...coreProxyToBridge(coreProxy, updated),
+      coreApply,
+    };
   });
 
   // 11. GET /api/traffic
@@ -386,7 +433,10 @@ export async function createServer(): Promise<{ app: FastifyInstance; coreClient
   // Resolves the real gateway port + API key from the AntigravityManager profile
   // (~/.antigravity-agent/gui_config.json), with env override support.
   function resolveGateway(): { port: number; apiKey: string; source: string } {
-    let port = store.getGatewayPort() || INTERNAL_GATEWAY_PORT;
+    let port = parseInt(process.env.GEMINIROUTER_GATEWAY_PORT || '', 10);
+    if (!Number.isFinite(port) || port <= 0) {
+      port = store.getGatewayPort() || INTERNAL_GATEWAY_PORT;
+    }
     let apiKey = process.env.GEMINIROUTER_GATEWAY_API_KEY || '';
     let source = apiKey ? 'env' : 'none';
     try {
@@ -560,7 +610,7 @@ export async function createServer(): Promise<{ app: FastifyInstance; coreClient
     });
   }
 
-  return { app, coreClient, store };
+  return { app, coreClient, store, leaseManager };
 }
 
 async function main() {

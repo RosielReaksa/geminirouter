@@ -203,6 +203,8 @@ export const App: React.FC = () => {
           {currentTab === 'accounts' && (
             <AccountsPage
               accounts={accounts}
+              inFlightPerAccount={status.inFlightPerAccount}
+              maxCap={status.maxConcurrentRequestsPerAccount}
               onOpenOAuthModal={() => setIsOAuthModalOpen(true)}
               onRefreshQuotas={handleRefreshQuotas}
               onDeleteAccount={handleDeleteAccount}
