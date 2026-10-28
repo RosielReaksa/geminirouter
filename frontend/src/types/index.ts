@@ -46,6 +46,8 @@ export interface GoogleAccount {
   quotas: ModelQuota[];
   isDefaultRouting: boolean;
   totalRequests24h: number;
+  hasValidationLink?: boolean;
+  statusReason?: string;
 }
 
 export interface GatewayStatus {

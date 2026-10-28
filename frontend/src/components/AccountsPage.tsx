@@ -10,6 +10,8 @@ import {
   Laptop,
   Trash2,
   LayoutList,
+  AlertTriangle,
+  ExternalLink,
 } from 'lucide-react';
 import { GoogleAccount } from '../types';
 
@@ -35,6 +37,24 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
   isRefreshing,
 }) => {
   const [openDropdownId, setOpenDropdownId] = useState<string | null>(null);
+  const [validatingAccountId, setValidatingAccountId] = useState<string | null>(null);
+
+  const handleOpenValidationUrl = async (accountId: string) => {
+    setValidatingAccountId(accountId);
+    try {
+      const res = await fetch(`/api/accounts/${encodeURIComponent(accountId)}/validation-url`);
+      const data = await res.json();
+      if (data.ok && data.url) {
+        window.open(data.url, '_blank', 'noopener,noreferrer');
+      } else {
+        alert(data.error || 'No validation URL returned by Google.');
+      }
+    } catch (err: any) {
+      alert('Error fetching validation URL: ' + err.message);
+    } finally {
+      setValidatingAccountId(null);
+    }
+  };
 
   const getQuotaTextColor = (pct: number) => {
     if (pct >= 75) return 'text-emerald-600';
@@ -170,6 +190,12 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
                           Primary
                         </span>
                       )}
+                      {acc.hasValidationLink && (
+                        <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-300 flex items-center gap-1 animate-pulse">
+                          <AlertTriangle className="w-3 h-3 text-amber-600" />
+                          <span>Verification Required</span>
+                        </span>
+                      )}
                     </div>
 
                     <div className="flex items-center gap-2 text-xs text-[#706B65] mt-1 flex-wrap">
@@ -215,7 +241,20 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
                 </div>
 
                 {/* Right Actions */}
-                <div className="flex items-center gap-1.5">
+                <div className="flex items-center gap-2">
+                  {acc.hasValidationLink && (
+                    <button
+                      onClick={() => handleOpenValidationUrl(acc.id)}
+                      disabled={validatingAccountId === acc.id}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-50 hover:bg-amber-100 border border-amber-300 text-xs font-semibold text-amber-800 transition-colors shadow-soft"
+                      title="Google requires account identity verification. Click to resolve."
+                    >
+                      <AlertTriangle className="w-3.5 h-3.5 text-amber-600" />
+                      <span>{validatingAccountId === acc.id ? 'Opening...' : 'Verify Account'}</span>
+                      <ExternalLink className="w-3 h-3 text-amber-600" />
+                    </button>
+                  )}
+
                   <div className="relative">
                     <button
                       onClick={() => setOpenDropdownId(isDropdownOpen ? null : acc.id)}

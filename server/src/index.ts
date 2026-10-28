@@ -217,6 +217,8 @@ export async function createServer(): Promise<{
               quotas,
               isDefaultRouting: cv.is_active || false,
               totalRequests24h: 0,
+              hasValidationLink: Boolean(cv.health?.validation?.has_verification_link),
+              statusReason: cv.status_reason || undefined,
             };
           });
           store.setAccounts(mapped);
@@ -228,6 +230,22 @@ export async function createServer(): Promise<{
     }
 
     return store.getAccounts();
+  });
+
+  // 2b. GET /api/accounts/:id/validation-url — resolves Google account checkpoint URL
+  app.get<{ Params: { id: string } }>('/api/accounts/:id/validation-url', async (request, reply) => {
+    const { id } = request.params;
+    if (await coreClient.isCoreAlive()) {
+      try {
+        const res = await coreClient.callRpc<any>('accountValidationUrl', { accountId: id });
+        if (res && res.url) {
+          return { ok: true, url: res.url };
+        }
+      } catch (err) {
+        app.log.warn(`accountValidationUrl RPC failed for account ${id}`);
+      }
+    }
+    return reply.code(404).send({ ok: false, error: 'No validation URL available for this account' });
   });
 
   // 3. POST /api/accounts/refresh — real refresh via the core; never mutates
