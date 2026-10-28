@@ -231,30 +231,26 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
                       )}
                     </div>
 
-                    <div className="flex items-center gap-2 text-xs text-[#706B65] mt-1 flex-wrap">
-                      <span>{acc.email}</span>
+                    <div className="flex items-center gap-2 text-xs text-[#706B65] mt-1.5 flex-wrap">
+                      <span className="font-mono-code">{acc.email}</span>
                       <span className="text-[#DDD7CE]">·</span>
 
-                      {acc.clientTarget === 'CLI' && (
-                        <span className="inline-flex items-center gap-1 text-[11px] font-medium text-[#4E7B62] bg-[#EEF5F1] border border-[#D3E4DB] rounded px-1.5 py-0.5">
-                          <Terminal className="w-3 h-3" />
-                          CLI
+                      {acc.status === 'cooldown' ? (
+                        <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-0.5">
+                          <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
+                          <span>Cooling Down (Auto-Recovers)</span>
+                        </span>
+                      ) : acc.hasValidationLink ? (
+                        <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-red-700 bg-red-50 border border-red-200 rounded px-2 py-0.5">
+                          <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />
+                          <span>Needs Google Verification</span>
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-emerald-700 bg-emerald-50 border border-emerald-200 rounded px-2 py-0.5">
+                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                          <span>Active in Parallel Pool</span>
                         </span>
                       )}
-                      {acc.clientTarget === 'IDE' && (
-                        <span className="inline-flex items-center gap-1 text-[11px] font-medium text-[#C25938] bg-[#FAF2EF] border border-[#F2DDD5] rounded px-1.5 py-0.5">
-                          <Laptop className="w-3 h-3" />
-                          IDE
-                        </span>
-                      )}
-                      {(!acc.clientTarget || acc.clientTarget === 'Not in use') && (
-                        <span className="text-[11px] text-[#9E988F]">Not in use</span>
-                      )}
-
-                      <span className="text-[#DDD7CE]">·</span>
-                      <span className="text-[11px] text-[#9E988F]">
-                        {acc.credits ?? 0} credits
-                      </span>
 
                       <span className="text-[#DDD7CE]">·</span>
                       {(() => {
@@ -265,7 +261,7 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
                             title={`Current concurrent in-flight requests on this account: ${inFlight} of max ${maxCap}`}
                           >
                             <span className={`w-1.5 h-1.5 rounded-full ${inFlight > 0 ? 'bg-emerald-500 animate-pulse' : 'bg-stone-300'}`} />
-                            <span>Leases: {inFlight} / {maxCap}</span>
+                            <span>Active Leases: {inFlight} / {maxCap}</span>
                           </span>
                         );
                       })()}
@@ -309,52 +305,19 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
                     </button>
 
                     {isDropdownOpen && (
-                      <div className="absolute right-0 mt-1 w-56 rounded-xl bg-white border border-[#EAE5DE] shadow-modal py-1 z-20 text-xs">
+                      <div className="absolute right-0 mt-1 w-52 rounded-xl bg-white border border-[#EAE5DE] shadow-modal py-1 z-20 text-xs">
                         <div className="px-3 py-1.5 text-[10px] font-bold text-[#9E988F] uppercase tracking-wider border-b border-[#EAE5DE]">
-                          Switch Environment
+                          Account Pool Routing
                         </div>
                         <button
                           onClick={() => {
-                            handleSwitchClient(acc.id, 'classic');
+                            onSetDefaultAccount(acc.id);
                             setOpenDropdownId(null);
                           }}
                           className="w-full text-left px-3 py-2 hover:bg-[#FAF7F2] text-[#2A2723] flex items-center justify-between"
                         >
-                          <span className="flex items-center gap-2">
-                            <Power className="w-3.5 h-3.5 text-[#C25938]" />
-                            <span>Switch to Antigravity</span>
-                          </span>
-                          {acc.clientTarget === 'Classic' && (
-                            <span className="text-[10px] text-[#4E7B62] font-bold">Active</span>
-                          )}
-                        </button>
-                        <button
-                          onClick={() => {
-                            handleSwitchClient(acc.id, 'ide');
-                            setOpenDropdownId(null);
-                          }}
-                          className="w-full text-left px-3 py-2 hover:bg-[#FAF7F2] text-[#2A2723] flex items-center justify-between"
-                        >
-                          <span className="flex items-center gap-2">
-                            <Laptop className="w-3.5 h-3.5 text-[#C25938]" />
-                            <span>Switch to Antigravity IDE</span>
-                          </span>
-                          {acc.clientTarget === 'IDE' && (
-                            <span className="text-[10px] text-[#4E7B62] font-bold">Active</span>
-                          )}
-                        </button>
-                        <button
-                          onClick={() => {
-                            handleSwitchClient(acc.id, 'agy');
-                            setOpenDropdownId(null);
-                          }}
-                          className="w-full text-left px-3 py-2 hover:bg-[#FAF7F2] text-[#2A2723] flex items-center justify-between"
-                        >
-                          <span className="flex items-center gap-2">
-                            <Terminal className="w-3.5 h-3.5 text-[#C25938]" />
-                            <span>Switch to Antigravity CLI</span>
-                          </span>
-                          {acc.clientTarget === 'CLI' && (
+                          <span>Set Primary Route</span>
+                          {acc.isDefaultRouting && (
                             <span className="text-[10px] text-[#4E7B62] font-bold">Active</span>
                           )}
                         </button>
@@ -363,22 +326,10 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
 
                         <button
                           onClick={() => {
-                            onSetDefaultAccount(acc.id);
-                            setOpenDropdownId(null);
-                          }}
-                          className="w-full text-left px-3 py-2 hover:bg-[#FAF7F2] text-[#2A2723] flex items-center justify-between"
-                        >
-                          <span>Set Primary Gateway</span>
-                          {acc.isDefaultRouting && (
-                            <span className="text-[10px] text-[#4E7B62] font-bold">Active</span>
-                          )}
-                        </button>
-                        <button
-                          onClick={() => {
                             onDeleteAccount(acc.id);
                             setOpenDropdownId(null);
                           }}
-                          className="w-full text-left px-3 py-2 hover:bg-[#FAF7F2] text-red-600 flex items-center gap-2 border-t border-[#EAE5DE]"
+                          className="w-full text-left px-3 py-2 hover:bg-[#FAF7F2] text-red-600 flex items-center gap-2"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
                           <span>Remove Account</span>

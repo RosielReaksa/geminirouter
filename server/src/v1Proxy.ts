@@ -124,10 +124,13 @@ export async function handleV1ProxyRequest(
           (upstreamRes) => {
             const status = upstreamRes.statusCode || 500;
 
-            // Check if status is a rate-limit error before streaming starts
-            const isRateLimit = status === 429 || (status === 503 && upstreamRes.headers['retry-after']);
+            // Check if status is a recoverable error (429 rate-limited, 403 validation/quarantine, or 503 retryable)
+            const isRecoverableError =
+              status === 429 ||
+              status === 403 ||
+              (status === 503 && Boolean(upstreamRes.headers['retry-after']));
 
-            if (isRateLimit && !streamStarted) {
+            if (isRecoverableError && !streamStarted) {
               // Consume body and check if retryable
               let errData = '';
               upstreamRes.on('data', (chunk) => {
@@ -249,8 +252,15 @@ export async function handleV1ProxyRequest(
 
       if (outcome.retryable && !outcome.streamStarted) {
         // Mark account in cooldown and retry on next account
-        const retrySec = parseInt(lastRetryAfter, 10);
-        const cooldownMs = Number.isFinite(retrySec) && retrySec > 0 ? retrySec * 1000 : undefined;
+        let cooldownMs = 2 * 60 * 1000;
+        if (outcome.status === 403) {
+          cooldownMs = 10 * 60 * 1000; // 10 minutes quarantine for 403 verification
+        } else {
+          const retrySec = parseInt(lastRetryAfter, 10);
+          if (Number.isFinite(retrySec) && retrySec > 0) {
+            cooldownMs = retrySec * 1000;
+          }
+        }
         leaseManager.markCooldown(account.id, cooldownMs);
         safeRelease();
         continue; // Try next account in loop
