@@ -26,6 +26,7 @@ interface AccountsPageProps {
   onDeleteAccount: (id: string) => void;
   onSetDefaultAccount: (id: string) => void;
   onUpdateAccounts?: (accounts: GoogleAccount[]) => void;
+  onShowNotification?: (msg: string) => void;
   isRefreshing: boolean;
 }
 
@@ -38,6 +39,7 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
   onDeleteAccount,
   onSetDefaultAccount,
   onUpdateAccounts,
+  onShowNotification,
   isRefreshing,
 }) => {
   const [openDropdownId, setOpenDropdownId] = useState<string | null>(null);
@@ -53,16 +55,29 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
         body: JSON.stringify({ model: 'gemini-2.5-flash' }),
       });
       const data = await res.json();
-      if (!data.ok) {
-        alert(`Test call failed: ${data.error || 'Unknown error'}`);
+      if (data.ok) {
+        if (onShowNotification) {
+          onShowNotification(`✓ Test passed: Google AI Studio responded in ${data.latencyMs}ms with "${data.sample}". Quotas refreshed.`);
+        }
+      } else {
+        if (onShowNotification) {
+          onShowNotification(`⚠ Test failed: ${data.error || 'Unknown error'}`);
+        } else {
+          alert(`Test call failed: ${data.error || 'Unknown error'}`);
+        }
       }
-      // Silently fetch fresh accounts data without wiping state
+
+      // Refresh account data in place
       const { data: freshList } = await api.getAccounts();
       if (freshList && freshList.length > 0 && onUpdateAccounts) {
         onUpdateAccounts(freshList);
       }
     } catch (err: any) {
-      alert('Error testing account: ' + err.message);
+      if (onShowNotification) {
+        onShowNotification('Error testing account: ' + err.message);
+      } else {
+        alert('Error testing account: ' + err.message);
+      }
     } finally {
       setTestingAccountId(null);
     }
@@ -71,6 +86,9 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
   const handleOpenValidationUrl = async (accountId: string) => {
     setValidatingAccountId(accountId);
     try {
+      if (onShowNotification) {
+        onShowNotification('Requesting fresh verification link from Google...');
+      }
       const res = await fetch(`/api/accounts/${encodeURIComponent(accountId)}/validation-url`);
       const data = await res.json();
       if (data.ok && data.url) {

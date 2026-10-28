@@ -183,7 +183,7 @@ export const App: React.FC = () => {
 
             <div className="flex items-center gap-2 text-xs font-mono-code text-[#706B65] bg-[#FAF7F2] border border-[#EAE5DE] px-3 py-1.5 rounded-xl">
               <span className={`w-2 h-2 rounded-full ${status.isRunning ? 'bg-emerald-500 animate-pulse' : 'bg-stone-300'}`}></span>
-              <span>127.0.0.1:{config.port}</span>
+              <span>127.0.0.1:{status.port || config.port}</span>
             </div>
           </div>
         </header>
@@ -212,6 +212,7 @@ export const App: React.FC = () => {
               onDeleteAccount={handleDeleteAccount}
               onSetDefaultAccount={handleSetDefaultAccount}
               onUpdateAccounts={setAccounts}
+              onShowNotification={showNotification}
               isRefreshing={isRefreshing}
             />
           )}
