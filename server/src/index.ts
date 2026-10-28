@@ -235,18 +235,19 @@ export async function createServer(): Promise<{
               : 'Not in use';
 
             const testRes = accountTester.getLastResult(cv.id);
-            // If the account recently passed a live test call, clear the validation warning
-            const hasValidationLink =
-              testRes?.ok === true
-                ? false
-                : Boolean(cv.health?.validation?.has_verification_link);
+            const requiresVerification =
+              Boolean(cv.health?.validation?.has_verification_link) ||
+              accountTester.isValidationRequired(cv.id) ||
+              Boolean(testRes?.requiresValidation);
+
+            const status = requiresVerification ? 'error' : cv.status === 'active' ? 'active' : 'standby';
 
             return {
               id: cv.id,
               email: cv.email,
               name: cv.name || cv.email.split('@')[0],
               avatarUrl: cv.avatar_url,
-              status: cv.status === 'active' ? 'active' : 'standby',
+              status,
               addedAt: cv.created_at || new Date().toISOString(),
               lastUsedAt: cv.last_used,
               tier: (cv.quota?.subscription_tier as any) || 'Google AI Studio',
@@ -255,8 +256,10 @@ export async function createServer(): Promise<{
               quotaGroups,
               isDefaultRouting: cv.is_active || false,
               totalRequests24h: 0,
-              hasValidationLink,
-              statusReason: cv.status_reason || undefined,
+              hasValidationLink: requiresVerification,
+              statusReason: requiresVerification
+                ? 'Google requires account verification'
+                : cv.status_reason || undefined,
               lastTestResult: testRes,
             };
           });
@@ -271,18 +274,32 @@ export async function createServer(): Promise<{
     return store.getAccounts();
   });
 
-  // 2b. GET /api/accounts/:id/validation-url — resolves Google account checkpoint URL
+  // 2b. GET /api/accounts/:id/validation-url — resolves fresh, live Google account checkpoint URL
   app.get<{ Params: { id: string } }>('/api/accounts/:id/validation-url', async (request, reply) => {
     const { id } = request.params;
+    let acc = store.getAccounts().find((a) => a.id === id);
+    if (!acc) {
+      const accountsRes = await (app as any).inject({ method: 'GET', url: '/api/accounts' });
+      const list: GoogleAccount[] = JSON.parse(accountsRes.body);
+      acc = list.find((a) => a.id === id);
+    }
+
+    if (acc) {
+      const freshUrl = await accountTester.getOrFetchFreshValidationUrl(acc);
+      if (freshUrl) {
+        let finalUrl = freshUrl;
+        if (acc.email) {
+          finalUrl = freshUrl + '&Email=' + encodeURIComponent(acc.email) + '&login_hint=' + encodeURIComponent(acc.email);
+        }
+        return { ok: true, url: finalUrl };
+      }
+    }
+
     if (await coreClient.isCoreAlive()) {
       try {
         const res = await coreClient.callRpc<any>('accountValidationUrl', { accountId: id });
         if (res && res.url) {
-          let email = store.getAccounts().find((a) => a.id === id)?.email;
-          if (!email) {
-            const views = await coreClient.callRpc<any[]>('accountViews');
-            email = views?.find((v: any) => v.id === id)?.email;
-          }
+          let email = acc?.email;
           let finalUrl = res.url;
           if (email) {
             finalUrl = res.url + '&Email=' + encodeURIComponent(email) + '&login_hint=' + encodeURIComponent(email);

@@ -264,15 +264,15 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
                       <span className="font-mono-code">{acc.email}</span>
                       <span className="text-[#DDD7CE]">·</span>
 
-                      {acc.status === 'cooldown' ? (
+                      {acc.hasValidationLink ? (
+                        <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-amber-800 bg-amber-50 border border-amber-300 rounded px-2 py-0.5">
+                          <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
+                          <span>Needs Google Verification (Quarantined)</span>
+                        </span>
+                      ) : acc.status === 'cooldown' ? (
                         <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-0.5">
                           <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
                           <span>Cooling Down (Auto-Recovers)</span>
-                        </span>
-                      ) : acc.hasValidationLink ? (
-                        <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-red-700 bg-red-50 border border-red-200 rounded px-2 py-0.5">
-                          <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />
-                          <span>Needs Google Verification</span>
                         </span>
                       ) : (
                         <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-emerald-700 bg-emerald-50 border border-emerald-200 rounded px-2 py-0.5">
@@ -328,29 +328,6 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
                     <span>{testingAccountId === acc.id ? 'Testing...' : 'Test & Refresh'}</span>
                   </button>
 
-                  {acc.hasValidationLink && (
-                    <div className="flex items-center gap-1.5">
-                      <button
-                        onClick={() => handleOpenValidationUrl(acc.id)}
-                        disabled={validatingAccountId === acc.id}
-                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-50 hover:bg-amber-100 border border-amber-300 text-xs font-semibold text-amber-800 transition-colors shadow-soft"
-                        title="Open Google security checkpoint for this account"
-                      >
-                        <AlertTriangle className="w-3.5 h-3.5 text-amber-600" />
-                        <span>{validatingAccountId === acc.id ? 'Opening...' : 'Verify ↗'}</span>
-                      </button>
-
-                      <button
-                        onClick={onOpenOAuthModal}
-                        className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-[#FAF7F2] hover:bg-[#F2ECE4] border border-[#EAE5DE] text-xs font-medium text-[#706B65] transition-colors"
-                        title="If the checkpoint link expired, re-sign in to refresh tokens"
-                      >
-                        <RefreshCw className="w-3 h-3 text-[#706B65]" />
-                        <span>Re-login</span>
-                      </button>
-                    </div>
-                  )}
-
                   <div className="relative">
                     <button
                       onClick={() => setOpenDropdownId(isDropdownOpen ? null : acc.id)}
@@ -404,6 +381,35 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
                   </button>
                 </div>
               </div>
+
+              {/* Google Security Checkpoint Alert Bar */}
+              {acc.hasValidationLink && (
+                <div className="bg-amber-50/90 border border-amber-300 rounded-xl p-3 mb-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-amber-900 shadow-sm animate-in fade-in">
+                  <div className="flex items-center gap-2.5">
+                    <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                    <span className="font-medium">
+                      Google requires account verification before this account can serve traffic. Click below to open a fresh checkpoint in your browser.
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      onClick={() => handleOpenValidationUrl(acc.id)}
+                      disabled={validatingAccountId === acc.id}
+                      className="px-3.5 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-semibold transition-colors flex items-center gap-1.5 shadow-sm disabled:opacity-60"
+                    >
+                      <span>{validatingAccountId === acc.id ? 'Fetching fresh link...' : 'Verify on Google ↗'}</span>
+                      <ExternalLink className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      onClick={onOpenOAuthModal}
+                      className="px-2.5 py-1.5 rounded-lg bg-white hover:bg-amber-100 border border-amber-300 font-medium text-amber-800 transition-colors"
+                      title="If the checkpoint times out, re-sign in to renew tokens directly"
+                    >
+                      Re-login
+                    </button>
+                  </div>
+                </div>
+              )}
 
               {/* Official Quota Groups from v0.26/v0.27 (Gemini Models, Claude & GPT Models) */}
               {acc.quotaGroups && acc.quotaGroups.length > 0 && (

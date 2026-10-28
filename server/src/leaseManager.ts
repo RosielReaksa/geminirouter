@@ -135,7 +135,7 @@ export class ConcurrencyLeaseManager extends EventEmitter {
     const tryPick = (): GoogleAccount | null => {
       const candidates = accounts.filter((acc) => {
         if (exclude.has(acc.id)) return false;
-        if (acc.status === 'error') return false;
+        if (acc.status === 'error' || acc.hasValidationLink) return false;
         if (this.isAccountInCooldown(acc.id)) return false;
         const currentInFlight = this.getInFlight(acc.id);
         if (currentInFlight >= this.maxConcurrentRequestsPerAccount) return false;
