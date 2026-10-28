@@ -197,7 +197,7 @@ export class CoreClient {
       const res = await this.rawRequest<any>({
         method: 'POST',
         url: `/rpc/${cleanProc}`,
-        data: input ?? {},
+        data: input !== undefined ? { json: input } : {},
       });
       if (res && typeof res === 'object' && 'json' in res) {
         return res.json as T;

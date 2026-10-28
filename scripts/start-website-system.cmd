@@ -26,8 +26,17 @@ if "%API_KEY%"=="" (
   exit /b 1
 )
 
+REM Read custom OAuth client credentials if present (gitignored file)
+set "CUSTOM_OAUTH="
+if exist "%SITE_HOME%\OAUTH_CLIENT.env" (
+  for /f "usebackq tokens=1,* delims==" %%a in ("%SITE_HOME%\OAUTH_CLIENT.env") do (
+    if "%%a"=="ANTIGRAVITY_OAUTH_CLIENTS" set "ANTIGRAVITY_OAUTH_CLIENTS=%%~b"
+    if "%%a"=="ANTIGRAVITY_OAUTH_CLIENT_KEY" set "ANTIGRAVITY_OAUTH_CLIENT_KEY=%%~b"
+  )
+)
+
 echo [1/2] Starting patched core (profile: core-profile, gateway: 8046)...
-start "geminirouter-core" cmd /k "cd /d %CORE_REPO% && set USERPROFILE=%SITE_HOME%&& set HOME=%SITE_HOME%&& node dist\core\main.cjs"
+start "geminirouter-core" cmd /k "cd /d %CORE_REPO% && set USERPROFILE=%SITE_HOME%&& set HOME=%SITE_HOME%&& set ANTIGRAVITY_OAUTH_CLIENTS=%ANTIGRAVITY_OAUTH_CLIENTS%&& set ANTIGRAVITY_OAUTH_CLIENT_KEY=%ANTIGRAVITY_OAUTH_CLIENT_KEY%&& node dist\core\main.cjs"
 
 timeout /t 6 /nobreak >nul
 
