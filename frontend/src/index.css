@@ -1,0 +1,82 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --bg-page: #FBF9F5;
+    --bg-surface: #FFFFFF;
+    --bg-surface-subtle: #F6F3EE;
+    --border-subtle: #EAE5DE;
+    --border-hover: #DDD7CE;
+    --border-active: #C25938;
+    --text-primary: #2A2723;
+    --text-secondary: #706B65;
+    --text-muted: #9E988F;
+    --terracotta: #C25938;
+    --terracotta-hover: #B24E2E;
+    --terracotta-light: #F7EEEA;
+    --terracotta-subtle: #FAF2EF;
+    --sage: #4E7B62;
+    --sage-light: #EEF5F1;
+    --amber: #C97A1E;
+    --amber-light: #FDF6EC;
+  }
+
+  * {
+    border-color: var(--border-subtle);
+  }
+
+  body {
+    background-color: var(--bg-page);
+    color: var(--text-primary);
+    font-family: 'Plus Jakarta Sans', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  }
+
+  #root {
+    min-height: 100vh;
+    width: 100%;
+    margin: 0;
+    max-width: none;
+    border-inline: none;
+  }
+}
+
+.font-serif-editorial {
+  font-family: 'Instrument Serif', Georgia, 'Times New Roman', serif;
+}
+
+.font-sans-ui {
+  font-family: 'Plus Jakarta Sans', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+.font-mono-code {
+  font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+/* Custom soft warm shadows */
+.shadow-soft {
+  box-shadow: 0 1px 3px 0 rgba(42, 39, 35, 0.04), 0 1px 2px -1px rgba(42, 39, 35, 0.03);
+}
+
+.shadow-card {
+  box-shadow: 0 4px 16px -2px rgba(42, 39, 35, 0.05), 0 2px 6px -1px rgba(42, 39, 35, 0.03);
+}
+
+.shadow-modal {
+  box-shadow: 0 20px 40px -8px rgba(42, 39, 35, 0.12), 0 1px 3px 0 rgba(42, 39, 35, 0.05);
+}
+
+/* Smooth custom scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #E0DAD0;
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #C8C0B4;
+}

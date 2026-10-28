@@ -1,0 +1,24 @@
+# Dependencies
+node_modules/
+frontend/node_modules/
+server/node_modules/
+
+# Build outputs
+dist/
+frontend/dist/
+server/dist/
+
+# Runtime state (contains generated keys / sessions)
+.data/
+server-state.json
+*.log
+
+# Local tooling / scratch
+.v2c/
+.video_agent/
+out/
+tmpwebapp-node-modulesprepare.log
+
+# Environment
+.env
+.env.local

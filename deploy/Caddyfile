@@ -1,0 +1,84 @@
+# geminirouter Production Caddyfile
+# Automatic HTTPS via Let's Encrypt / ZeroSSL
+
+{$DOMAIN:your-domain.com} {
+    # Logging
+    log {
+        output file /var/log/caddy/geminirouter.log {
+            roll_size 10mb
+            roll_keep 10
+        }
+    }
+
+    # Compression (Gzip + Zstandard)
+    encode zstd gzip
+
+    # Security Headers
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        -Server
+    }
+
+    # =========================================================================
+    # 1. API Endpoints: /v1/* & /v1beta/*
+    # Open for AI coding tools (Claude Code, Cursor, Codex, SDKs).
+    # Protected by Bearer API Key checked against {$API_KEY} if basic header filter desired,
+    # or passed through directly to geminirouter backend for validation & metering.
+    # =========================================================================
+    @api {
+        path /v1/* /v1beta/*
+    }
+
+    # If you wish to enforce API key check directly at Caddy level, uncomment below:
+    # @unauthorized {
+    #     path /v1/* /v1beta/*
+    #     not header Authorization "Bearer {$API_KEY}"
+    # }
+    # respond @unauthorized "Unauthorized: Invalid API Key" 401
+
+    handle @api {
+        reverse_proxy 127.0.0.1:8045 {
+            header_up Host {upstream_hostport}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+
+            # Extended timeouts for long streaming AI chat completions
+            transport http {
+                response_header_timeout 600s
+                read_timeout 600s
+            }
+        }
+    }
+
+    # =========================================================================
+    # 2. Web Management Dashboard & RPC API
+    # Protected by HTTP Basic Auth so only you can access the admin dashboard.
+    # =========================================================================
+    @dashboard {
+        not path /v1/* /v1beta/*
+    }
+
+    handle @dashboard {
+        # HTTP Basic Authentication for web dashboard and management RPC
+        # Generate hash using: caddy hash-password --plaintext "YOUR_PASSWORD"
+        basic_auth {
+            {$DASHBOARD_USER:admin} {$DASHBOARD_PASSWORD_HASH:$2a$14$Z7Xo6t0N...}
+        }
+
+        # Route to Web Dashboard (Port 3000) or Core Dashboard (Port 8045)
+        reverse_proxy 127.0.0.1:3000 {
+            header_up Host {upstream_hostport}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+
+            # WebSocket support for live log streaming / RPC
+            header_up Upgrade {>Upgrade}
+            header_up Connection {>Connection}
+        }
+    }
+}

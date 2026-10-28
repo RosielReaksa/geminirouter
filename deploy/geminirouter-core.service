@@ -1,0 +1,30 @@
+[Unit]
+Description=geminirouter Core Service (Headless AI Gateway & Account Manager)
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=geminirouter
+Group=geminirouter
+WorkingDirectory=/opt/geminirouter
+Environment=NODE_ENV=production
+Environment=PORT=8045
+EnvironmentFile=-/opt/geminirouter/.env
+ExecStart=/usr/bin/node /opt/geminirouter/dist/core/main.cjs
+Restart=always
+RestartSec=5s
+
+# Resource and security limits
+LimitNOFILE=65535
+TimeoutStopSec=20s
+KillMode=mixed
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/opt/geminirouter /home/geminirouter/.config/antigravity-manager
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,31 @@
+[Unit]
+Description=geminirouter Web Bridge & Claude Dashboard
+After=network.target geminirouter-core.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=geminirouter
+Group=geminirouter
+WorkingDirectory=/opt/geminirouter
+Environment=NODE_ENV=production
+Environment=PORT=3000
+Environment=CORE_PORT=8045
+EnvironmentFile=-/opt/geminirouter/.env
+ExecStart=/usr/bin/node /opt/geminirouter/dist/web/server.cjs
+Restart=always
+RestartSec=5s
+
+# Resource and security limits
+LimitNOFILE=65535
+TimeoutStopSec=20s
+KillMode=mixed
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/opt/geminirouter /home/geminirouter/.config/antigravity-manager
+
+[Install]
+WantedBy=multi-user.target
