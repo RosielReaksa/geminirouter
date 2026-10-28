@@ -56,6 +56,39 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
     }
   };
 
+  const handleSwitchClient = async (accountId: string, appTarget: 'ide' | 'agy' | 'classic') => {
+    try {
+      const res = await fetch(`/api/accounts/${encodeURIComponent(accountId)}/switch`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ appTarget }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        onRefreshQuotas();
+      } else {
+        alert(data.error || 'Failed to switch client target');
+      }
+    } catch (err: any) {
+      alert('Error switching client: ' + err.message);
+    }
+  };
+
+  const formatResetTime = (dateStr?: string) => {
+    if (!dateStr) return '';
+    try {
+      const diffMs = new Date(dateStr).getTime() - Date.now();
+      if (diffMs <= 0) return 'reset soon';
+      const hours = Math.floor(diffMs / (1000 * 60 * 60));
+      const mins = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
+      const days = Math.floor(hours / 24);
+      if (days > 0) return `reset: ${days}d ${hours % 24}h`;
+      return `reset: ${hours}h ${mins}m`;
+    } catch {
+      return dateStr;
+    }
+  };
+
   const getQuotaTextColor = (pct: number) => {
     if (pct >= 75) return 'text-emerald-600';
     if (pct >= 40) return 'text-amber-600';
@@ -243,16 +276,26 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
                 {/* Right Actions */}
                 <div className="flex items-center gap-2">
                   {acc.hasValidationLink && (
-                    <button
-                      onClick={() => handleOpenValidationUrl(acc.id)}
-                      disabled={validatingAccountId === acc.id}
-                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-50 hover:bg-amber-100 border border-amber-300 text-xs font-semibold text-amber-800 transition-colors shadow-soft"
-                      title="Google requires account identity verification. Click to resolve."
-                    >
-                      <AlertTriangle className="w-3.5 h-3.5 text-amber-600" />
-                      <span>{validatingAccountId === acc.id ? 'Opening...' : 'Verify Account'}</span>
-                      <ExternalLink className="w-3 h-3 text-amber-600" />
-                    </button>
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        onClick={() => handleOpenValidationUrl(acc.id)}
+                        disabled={validatingAccountId === acc.id}
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-50 hover:bg-amber-100 border border-amber-300 text-xs font-semibold text-amber-800 transition-colors shadow-soft"
+                        title="Open Google security checkpoint for this account"
+                      >
+                        <AlertTriangle className="w-3.5 h-3.5 text-amber-600" />
+                        <span>{validatingAccountId === acc.id ? 'Opening...' : 'Verify ↗'}</span>
+                      </button>
+
+                      <button
+                        onClick={onOpenOAuthModal}
+                        className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-[#FAF7F2] hover:bg-[#F2ECE4] border border-[#EAE5DE] text-xs font-medium text-[#706B65] transition-colors"
+                        title="If the checkpoint link expired, re-sign in to refresh tokens"
+                      >
+                        <RefreshCw className="w-3 h-3 text-[#706B65]" />
+                        <span>Re-login</span>
+                      </button>
+                    </div>
                   )}
 
                   <div className="relative">
@@ -266,7 +309,58 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
                     </button>
 
                     {isDropdownOpen && (
-                      <div className="absolute right-0 mt-1 w-48 rounded-xl bg-white border border-[#EAE5DE] shadow-modal py-1 z-20 text-xs">
+                      <div className="absolute right-0 mt-1 w-56 rounded-xl bg-white border border-[#EAE5DE] shadow-modal py-1 z-20 text-xs">
+                        <div className="px-3 py-1.5 text-[10px] font-bold text-[#9E988F] uppercase tracking-wider border-b border-[#EAE5DE]">
+                          Switch Environment
+                        </div>
+                        <button
+                          onClick={() => {
+                            handleSwitchClient(acc.id, 'classic');
+                            setOpenDropdownId(null);
+                          }}
+                          className="w-full text-left px-3 py-2 hover:bg-[#FAF7F2] text-[#2A2723] flex items-center justify-between"
+                        >
+                          <span className="flex items-center gap-2">
+                            <Power className="w-3.5 h-3.5 text-[#C25938]" />
+                            <span>Switch to Antigravity</span>
+                          </span>
+                          {acc.clientTarget === 'Classic' && (
+                            <span className="text-[10px] text-[#4E7B62] font-bold">Active</span>
+                          )}
+                        </button>
+                        <button
+                          onClick={() => {
+                            handleSwitchClient(acc.id, 'ide');
+                            setOpenDropdownId(null);
+                          }}
+                          className="w-full text-left px-3 py-2 hover:bg-[#FAF7F2] text-[#2A2723] flex items-center justify-between"
+                        >
+                          <span className="flex items-center gap-2">
+                            <Laptop className="w-3.5 h-3.5 text-[#C25938]" />
+                            <span>Switch to Antigravity IDE</span>
+                          </span>
+                          {acc.clientTarget === 'IDE' && (
+                            <span className="text-[10px] text-[#4E7B62] font-bold">Active</span>
+                          )}
+                        </button>
+                        <button
+                          onClick={() => {
+                            handleSwitchClient(acc.id, 'agy');
+                            setOpenDropdownId(null);
+                          }}
+                          className="w-full text-left px-3 py-2 hover:bg-[#FAF7F2] text-[#2A2723] flex items-center justify-between"
+                        >
+                          <span className="flex items-center gap-2">
+                            <Terminal className="w-3.5 h-3.5 text-[#C25938]" />
+                            <span>Switch to Antigravity CLI</span>
+                          </span>
+                          {acc.clientTarget === 'CLI' && (
+                            <span className="text-[10px] text-[#4E7B62] font-bold">Active</span>
+                          )}
+                        </button>
+
+                        <div className="border-t border-[#EAE5DE] my-1"></div>
+
                         <button
                           onClick={() => {
                             onSetDefaultAccount(acc.id);
@@ -302,6 +396,43 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
                   </button>
                 </div>
               </div>
+
+              {/* Official Quota Groups from v0.26/v0.27 (Gemini Models, Claude & GPT Models) */}
+              {acc.quotaGroups && acc.quotaGroups.length > 0 && (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-3 mb-3 border-t border-[#EAE5DE]">
+                  {acc.quotaGroups.map((group, gIdx) => (
+                    <div key={gIdx} className="bg-[#FAF7F2] border border-[#EAE5DE] rounded-xl p-3 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-semibold text-[#2A2723]">{group.displayName}</span>
+                        <span className="text-[10px] text-[#9E988F]">Summary</span>
+                      </div>
+                      <div className="space-y-1.5">
+                        {group.buckets.map((b, bIdx) => {
+                          const pct = Math.round((b.remainingFraction ?? 1) * 100);
+                          const resetStr = formatResetTime(b.resetTime);
+                          return (
+                            <div key={bIdx} className="space-y-0.5">
+                              <div className="flex items-center justify-between text-[10px]">
+                                <span className="text-[#706B65] font-medium">{b.displayName}</span>
+                                <div className="flex items-center gap-2">
+                                  {resetStr && <span className="font-mono-code text-[9px] text-[#9E988F]">{resetStr}</span>}
+                                  <span className={`font-mono-code font-bold ${getQuotaTextColor(pct)}`}>{pct}%</span>
+                                </div>
+                              </div>
+                              <div className="h-1.5 w-full bg-[#EAE5DE] rounded-full overflow-hidden">
+                                <div
+                                  className={`h-full rounded-full transition-all duration-300 ${getQuotaBarBg(pct)}`}
+                                  style={{ width: `${Math.min(100, Math.max(0, pct))}%` }}
+                                />
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
 
               {/* 5-Hour Quota Grid */}
               {models5h.length > 0 && (

@@ -24,6 +24,7 @@ export interface GoogleAccount {
   lastUsedAt?: string;
   tier: 'Free Tier' | 'Google AI Studio' | 'Workspace Pay-As-You-Go';
   quotas: ModelQuota[];
+  quotaGroups?: any[];
   isDefaultRouting: boolean;
   totalRequests24h: number;
   hasValidationLink?: boolean;

@@ -26,6 +26,20 @@ export interface ModelQuota {
   isThrottled: boolean;
 }
 
+export interface QuotaBucket {
+  bucketId: string;
+  window: '5h' | 'weekly';
+  remainingFraction: number; // e.g. 0.96
+  resetTime: string; // ISO date
+  displayName: string;
+}
+
+export interface QuotaGroup {
+  displayName: string;
+  description?: string;
+  buckets: QuotaBucket[];
+}
+
 export interface GoogleAccount {
   id: string;
   email: string;
@@ -38,11 +52,12 @@ export interface GoogleAccount {
   addedAt: string;
   lastUsedAt?: string;
   tier: 'Free Tier' | 'Google AI Studio' | 'Workspace Pay-As-You-Go' | 'Google AI Pro';
-  clientTarget?: 'CLI' | 'IDE' | 'Not in use';
+  clientTarget?: 'CLI' | 'IDE' | 'Classic' | 'Not in use';
   credits?: number; // e.g. 0
   isRecommendedNext?: boolean;
   models5h?: CompactModelQuota[];
   modelsWeekly?: WeeklyQuota[];
+  quotaGroups?: QuotaGroup[];
   quotas: ModelQuota[];
   isDefaultRouting: boolean;
   totalRequests24h: number;

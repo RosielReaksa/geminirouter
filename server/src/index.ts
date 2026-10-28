@@ -205,6 +205,30 @@ export async function createServer(): Promise<{
                 }))
               : [];
 
+            const quotaGroups = Array.isArray(cv.quota?.quota_groups)
+              ? cv.quota.quota_groups.map((g: any) => ({
+                  displayName: g.display_name,
+                  description: g.description,
+                  buckets: Array.isArray(g.buckets)
+                    ? g.buckets.map((b: any) => ({
+                        bucketId: b.bucket_id,
+                        window: b.window,
+                        remainingFraction: b.remaining_fraction,
+                        resetTime: b.reset_time,
+                        displayName: b.display_name,
+                      }))
+                    : [],
+                }))
+              : undefined;
+
+            const clientTarget = cv.is_active_ide
+              ? 'IDE'
+              : cv.is_active_agy
+              ? 'CLI'
+              : cv.is_active_classic
+              ? 'Classic'
+              : 'Not in use';
+
             return {
               id: cv.id,
               email: cv.email,
@@ -214,7 +238,9 @@ export async function createServer(): Promise<{
               addedAt: cv.created_at || new Date().toISOString(),
               lastUsedAt: cv.last_used,
               tier: (cv.quota?.subscription_tier as any) || 'Google AI Studio',
+              clientTarget,
               quotas,
+              quotaGroups,
               isDefaultRouting: cv.is_active || false,
               totalRequests24h: 0,
               hasValidationLink: Boolean(cv.health?.validation?.has_verification_link),
@@ -232,6 +258,25 @@ export async function createServer(): Promise<{
     return store.getAccounts();
   });
 
+  // 2c. POST /api/accounts/:id/switch — switch client target (Classic, IDE, CLI)
+  app.post<{ Params: { id: string }; Body: { appTarget?: 'ide' | 'agy' | 'classic' } }>(
+    '/api/accounts/:id/switch',
+    async (request, reply) => {
+      const { id } = request.params;
+      const { appTarget } = request.body || {};
+      if (await coreClient.isCoreAlive()) {
+        try {
+          const target = appTarget === 'classic' ? undefined : appTarget;
+          await coreClient.callRpc('accountSwitch', { accountId: id, appTarget: target });
+          return { success: true };
+        } catch (err: any) {
+          return reply.code(400).send({ success: false, error: err.message || 'Failed to switch account' });
+        }
+      }
+      return reply.code(503).send({ success: false, error: 'Core offline' });
+    }
+  );
+
   // 2b. GET /api/accounts/:id/validation-url — resolves Google account checkpoint URL
   app.get<{ Params: { id: string } }>('/api/accounts/:id/validation-url', async (request, reply) => {
     const { id } = request.params;
@@ -239,7 +284,16 @@ export async function createServer(): Promise<{
       try {
         const res = await coreClient.callRpc<any>('accountValidationUrl', { accountId: id });
         if (res && res.url) {
-          return { ok: true, url: res.url };
+          let email = store.getAccounts().find((a) => a.id === id)?.email;
+          if (!email) {
+            const views = await coreClient.callRpc<any[]>('accountViews');
+            email = views?.find((v: any) => v.id === id)?.email;
+          }
+          let finalUrl = res.url;
+          if (email) {
+            finalUrl = res.url + '&Email=' + encodeURIComponent(email) + '&login_hint=' + encodeURIComponent(email);
+          }
+          return { ok: true, url: finalUrl };
         }
       } catch (err) {
         app.log.warn(`accountValidationUrl RPC failed for account ${id}`);
@@ -253,6 +307,7 @@ export async function createServer(): Promise<{
   app.post('/api/accounts/refresh', async () => {
     if (await coreClient.isCoreAlive()) {
       try {
+        await coreClient.callRpc('monitor.forcePoll', {});
         await coreClient.callRpc('accountRefreshQuota', {});
       } catch {
         app.log.warn('accountRefreshQuota RPC failed; returning last known accounts');
