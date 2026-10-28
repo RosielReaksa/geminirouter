@@ -82,7 +82,9 @@ export const App: React.FC = () => {
     setIsRefreshing(true);
     try {
       const { data, isLiveApi: live } = await api.refreshAccounts();
-      setAccounts(data);
+      if (data && Array.isArray(data) && data.length > 0) {
+        setAccounts(data);
+      }
       setIsLiveApi(live);
       showNotification('Google account quotas updated successfully.');
     } catch {
@@ -209,6 +211,7 @@ export const App: React.FC = () => {
               onRefreshQuotas={handleRefreshQuotas}
               onDeleteAccount={handleDeleteAccount}
               onSetDefaultAccount={handleSetDefaultAccount}
+              onUpdateAccounts={setAccounts}
               isRefreshing={isRefreshing}
             />
           )}

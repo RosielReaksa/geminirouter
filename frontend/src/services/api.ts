@@ -60,7 +60,8 @@ export class ApiClient {
   ): Promise<{ data: T; isLiveApi: boolean }> {
     try {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 1800);
+      // Allow up to 35 seconds for live LLM completions and Google quota probes
+      const timeoutId = setTimeout(() => controller.abort(), 35000);
 
       const res = await fetch(endpoint, {
         ...options,
@@ -101,22 +102,32 @@ export class ApiClient {
     );
   }
 
-  // 2. GET /api/accounts
+  private cachedAccounts: GoogleAccount[] = [];
+
+  // 2. GET /api/accounts — real accounts from core pool only (never demo accounts)
   async getAccounts(): Promise<{ data: GoogleAccount[]; isLiveApi: boolean }> {
-    return this.fetchWithFallback<GoogleAccount[]>(
+    const res = await this.fetchWithFallback<GoogleAccount[]>(
       '/api/accounts',
       { method: 'GET' },
-      () => []
+      () => this.cachedAccounts
     );
+    if (res.data && Array.isArray(res.data) && res.data.length > 0) {
+      this.cachedAccounts = res.data;
+    }
+    return res;
   }
 
-  // 3. POST /api/accounts/refresh
+  // 3. POST /api/accounts/refresh — calls core to refresh real quotas
   async refreshAccounts(): Promise<{ data: GoogleAccount[]; isLiveApi: boolean }> {
-    return this.fetchWithFallback<GoogleAccount[]>(
+    const res = await this.fetchWithFallback<GoogleAccount[]>(
       '/api/accounts/refresh',
       { method: 'POST' },
-      () => []
+      () => this.cachedAccounts
     );
+    if (res.data && Array.isArray(res.data) && res.data.length > 0) {
+      this.cachedAccounts = res.data;
+    }
+    return res;
   }
 
   // 4. POST /api/oauth/start

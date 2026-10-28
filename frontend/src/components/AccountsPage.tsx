@@ -15,6 +15,7 @@ import {
   Zap,
 } from 'lucide-react';
 import { GoogleAccount } from '../types';
+import { api } from '../services/api';
 
 interface AccountsPageProps {
   accounts: GoogleAccount[];
@@ -24,6 +25,7 @@ interface AccountsPageProps {
   onRefreshQuotas: () => void;
   onDeleteAccount: (id: string) => void;
   onSetDefaultAccount: (id: string) => void;
+  onUpdateAccounts?: (accounts: GoogleAccount[]) => void;
   isRefreshing: boolean;
 }
 
@@ -35,6 +37,7 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
   onRefreshQuotas,
   onDeleteAccount,
   onSetDefaultAccount,
+  onUpdateAccounts,
   isRefreshing,
 }) => {
   const [openDropdownId, setOpenDropdownId] = useState<string | null>(null);
@@ -50,11 +53,13 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
         body: JSON.stringify({ model: 'gemini-2.5-flash' }),
       });
       const data = await res.json();
-      if (data.ok) {
-        onRefreshQuotas();
-      } else {
+      if (!data.ok) {
         alert(`Test call failed: ${data.error || 'Unknown error'}`);
-        onRefreshQuotas();
+      }
+      // Silently fetch fresh accounts data without wiping state
+      const { data: freshList } = await api.getAccounts();
+      if (freshList && freshList.length > 0 && onUpdateAccounts) {
+        onUpdateAccounts(freshList);
       }
     } catch (err: any) {
       alert('Error testing account: ' + err.message);
