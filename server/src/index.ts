@@ -15,6 +15,7 @@ import { derivePoolState, bridgeToCoreProxy, coreProxyToBridge } from './pool-st
 import { readCoreProxyConfig, applyCoreProxyConfig } from './coreConfig.js';
 import { ConcurrencyLeaseManager } from './leaseManager.js';
 import { handleV1ProxyRequest } from './v1Proxy.js';
+import { AccountTester, type AccountTestResult } from './accountTester.js';
 
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
@@ -39,6 +40,7 @@ export async function createServer(): Promise<{
   coreClient: CoreClient;
   store: LocalStateStore;
   leaseManager: ConcurrencyLeaseManager;
+  accountTester: AccountTester;
 }> {
   const app = Fastify({
     logger: {
@@ -56,6 +58,9 @@ export async function createServer(): Promise<{
     capacityPolicy: initialCfg.capacityPolicy,
     queueTimeoutMs: initialCfg.queueTimeoutMs,
   });
+  const accountTester = new AccountTester(coreClient, store, () => resolveGateway());
+  // Start background auto-test scheduler: calls test model on every account every 5 hours!
+  accountTester.startAutoTestScheduler(5);
 
   // Enable CORS
   await app.register(fastifyCors, {
@@ -229,6 +234,13 @@ export async function createServer(): Promise<{
               ? 'Classic'
               : 'Not in use';
 
+            const testRes = accountTester.getLastResult(cv.id);
+            // If the account recently passed a live test call, clear the validation warning
+            const hasValidationLink =
+              testRes?.ok === true
+                ? false
+                : Boolean(cv.health?.validation?.has_verification_link);
+
             return {
               id: cv.id,
               email: cv.email,
@@ -243,8 +255,9 @@ export async function createServer(): Promise<{
               quotaGroups,
               isDefaultRouting: cv.is_active || false,
               totalRequests24h: 0,
-              hasValidationLink: Boolean(cv.health?.validation?.has_verification_link),
+              hasValidationLink,
               statusReason: cv.status_reason || undefined,
+              lastTestResult: testRes,
             };
           });
           store.setAccounts(mapped);
@@ -257,25 +270,6 @@ export async function createServer(): Promise<{
 
     return store.getAccounts();
   });
-
-  // 2c. POST /api/accounts/:id/switch — switch client target (Classic, IDE, CLI)
-  app.post<{ Params: { id: string }; Body: { appTarget?: 'ide' | 'agy' | 'classic' } }>(
-    '/api/accounts/:id/switch',
-    async (request, reply) => {
-      const { id } = request.params;
-      const { appTarget } = request.body || {};
-      if (await coreClient.isCoreAlive()) {
-        try {
-          const target = appTarget === 'classic' ? undefined : appTarget;
-          await coreClient.callRpc('accountSwitch', { accountId: id, appTarget: target });
-          return { success: true };
-        } catch (err: any) {
-          return reply.code(400).send({ success: false, error: err.message || 'Failed to switch account' });
-        }
-      }
-      return reply.code(503).send({ success: false, error: 'Core offline' });
-    }
-  );
 
   // 2b. GET /api/accounts/:id/validation-url — resolves Google account checkpoint URL
   app.get<{ Params: { id: string } }>('/api/accounts/:id/validation-url', async (request, reply) => {
@@ -302,15 +296,63 @@ export async function createServer(): Promise<{
     return reply.code(404).send({ ok: false, error: 'No validation URL available for this account' });
   });
 
-  // 3. POST /api/accounts/refresh — real refresh via the core; never mutates
-  // quota numbers locally when the core is unreachable.
+  // 2c. POST /api/accounts/:id/switch — switch client target (Classic, IDE, CLI)
+  app.post<{ Params: { id: string }; Body: { appTarget?: 'ide' | 'agy' | 'classic' } }>(
+    '/api/accounts/:id/switch',
+    async (request, reply) => {
+      const { id } = request.params;
+      const { appTarget } = request.body || {};
+      if (await coreClient.isCoreAlive()) {
+        try {
+          const target = appTarget === 'classic' ? undefined : appTarget;
+          await coreClient.callRpc('accountSwitch', { accountId: id, appTarget: target });
+          return { success: true };
+        } catch (err: any) {
+          return reply.code(400).send({ success: false, error: err.message || 'Failed to switch account' });
+        }
+      }
+      return reply.code(503).send({ success: false, error: 'Core offline' });
+    }
+  );
+
+  // 2d. POST /api/accounts/:id/test — test model call specifically targeting this account & refresh quotas
+  app.post<{ Params: { id: string }; Body?: { model?: string } }>(
+    '/api/accounts/:id/test',
+    async (request, reply) => {
+      const { id } = request.params;
+      const model = request.body?.model || 'gemini-2.5-flash';
+      const accounts = await (app as any).inject({ method: 'GET', url: '/api/accounts' });
+      const list: GoogleAccount[] = JSON.parse(accounts.body);
+      const acc = list.find((a) => a.id === id);
+
+      if (!acc) {
+        return reply.code(404).send({ ok: false, error: 'Account not found' });
+      }
+
+      const result = await accountTester.testAndRefreshAccount(acc, model);
+      return result;
+    }
+  );
+
+  // 2e. POST /api/accounts/test-all — test all accounts in pool & refresh all quotas
+  app.post<{ Body?: { model?: string } }>('/api/accounts/test-all', async (request) => {
+    const model = request.body?.model || 'gemini-2.5-flash';
+    const results = await accountTester.testAndRefreshAll(model);
+    return { success: true, count: results.length, results };
+  });
+
+  // 2f. GET /api/accounts/test-results — get last test results
+  app.get('/api/accounts/test-results', async () => {
+    return accountTester.getAllLastResults();
+  });
+
+  // 3. POST /api/accounts/refresh — test all accounts and refresh quotas from core
   app.post('/api/accounts/refresh', async () => {
     if (await coreClient.isCoreAlive()) {
       try {
-        await coreClient.callRpc('monitor.forcePoll', {});
-        await coreClient.callRpc('accountRefreshQuota', {});
+        await accountTester.testAndRefreshAll();
       } catch {
-        app.log.warn('accountRefreshQuota RPC failed; returning last known accounts');
+        app.log.warn('testAndRefreshAll failed; returning last known accounts');
       }
       const accountsAfter = await (app as any).inject({
         method: 'GET',
@@ -689,7 +731,7 @@ export async function createServer(): Promise<{
     });
   }
 
-  return { app, coreClient, store, leaseManager };
+  return { app, coreClient, store, leaseManager, accountTester };
 }
 
 async function main() {

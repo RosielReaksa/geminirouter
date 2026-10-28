@@ -12,6 +12,7 @@ import {
   LayoutList,
   AlertTriangle,
   ExternalLink,
+  Zap,
 } from 'lucide-react';
 import { GoogleAccount } from '../types';
 
@@ -38,6 +39,29 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
 }) => {
   const [openDropdownId, setOpenDropdownId] = useState<string | null>(null);
   const [validatingAccountId, setValidatingAccountId] = useState<string | null>(null);
+  const [testingAccountId, setTestingAccountId] = useState<string | null>(null);
+
+  const handleTestAccount = async (accountId: string) => {
+    setTestingAccountId(accountId);
+    try {
+      const res = await fetch(`/api/accounts/${encodeURIComponent(accountId)}/test`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: 'gemini-2.5-flash' }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        onRefreshQuotas();
+      } else {
+        alert(`Test call failed: ${data.error || 'Unknown error'}`);
+        onRefreshQuotas();
+      }
+    } catch (err: any) {
+      alert('Error testing account: ' + err.message);
+    } finally {
+      setTestingAccountId(null);
+    }
+  };
 
   const handleOpenValidationUrl = async (accountId: string) => {
     setValidatingAccountId(accountId);
@@ -126,7 +150,7 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
             className="flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl border border-[#EAE5DE] bg-white hover:bg-[#FAF7F2] text-xs font-medium text-[#504C46] transition-colors shadow-soft disabled:opacity-50"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin' : ''}`} />
-            <span>{isRefreshing ? 'Refreshing...' : 'Refresh Quotas'}</span>
+            <span>{isRefreshing ? 'Testing & Refreshing...' : 'Refresh Quotas & Test All'}</span>
           </button>
 
           <button
@@ -265,12 +289,40 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
                           </span>
                         );
                       })()}
+
+                      {acc.lastTestResult && (
+                        <>
+                          <span className="text-[#DDD7CE]">·</span>
+                          <span
+                            className={`inline-flex items-center gap-1 text-[11px] font-mono-code px-2 py-0.5 rounded border ${
+                              acc.lastTestResult.ok
+                                ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                                : 'bg-red-50 text-red-700 border-red-200'
+                            }`}
+                            title={`Last test call at ${acc.lastTestResult.timestamp} (${acc.lastTestResult.latencyMs}ms)`}
+                          >
+                            <span className={`w-1.5 h-1.5 rounded-full ${acc.lastTestResult.ok ? 'bg-emerald-500' : 'bg-red-500'}`} />
+                            <span>{acc.lastTestResult.ok ? `Working (${acc.lastTestResult.latencyMs}ms)` : 'Call Failed'}</span>
+                          </span>
+                        </>
+                      )}
                     </div>
                   </div>
                 </div>
 
                 {/* Right Actions */}
                 <div className="flex items-center gap-2">
+                  {/* Test Call & Refresh Button for this Account */}
+                  <button
+                    onClick={() => handleTestAccount(acc.id)}
+                    disabled={testingAccountId === acc.id}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#FAF7F2] hover:bg-[#F2ECE4] border border-[#EAE5DE] text-xs font-semibold text-[#504C46] transition-colors shadow-soft disabled:opacity-50"
+                    title="Make a real test call specifically through this account to check if it is working, then refresh its quotas"
+                  >
+                    <Zap className={`w-3.5 h-3.5 ${testingAccountId === acc.id ? 'animate-spin text-[#C25938]' : 'text-amber-600'}`} />
+                    <span>{testingAccountId === acc.id ? 'Testing...' : 'Test & Refresh'}</span>
+                  </button>
+
                   {acc.hasValidationLink && (
                     <div className="flex items-center gap-1.5">
                       <button
@@ -401,7 +453,7 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
                             {m.name}
                           </span>
                           <span className="font-mono-code text-[9px] shrink-0 text-[#9E988F]">
-                            {m.reset}
+                            {formatResetTime(m.reset)}
                           </span>
                           <span className={`font-mono-code text-[10px] font-bold shrink-0 ${getQuotaTextColor(m.percentage)}`}>
                             {m.percentage}%
@@ -434,7 +486,7 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
                             {w.name}
                           </span>
                           <span className="font-mono-code text-[9px] shrink-0 text-[#9E988F]">
-                            {w.reset}
+                            {formatResetTime(w.reset)}
                           </span>
                           <span className={`font-mono-code text-[10px] font-bold shrink-0 ${getQuotaTextColor(w.percentage)}`}>
                             {w.percentage}%

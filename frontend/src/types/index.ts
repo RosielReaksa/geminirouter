@@ -40,6 +40,17 @@ export interface QuotaGroup {
   buckets: QuotaBucket[];
 }
 
+export interface AccountTestResult {
+  accountId: string;
+  email: string;
+  ok: boolean;
+  model: string;
+  latencyMs: number;
+  sample?: string;
+  error?: string;
+  timestamp: string;
+}
+
 export interface GoogleAccount {
   id: string;
   email: string;
@@ -63,6 +74,7 @@ export interface GoogleAccount {
   totalRequests24h: number;
   hasValidationLink?: boolean;
   statusReason?: string;
+  lastTestResult?: AccountTestResult;
 }
 
 export interface GatewayStatus {
