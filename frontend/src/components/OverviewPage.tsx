@@ -200,7 +200,7 @@ export const OverviewPage: React.FC<OverviewPageProps> = ({
               </span>
             </div>
 
-            {activeAccount && (
+            {activeAccount ? (
               <div className="space-y-4">
                 <div className="flex items-center gap-3">
                   <img
@@ -223,18 +223,22 @@ export const OverviewPage: React.FC<OverviewPageProps> = ({
 
                 <div className="bg-[#FAF7F2] border border-[#EAE5DE] rounded-xl p-3 text-xs space-y-2">
                   <div className="flex justify-between text-[#706B65]">
-                    <span>Gemini 2.5 Pro (5h)</span>
-                    <span className="font-mono-code font-semibold text-[#2A2723]">
-                      {activeAccount.quotas[0]?.requestsIn5h} / {activeAccount.quotas[0]?.limitIn5h} reqs
-                    </span>
-                  </div>
-                  <div className="flex justify-between text-[#706B65]">
-                    <span>Gemini 2.5 Flash (5h)</span>
-                    <span className="font-mono-code font-semibold text-[#2A2723]">
-                      {activeAccount.quotas[1]?.requestsIn5h} / {activeAccount.quotas[1]?.limitIn5h} reqs
+                    <span>Primary Account</span>
+                    <span className="font-mono-code font-semibold text-[#4E7B62]">
+                      Ready
                     </span>
                   </div>
                 </div>
+              </div>
+            ) : (
+              <div className="py-6 text-center text-xs text-[#9E988F]">
+                <p>No account connected yet.</p>
+                <button
+                  onClick={onNavigateToAccounts}
+                  className="mt-2 text-xs font-semibold text-[#C25938] hover:underline"
+                >
+                  Connect account →
+                </button>
               </div>
             )}
           </div>

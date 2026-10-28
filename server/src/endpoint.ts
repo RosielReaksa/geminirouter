@@ -16,24 +16,28 @@ export function getLocalCoreEndpoint(): string {
   }
 
   if (process.platform === 'win32') {
-    // 2. Auto-discover active non-desktop core pipes if available
-    try {
-      const desktopPipeSuffix = '2a014b31fabdb803';
-      const pipes = fs.readdirSync('//./pipe/').filter((p) =>
-        p.toLowerCase().startsWith('antigravity-manager-core-v1-')
-      );
+    const home = process.env.USERPROFILE || process.env.HOME || os.homedir();
+    const isCustomHome = Boolean(process.env.USERPROFILE && process.env.USERPROFILE !== os.homedir());
 
-      // Prefer isolated/parallel core pipe over the installed desktop app pipe
-      const isolatedPipe = pipes.find((p) => !p.includes(desktopPipeSuffix));
-      if (isolatedPipe) {
-        return `\\\\.\\pipe\\${isolatedPipe}`;
+    // Only auto-discover pipes if running in standard home, not in test isolation
+    if (!isCustomHome) {
+      try {
+        const desktopPipeSuffix = '2a014b31fabdb803';
+        const pipes = fs.readdirSync('//./pipe/').filter((p) =>
+          p.toLowerCase().startsWith('antigravity-manager-core-v1-')
+        );
+
+        // Prefer isolated/parallel core pipe over the installed desktop app pipe
+        const isolatedPipe = pipes.find((p) => !p.includes(desktopPipeSuffix));
+        if (isolatedPipe) {
+          return `\\\\.\\pipe\\${isolatedPipe}`;
+        }
+      } catch {
+        // fallback
       }
-    } catch {
-      // fallback
     }
 
     // 3. Fallback to hash of home directory
-    const home = process.env.USERPROFILE || process.env.HOME || os.homedir();
     const userScope = crypto
       .createHash('sha256')
       .update(home.toLowerCase())

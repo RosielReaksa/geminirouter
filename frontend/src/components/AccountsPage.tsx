@@ -86,43 +86,51 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
         </div>
       </div>
 
-      {/* Account Cards */}
-      <div className="space-y-4">
-        {accounts.map((acc, accIndex) => {
-          const isDropdownOpen = openDropdownId === acc.id;
+      {/* Account Cards or Clean Empty State */}
+      {accounts.length === 0 ? (
+        <div className="bg-white rounded-2xl border border-[#EAE5DE] p-12 text-center shadow-soft">
+          <div className="w-12 h-12 rounded-2xl bg-[#FAF2EF] text-[#C25938] flex items-center justify-center mx-auto mb-4 border border-[#F2DDD5]">
+            <Users className="w-6 h-6" />
+          </div>
+          <h3 className="font-serif-editorial text-2xl font-bold text-[#2A2723]">
+            No Google Accounts Connected
+          </h3>
+          <p className="text-sm text-[#706B65] mt-1.5 max-w-md mx-auto leading-relaxed">
+            Your pool is clean and empty. Click <strong>Add Google Account</strong> to sign in and begin pooling quotas.
+          </p>
+          <button
+            onClick={onOpenOAuthModal}
+            className="mt-5 inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-[#C25938] hover:bg-[#B24E2E] text-white text-xs font-semibold transition-all shadow-soft"
+          >
+            <Plus className="w-4 h-4" />
+            <span>Add Google Account</span>
+          </button>
+        </div>
+      ) : (
+        <div className="space-y-4">
+          {accounts.map((acc, accIndex) => {
+            const isDropdownOpen = openDropdownId === acc.id;
 
-          const defaultModels5h = [
-            { name: 'Claude Sonnet 5 5', reset: '4h 31m', percentage: 100 },
-            { name: 'Gpt Oss 120b', reset: '4h 31m', percentage: 100 },
-            { name: 'Claude Opus 5 5', reset: '4h 31m', percentage: 100 },
-            { name: 'Gemini 3 Flash', reset: '4h 32m', percentage: accIndex === 3 ? 39 : 93 },
-            { name: 'Gemini 3.5 Flash Lite', reset: '4h 32m', percentage: accIndex === 3 ? 39 : 93 },
-            { name: 'Gemini 3.8 Flash', reset: '4h 32m', percentage: accIndex === 3 ? 39 : 93 },
-            { name: 'Gemini Flash Lite', reset: '4h 32m', percentage: accIndex === 3 ? 39 : 93 },
-            { name: 'Gemini 2.5 Pro', reset: '4h 32m', percentage: accIndex === 3 ? 39 : 93 },
-            { name: 'Gemini Flash Image', reset: '4h 32m', percentage: accIndex === 3 ? 39 : 93 },
-          ];
+            const models5h =
+              acc.models5h && acc.models5h.length > 0
+                ? acc.models5h
+                : (acc.quotas || []).map((q) => ({
+                    name: q.modelName,
+                    reset: q.resetTime5h,
+                    percentage: q.limitIn5h > 0 ? Math.round(((q.limitIn5h - q.requestsIn5h) / q.limitIn5h) * 100) : 100,
+                  }));
 
-          const defaultModelsWeekly = [
-            { name: 'Gemini', reset: '6d 7h', percentage: accIndex === 3 ? 48 : 98 },
-            { name: 'Claude and GPT', reset: '6d 18h', percentage: accIndex === 3 ? 77 : 55 },
-            { name: 'Gemini 4 Argon', reset: '6d 23h', percentage: 100 },
-          ];
+            const modelsWeekly = acc.modelsWeekly && acc.modelsWeekly.length > 0 ? acc.modelsWeekly : [];
 
-          const models5h =
-            acc.models5h && acc.models5h.length > 0 ? acc.models5h : defaultModels5h;
-          const modelsWeekly =
-            acc.modelsWeekly && acc.modelsWeekly.length > 0 ? acc.modelsWeekly : defaultModelsWeekly;
-
-          return (
-            <div
-              key={acc.id}
-              className={`bg-white rounded-2xl border p-5 shadow-soft transition-all ${
-                acc.isDefaultRouting
-                  ? 'border-[#C25938]/40 ring-1 ring-[#C25938]/20'
-                  : 'border-[#EAE5DE] hover:border-[#DDD7CE]'
-              }`}
-            >
+            return (
+              <div
+                key={acc.id}
+                className={`bg-white rounded-2xl border p-5 shadow-soft transition-all ${
+                  acc.isDefaultRouting
+                    ? 'border-[#C25938]/40 ring-1 ring-[#C25938]/20'
+                    : 'border-[#EAE5DE] hover:border-[#DDD7CE]'
+                }`}
+              >
               {/* Account Header */}
               <div className="flex items-start justify-between gap-3 mb-3">
                 <div className="flex items-center gap-3">
@@ -322,10 +330,11 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
                   </div>
                 </div>
               )}
-            </div>
-          );
-        })}
-      </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 };

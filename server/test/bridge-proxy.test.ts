@@ -77,8 +77,25 @@ before(async () => {
   // Isolated HOME so the bridge cannot read the real core profile or hit the
   // real gateway; everything is pinned to the fake upstream via env.
   tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'gr-test-home-'));
-  bridge = spawn(process.execPath, ['dist/index.js'], {
-    cwd: path.resolve(import.meta.dirname, '..'),
+  const testDataDir = path.join(tempHome, '.data');
+  fs.mkdirSync(testDataDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(testDataDir, 'server-state.json'),
+    JSON.stringify({
+      accounts: [
+        {
+          id: 'test-acc-1',
+          email: 'test1@example.com',
+          name: 'Test 1',
+          status: 'active',
+          quotas: [{ modelId: 'gemini-2.5-pro', limitIn5h: 50, requestsIn5h: 0, resetTime5h: 'in 4h' }],
+        },
+      ],
+    })
+  );
+
+  bridge = spawn(process.execPath, [path.resolve(import.meta.dirname, '../dist/index.js')], {
+    cwd: tempHome,
     stdio: ['ignore', 'pipe', 'pipe'],
     env: {
       ...process.env,
@@ -90,6 +107,7 @@ before(async () => {
       GEMINIROUTER_GATEWAY_PORT: String(UPSTREAM_PORT),
       GEMINIROUTER_GATEWAY_API_KEY: 'test-key',
       GEMINIROUTER_ADMIN_PASSWORD: '',
+      ANTIGRAVITY_CORE_PIPE: '\\\\.\\pipe\\antigravity-test-offline-pipe',
     },
   });
   bridge.stderr.on('data', () => {}); // swallow logs

@@ -99,6 +99,9 @@ export interface GatewayConfig {
   enableThinkingTagPassthrough: boolean;
   rateLimitPerMinute: number;
   logRetentionDays: number;
+  maxConcurrentRequestsPerAccount?: number;
+  capacityPolicy?: 'queue' | 'reject_429';
+  queueTimeoutMs?: number;
 }
 
 export interface OAuthStartResponse {

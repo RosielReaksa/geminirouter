@@ -16,6 +16,14 @@ import {
   MOCK_OAUTH_START_DATA,
 } from './mockData';
 
+// Clean any legacy demo accounts from earlier builds
+try {
+  localStorage.removeItem('geminirouter_accounts_v1');
+  localStorage.removeItem('geminirouter_traffic_v1');
+} catch {
+  // ignore
+}
+
 // Local storage keys for persistent demo/mock modifications
 const STORAGE_KEYS = {
   ACCOUNTS: 'geminirouter_accounts_v1',
@@ -98,12 +106,7 @@ export class ApiClient {
     return this.fetchWithFallback<GoogleAccount[]>(
       '/api/accounts',
       { method: 'GET' },
-      () => {
-        return getStored<GoogleAccount[]>(
-          STORAGE_KEYS.ACCOUNTS,
-          INITIAL_MOCK_ACCOUNTS
-        );
-      }
+      () => []
     );
   }
 
@@ -112,26 +115,7 @@ export class ApiClient {
     return this.fetchWithFallback<GoogleAccount[]>(
       '/api/accounts/refresh',
       { method: 'POST' },
-      () => {
-        const current = getStored<GoogleAccount[]>(
-          STORAGE_KEYS.ACCOUNTS,
-          INITIAL_MOCK_ACCOUNTS
-        );
-        // Slightly update quota usage to simulate dynamic refresh
-        const refreshed = current.map((acc) => ({
-          ...acc,
-          lastUsedAt: new Date().toISOString(),
-          quotas: acc.quotas.map((q) => ({
-            ...q,
-            requestsIn5h: Math.min(
-              q.limitIn5h,
-              Math.max(2, q.requestsIn5h + Math.floor(Math.random() * 3) - 1)
-            ),
-          })),
-        }));
-        setStored(STORAGE_KEYS.ACCOUNTS, refreshed);
-        return refreshed;
-      }
+      () => []
     );
   }
 
