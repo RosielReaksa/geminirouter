@@ -52,7 +52,7 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
       const res = await fetch(`/api/accounts/${encodeURIComponent(accountId)}/test`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: 'gemini-2.5-flash' }),
+        body: JSON.stringify({ model: 'gemini-3.8-flash-low' }),
       });
       const data = await res.json();
       if (data.ok) {
@@ -320,12 +320,20 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
                             className={`inline-flex items-center gap-1 text-[11px] font-mono-code px-2 py-0.5 rounded border ${
                               acc.lastTestResult.ok
                                 ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                                : acc.lastTestResult.requiresValidation
+                                ? 'bg-amber-50 text-amber-700 border-amber-300'
                                 : 'bg-red-50 text-red-700 border-red-200'
                             }`}
                             title={`Last test call at ${acc.lastTestResult.timestamp} (${acc.lastTestResult.latencyMs}ms)`}
                           >
-                            <span className={`w-1.5 h-1.5 rounded-full ${acc.lastTestResult.ok ? 'bg-emerald-500' : 'bg-red-500'}`} />
-                            <span>{acc.lastTestResult.ok ? `Working (${acc.lastTestResult.latencyMs}ms)` : 'Call Failed'}</span>
+                            <span className={`w-1.5 h-1.5 rounded-full ${acc.lastTestResult.ok ? 'bg-emerald-500' : acc.lastTestResult.requiresValidation ? 'bg-amber-500' : 'bg-red-500'}`} />
+                            <span>
+                              {acc.lastTestResult.ok
+                                ? `Working (${acc.lastTestResult.latencyMs}ms)`
+                                : acc.lastTestResult.requiresValidation
+                                ? 'Needs Google Verification'
+                                : 'Call Failed'}
+                            </span>
                           </span>
                         </>
                       )}
@@ -401,7 +409,7 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
               </div>
 
               {/* Google Security Checkpoint Alert Bar */}
-              {acc.hasValidationLink && (
+              {(acc.hasValidationLink || acc.lastTestResult?.requiresValidation) && (
                 <div className="bg-amber-50/90 border border-amber-300 rounded-xl p-3 mb-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-amber-900 shadow-sm animate-in fade-in">
                   <div className="flex items-center gap-2.5">
                     <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />

@@ -44,6 +44,8 @@ export interface AccountTestResult {
   accountId: string;
   email: string;
   ok: boolean;
+  requiresValidation?: boolean;
+  validationUrl?: string;
   model: string;
   latencyMs: number;
   sample?: string;

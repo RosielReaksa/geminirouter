@@ -255,6 +255,33 @@ export async function handleV1ProxyRequest(
         let cooldownMs = 2 * 60 * 1000;
         if (outcome.status === 403) {
           cooldownMs = 10 * 60 * 1000; // 10 minutes quarantine for 403 verification
+          let freshLink: string | undefined;
+          const details = outcome.errorBody?.error?.details || outcome.errorBody?.details;
+          if (Array.isArray(details)) {
+            for (const item of details) {
+              if (item?.metadata?.validation_url) {
+                freshLink = item.metadata.validation_url;
+                break;
+              }
+              if (Array.isArray(item?.links)) {
+                for (const l of item.links) {
+                  if (l?.url && typeof l.url === 'string' && l.url.includes('continue')) {
+                    freshLink = l.url;
+                    break;
+                  }
+                }
+              }
+            }
+          }
+          if (!freshLink) {
+            const raw = JSON.stringify(outcome.errorBody || {});
+            const m = raw.match(/https:\/\/accounts\.google\.com\/[^\s"'\\]+/);
+            if (m) freshLink = m[0];
+          }
+          if (freshLink) {
+            account.hasValidationLink = true;
+            account.validationUrl = freshLink;
+          }
         } else {
           const retrySec = parseInt(lastRetryAfter, 10);
           if (Number.isFinite(retrySec) && retrySec > 0) {

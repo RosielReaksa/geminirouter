@@ -50,7 +50,7 @@ export class AccountTester {
    */
   async testAndRefreshAccount(
     account: GoogleAccount,
-    model: string = 'gemini-2.5-flash'
+    model: string = 'gemini-3.8-flash-low'
   ): Promise<AccountTestResult> {
     const { port, apiKey } = this.resolveGateway();
     const startedAt = Date.now();
@@ -75,6 +75,7 @@ export class AccountTester {
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${apiKey}`,
             'x-account-id': account.id,
+            'x-single-account': 'true', // Test ONLY this account, do not failover!
           },
         }
       );
@@ -98,19 +99,40 @@ export class AccountTester {
           if (
             item?.reason === 'VALIDATION_REQUIRED' ||
             item?.metadata?.validation_url ||
-            item?.['@type']?.includes('ErrorInfo')
+            item?.['@type']?.includes('ErrorInfo') ||
+            item?.['@type']?.includes('Help')
           ) {
             requiresValidation = true;
             if (item?.metadata?.validation_url) {
               freshValidationUrl = item.metadata.validation_url;
+            } else if (Array.isArray(item?.links)) {
+              for (const l of item.links) {
+                if (l?.url && typeof l.url === 'string' && l.url.includes('continue')) {
+                  freshValidationUrl = l.url;
+                  break;
+                }
+              }
             }
           }
         }
       }
 
+      const rawString = typeof data === 'string' ? data : JSON.stringify(data || {});
       const msg = data?.error?.message || data?.message || err?.message || 'Request failed';
-      if (msg.includes('Verify your account') || msg.includes('VALIDATION_REQUIRED')) {
+      if (
+        msg.includes('Verify your account') ||
+        msg.includes('VALIDATION_REQUIRED') ||
+        rawString.includes('VALIDATION_REQUIRED')
+      ) {
         requiresValidation = true;
+      }
+
+      // Regex fallback to extract any Google continue validation URL
+      if (!freshValidationUrl && (requiresValidation || rawString.includes('signin/continue'))) {
+        const match = rawString.match(/https:\/\/accounts\.google\.com\/[^\s"'\\]+/);
+        if (match) {
+          freshValidationUrl = match[0];
+        }
       }
 
       if (requiresValidation) {
@@ -194,7 +216,7 @@ export class AccountTester {
   /**
    * Test and refresh all accounts in the pool sequentially.
    */
-  async testAndRefreshAll(model: string = 'gemini-2.5-flash'): Promise<AccountTestResult[]> {
+  async testAndRefreshAll(model: string = 'gemini-3.8-flash-low'): Promise<AccountTestResult[]> {
     const accounts = this.store.getAccounts();
     const results: AccountTestResult[] = [];
 
