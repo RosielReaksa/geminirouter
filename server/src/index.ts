@@ -277,11 +277,28 @@ export async function createServer(): Promise<{
   // 2b. GET /api/accounts/:id/validation-url — resolves fresh, live Google account checkpoint URL
   app.get<{ Params: { id: string } }>('/api/accounts/:id/validation-url', async (request, reply) => {
     const { id } = request.params;
-    let acc = store.getAccounts().find((a) => a.id === id);
-    if (!acc) {
-      const accountsRes = await (app as any).inject({ method: 'GET', url: '/api/accounts' });
-      const list: GoogleAccount[] = JSON.parse(accountsRes.body);
-      acc = list.find((a) => a.id === id);
+    let acc: GoogleAccount | undefined = store.getAccounts().find((a) => a.id === id);
+
+    if (!acc && (await coreClient.isCoreAlive())) {
+      try {
+        const views = await coreClient.callRpc<any[]>('accountViews');
+        const v = views?.find((x: any) => x.id === id);
+        if (v) {
+          acc = {
+            id: v.id,
+            email: v.email,
+            name: v.name || v.email,
+            status: v.status === 'active' ? 'active' : 'standby',
+            addedAt: v.created_at || new Date().toISOString(),
+            tier: v.quota?.subscription_tier || 'Google AI Studio',
+            quotas: [],
+            isDefaultRouting: false,
+            totalRequests24h: 0,
+          };
+        }
+      } catch {
+        // ignore
+      }
     }
 
     if (acc) {

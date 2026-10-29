@@ -85,6 +85,14 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
 
   const handleOpenValidationUrl = async (accountId: string) => {
     setValidatingAccountId(accountId);
+    // Open new tab immediately to bypass browser popup blockers
+    let newTab: Window | null = null;
+    try {
+      newTab = window.open('about:blank', '_blank');
+    } catch {
+      // ignore
+    }
+
     try {
       if (onShowNotification) {
         onShowNotification('Requesting fresh verification link from Google...');
@@ -92,12 +100,26 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
       const res = await fetch(`/api/accounts/${encodeURIComponent(accountId)}/validation-url`);
       const data = await res.json();
       if (data.ok && data.url) {
-        window.open(data.url, '_blank', 'noopener,noreferrer');
+        if (newTab) {
+          newTab.location.href = data.url;
+        } else {
+          window.open(data.url, '_blank', 'noopener,noreferrer');
+        }
       } else {
-        alert(data.error || 'No validation URL returned by Google.');
+        if (newTab) newTab.close();
+        if (onShowNotification) {
+          onShowNotification(`⚠ ${data.error || 'No validation URL returned by Google.'}`);
+        } else {
+          alert(data.error || 'No validation URL returned by Google.');
+        }
       }
     } catch (err: any) {
-      alert('Error fetching validation URL: ' + err.message);
+      if (newTab) newTab.close();
+      if (onShowNotification) {
+        onShowNotification('Error fetching verification link: ' + err.message);
+      } else {
+        alert('Error fetching validation URL: ' + err.message);
+      }
     } finally {
       setValidatingAccountId(null);
     }
