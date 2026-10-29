@@ -50,10 +50,14 @@ All numbers are derived from real traffic records and core-reported account stat
 geminirouter supports $N$ Google accounts in a single pool, serving many concurrent requests across all healthy accounts in parallel (similar to OpenRouter).
 
 ### Selection Algorithm
-1. Evaluates all healthy accounts in the pool (status !== 'error', not in cooldown, in-flight < per-account cap).
+1. Evaluates all healthy accounts in the pool (status !== 'error', not cooling down **for the requested model**, in-flight < per-account cap).
 2. Sends each new request to the account with the **fewest in-flight leases** (`min(inFlight)`).
 3. Breaks ties by **least quota used** (highest remaining quota percentage).
 4. Guarantees balance: across $N$ accounts, the difference between the most loaded and least loaded account ($\max - \min$) is always $\le 1$.
+
+The bridge's lease manager caps in-flight requests per account. The core makes the final
+account choice, because it is the only process holding the Google OAuth tokens and the
+per-model quota picture. See "Per-Request Account Pinning" below.
 
 ### Parallel Capacity & Cap Configuration
 - Total parallel capacity = `healthyAccounts.length * maxConcurrentRequestsPerAccount`.
@@ -63,7 +67,9 @@ geminirouter supports $N$ Google accounts in a single pool, serving many concurr
   - `'reject_429'`: immediately returns `HTTP 429 Too Many Requests` with a `Retry-After: 1` header.
 
 ### Stream Safety Rule
-- If the upstream gateway or account returns HTTP 429 or quota error *before* the first response chunk is sent, the account is marked in cooldown and the request transparently retries on the next available account.
+- If the upstream gateway or account returns HTTP 429 or quota error *before the first response chunk is sent*, the account is marked in cooldown and the request transparently retries on the next available account.
+- Cooldowns are keyed by `accountId + model`, so a quota burn on one model (e.g. Claude) does not remove the account from unrelated models (e.g. Gemini). A cooldown recorded without a model applies to every model.
+- Cooldown is applied to the account the **core reports** in `x-antigravity-account-id`, not the account the bridge leased — the core may fall back to a different account, and the wrong account must not be quarantined.
 - Once the first byte has been streamed to the client (`streamStarted === true`), **the request is NEVER retried**, preventing corrupted or duplicated responses.
 
 ### Outbound Proxy Support
@@ -71,22 +77,33 @@ geminirouter supports $N$ Google accounts in a single pool, serving many concurr
 
 ## Per-Request Account Pinning
 
-Upstream account choice must ultimately be made by the core, because only the core holds the Google OAuth tokens. Two designs exist:
+Upstream account choice must ultimately be made by the core, because only the core holds the Google OAuth tokens and the per-model quota and rate-limit state.
 
-### Option A — ACTIVE: core patch honoring the `x-account-id` header
+### Normal traffic: the core selects (no pin)
 
-The core (local patched clone of `Draculabo/AntigravityManager`, commit "feat: per-request account pinning via x-account-id header") accepts the account the bridge chose:
+`server/src/v1Proxy.ts` deliberately does **not** send `x-account-id` on ordinary `/v1/*` requests. Pinning every request would bypass three core behaviours that matter under load:
 
-1. `src/modules/proxy-gateway/server/common/pinned-account-context.ts` — an `AsyncLocalStorage` request context. A Fastify `onRequest` hook reads `x-account-id` and enters the scope for the whole request (`done()` called synchronously inside `.run()`, the same pattern as the traffic-audit context).
-2. `account-lease.service.ts` `getNextToken()` passes `pinnedAccountId: getPinnedAccountId()` into the selection request.
-3. `account-lease-selection.policy.ts` `selectCandidate()` returns the pinned account **when it is still eligible** (not in cooldown, not rate-limited for the model). An ineligible or unknown pin falls back to normal selection, so the request still succeeds.
-4. The bridge (`server/src/v1Proxy.ts`) already sends `x-account-id` / `x-account-email` on every forwarded request — no bridge change needed.
+1. **Per-model rate limits** — the core's `rate-limit-tracker.service.ts` keys limits by `accountId + model`, so a Claude quota burn does not stop Gemini traffic.
+2. **Quota-weighted round-robin** — accounts at ≥75% remaining get weight 3, ≥25% weight 2, below that weight 1, so traffic flows toward healthy accounts.
+3. **Session affinity** — multi-turn conversations stick to one account instead of bouncing.
 
-Result: the bridge's least-in-flight balancing is authoritative and its lease counts match the account that actually serves each request. All accounts work in parallel continuously; no account is "filled first".
+Pinning also caused a correctness bug: when the pinned account was ineligible the core silently fell back to another account, and the bridge then cooled down the account it had *asked for* rather than the one that actually failed.
 
-Verified by: `src/tests/unit/pinned-account-selection.test.ts` (8 tests: pin honored, pin beats sticky sessions and account-first, cooldown/rate-limit/unknown fallbacks, ALS scoping) plus the 12 pre-existing policy tests (no regression). `pnpm run type-check` and `pnpm run build:core` pass.
+The bridge still reads `x-antigravity-account-id` off the upstream response to attribute traffic records and cooldowns to the account that really served the request.
 
-**Activation note:** the patch lives in the patched core source (`dist/core/main.cjs` is rebuilt). An installed Antigravity Manager desktop app runs its own unpatched build — to activate pinning, run the standalone core from the patched clone (or the desktop app from this source) instead of the installed app.
+### Single-account tests: explicit pin
+
+`server/src/accountTester.ts` posts **directly to the core gateway** with `x-account-id` + `x-single-account: true`. The pin makes the core target exactly that account; `x-single-account` caps the core's retry count at 1 so a test never silently fails over to a different account and reports a false pass.
+
+The core patch backing this is `src/modules/proxy-gateway/server/common/pinned-account-context.ts` (an `AsyncLocalStorage` request context; a Fastify `onRequest` hook reads `x-account-id` and `x-single-account`), wired into `account-lease.service.ts` (`pinnedAccountId`) and `account-lease-selection.policy.ts` (`pickPinnedCandidate`, which honours an eligible pin and falls back to normal selection when the pin is cooling down, rate-limited, or unknown).
+
+Verified by: `src/tests/unit/pinned-account-selection.test.ts` (8 tests) plus the 12 pre-existing policy tests (no regression).
+
+**Activation note:** the patch lives in the patched core source (`dist/core/main.cjs` is rebuilt). An installed Antigravity Manager desktop app runs its own unpatched build — to activate pinning, run the standalone core from the patched clone instead of the installed app.
+
+### Why not pin every request?
+
+Pinning every request was the original design (Option A) and it made the bridge's lease counts authoritative. It was removed because the core's own selection is strictly better informed, and because the pin's silent fallback corrupted the bridge's cooldown bookkeeping. `ConcurrencyLeaseManager` still owns per-account in-flight caps — the core has no equivalent for chat requests.
 
 ### Option B — FUTURE (not built): one core process per account
 

@@ -36,35 +36,76 @@ process.env.LOG_LEVEL = 'warn';
 const { createServer } = await import('../src/index.js');
 
 // ---- Fake upstream (stands in for the core gateway) ----
-type Mode = 'slow' | 'failover' | 'stream-break';
+// Like the real core, this selects an account itself (the bridge no longer
+// pins x-account-id) and reports the choice back via x-antigravity-account-id.
+type Mode = 'slow' | 'failover' | 'stream-break' | 'misdirect';
 let mode: Mode = 'slow';
 let hits: Record<string, number> = {};
 let upstreamSocketsClosed = 0;
+// Account ids the fake core knows about, in selection order.
+let corePool: string[] = [];
+// Ids the fake core has itself rate-limited (mirrors the real core's tracker).
+const coreRateLimited = new Set<string>();
 const totalHits = () => Object.values(hits).reduce((a, b) => a + b, 0);
 
 const upstream = http.createServer((req, res) => {
-  const accountId = String(req.headers['x-account-id'] || 'unknown');
+  // Honour an explicit pin when present (single-account test path), else pick
+  // the first pool account the fake core has not rate-limited.
+  const pinned = req.headers['x-account-id'];
+  const accountId =
+    typeof pinned === 'string' && pinned.trim()
+      ? pinned.trim()
+      : corePool.find((id) => !coreRateLimited.has(id)) || 'unknown';
+
   hits[accountId] = (hits[accountId] || 0) + 1;
 
   let body = '';
   req.on('data', (c) => (body += c));
   req.on('end', () => {
+    if (mode === 'misdirect') {
+      // The core routes to a DIFFERENT account than the bridge would have
+      // leased, and that account is the one that is rate limited. The bridge
+      // must cool down the account the core reports, not the one it leased.
+      const actual = 'fail-acc-b';
+      hits[actual] = (hits[actual] || 0) + 1;
+      coreRateLimited.add(actual);
+      res.writeHead(429, {
+        'Retry-After': '60',
+        'Content-Type': 'application/json',
+        'x-antigravity-account-id': actual,
+      });
+      res.end(
+        JSON.stringify({ error: { message: 'routed account rate limited', type: 'rate_limit_error' } }),
+      );
+      return;
+    }
     if (mode === 'failover' && accountId === 'fail-acc-a') {
-      res.writeHead(429, { 'Retry-After': '2', 'Content-Type': 'application/json' });
+      coreRateLimited.add(accountId);
+      res.writeHead(429, {
+        'Retry-After': '2',
+        'Content-Type': 'application/json',
+        'x-antigravity-account-id': accountId,
+      });
       res.end(
         JSON.stringify({ error: { message: 'account A rate limited', type: 'rate_limit_error' } }),
       );
       return;
     }
     if (mode === 'stream-break') {
-      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'x-antigravity-account-id': accountId,
+      });
       res.write('data: {"delta":"first"}\n\n');
       setTimeout(() => res.destroy(), 120);
       return;
     }
     // slow / ok: reply 200 after 300 ms
     setTimeout(() => {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.writeHead(200, {
+        'Content-Type': 'application/json',
+        'x-antigravity-account-id': accountId,
+      });
       res.end(
         JSON.stringify({
           id: 'cmpl-1',
@@ -117,6 +158,16 @@ function wait(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+/**
+ * Install accounts into the bridge store AND tell the fake core which accounts
+ * it may route to, mirroring the real core's own account pool.
+ */
+function setPool(accounts: GoogleAccount[]): void {
+  store.setAccounts(accounts);
+  corePool = accounts.map((a) => a.id);
+  coreRateLimited.clear();
+}
+
 before(async () => {
   await new Promise<void>((r) => upstream.listen(0, '127.0.0.1', r));
   const upstreamPort = (upstream.address() as net.AddressInfo).port;
@@ -144,7 +195,7 @@ after(async () => {
 
 test('regression: 200 after 300 ms reaches the client (request.raw close bug)', async () => {
   mode = 'slow';
-  store.setAccounts(makeAccounts('basic', 1));
+  setPool(makeAccounts('basic', 1));
   hits = {};
 
   const res = await fetch(`http://127.0.0.1:${bridgePort}/v1/chat/completions`, chatInit());
@@ -158,7 +209,7 @@ test('regression: 200 after 300 ms reaches the client (request.raw close bug)', 
 
 test('account A 429 -> client gets 200 from account B; A enters cooldown', async () => {
   mode = 'failover';
-  store.setAccounts(makeAccounts('fail', 2).map((a, i) => ({ ...a, id: i === 0 ? 'fail-acc-a' : 'fail-acc-b' })));
+  setPool(makeAccounts('fail', 2).map((a, i) => ({ ...a, id: i === 0 ? 'fail-acc-a' : 'fail-acc-b' })));
   hits = {};
 
   const res = await fetch(`http://127.0.0.1:${bridgePort}/v1/chat/completions`, chatInit());
@@ -175,9 +226,35 @@ test('account A 429 -> client gets 200 from account B; A enters cooldown', async
   leaseManager.clearCooldown('fail-acc-a');
 });
 
+test('cooldown lands on the account the core actually used, not the one leased', async () => {
+  mode = 'misdirect';
+  setPool(
+    makeAccounts('fail', 2).map((a, i) => ({ ...a, id: i === 0 ? 'fail-acc-a' : 'fail-acc-b' })),
+  );
+  hits = {};
+
+  const res = await fetch(`http://127.0.0.1:${bridgePort}/v1/chat/completions`, chatInit());
+
+  // Both accounts end up rate limited, so the pool is exhausted.
+  assert.equal(res.status, 429, 'pool must be reported as exhausted');
+  assert.equal(
+    leaseManager.isAccountInCooldown('fail-acc-b'),
+    true,
+    'the account the core reported must be the one cooled down'
+  );
+  assert.equal(
+    leaseManager.isAccountInCooldown('fail-acc-a'),
+    false,
+    'the account we leased but the core never used must NOT be cooled down'
+  );
+
+  leaseManager.clearCooldown('fail-acc-a');
+  leaseManager.clearCooldown('fail-acc-b');
+});
+
 test('client abort mid-stream aborts the upstream socket and releases the lease', async () => {
   mode = 'stream-break';
-  store.setAccounts(makeAccounts('abort', 1));
+  setPool(makeAccounts('abort', 1));
   hits = {};
   upstreamSocketsClosed = 0;
 
@@ -210,7 +287,7 @@ test('client abort mid-stream aborts the upstream socket and releases the lease'
 
 test('no retry after the first streamed byte', async () => {
   mode = 'stream-break';
-  store.setAccounts(makeAccounts('stream', 2));
+  setPool(makeAccounts('stream', 2));
   hits = {};
 
   const res = await fetch(`http://127.0.0.1:${bridgePort}/v1/chat/completions`, {
@@ -232,7 +309,7 @@ test('no retry after the first streamed byte', async () => {
 
 test('30 concurrent non-streaming requests across 3 accounts: all 200, spread max-min <= 1', async () => {
   mode = 'slow';
-  store.setAccounts(makeAccounts('three', 3));
+  setPool(makeAccounts('three', 3));
   hits = {};
 
   const results = await Promise.all(
@@ -257,7 +334,7 @@ test('30 concurrent non-streaming requests across 3 accounts: all 200, spread ma
 
 test('30 concurrent non-streaming requests across 10 accounts: all 200, spread max-min <= 1', async () => {
   mode = 'slow';
-  store.setAccounts(makeAccounts('ten', 10));
+  setPool(makeAccounts('ten', 10));
   hits = {};
 
   const results = await Promise.all(

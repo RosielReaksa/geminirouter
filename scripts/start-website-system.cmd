@@ -36,14 +36,16 @@ if exist "%SITE_HOME%\OAUTH_CLIENT.env" (
 )
 
 echo [1/2] Starting patched core (profile: core-profile, gateway: 8046)...
-start "geminirouter-core" cmd /k "cd /d %CORE_REPO% && set USERPROFILE=%SITE_HOME%&& set HOME=%SITE_HOME%&& set ANTIGRAVITY_OAUTH_CLIENTS=%ANTIGRAVITY_OAUTH_CLIENTS%&& set ANTIGRAVITY_OAUTH_CLIENT_KEY=%ANTIGRAVITY_OAUTH_CLIENT_KEY%&& node dist\core\main.cjs"
+start "geminirouter-core" cmd /c "cd /d %CORE_REPO% && set USERPROFILE=%SITE_HOME%&& set HOME=%SITE_HOME%&& set ANTIGRAVITY_OAUTH_CLIENTS=%ANTIGRAVITY_OAUTH_CLIENTS%&& set ANTIGRAVITY_OAUTH_CLIENT_KEY=%ANTIGRAVITY_OAUTH_CLIENT_KEY%&& node dist\core\main.cjs"
 
-timeout /t 6 /nobreak >nul
+ping 127.0.0.1 -n 6 >nul
 
 echo [2/2] Starting web bridge (dashboard: http://localhost:3000)...
-start "geminirouter-bridge" cmd /k "cd /d %ROOT%\server && set USERPROFILE=%SITE_HOME%&& set HOME=%SITE_HOME%&& set GEMINIROUTER_GATEWAY_PORT=8046&& set GEMINIROUTER_GATEWAY_API_KEY=%API_KEY%&& node dist\index.js"
+start "geminirouter-bridge" cmd /c "cd /d %ROOT%\server && set USERPROFILE=%SITE_HOME%&& set HOME=%SITE_HOME%&& set GEMINIROUTER_GATEWAY_PORT=8046&& set GEMINIROUTER_GATEWAY_API_KEY=%API_KEY%&& node dist\index.js"
 
 echo.
-echo Done. Dashboard: http://localhost:3000  (gateway on 8046)
-echo Add Google accounts from the website: Accounts ^> Add Google Account.
-pause
+echo ============================================================
+echo   geminirouter is running!
+echo   Dashboard: http://localhost:3000
+echo   API Gateway: http://localhost:8046/v1
+echo ============================================================

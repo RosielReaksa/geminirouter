@@ -9,6 +9,37 @@ export interface V1ProxyOptions {
   getGatewayPort: () => number;
 }
 
+/**
+ * The core reports the account it actually routed to via this response header.
+ * Returns undefined when the core did not report one.
+ */
+function readServedAccountId(headers: http.IncomingHttpHeaders): string | undefined {
+  const raw = headers['x-antigravity-account-id'];
+  const value = Array.isArray(raw) ? raw[0] : raw;
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+/**
+ * Resolve the account object for the id the core reported, falling back to the
+ * account we leased when the core did not tell us (connection-level failures).
+ * Prefers the real pool entry so email/quota stay accurate.
+ */
+function resolveServedAccount(
+  servedByAccountId: string | undefined,
+  leasedAccount: GoogleAccount,
+  accounts: GoogleAccount[]
+): GoogleAccount {
+  if (!servedByAccountId || servedByAccountId === leasedAccount.id) {
+    return leasedAccount;
+  }
+  const known = accounts.find((a) => a.id === servedByAccountId);
+  if (known) {
+    return known;
+  }
+  // Core reported an id we have not synced yet; keep the id but not the wrong email.
+  return { ...leasedAccount, id: servedByAccountId, email: servedByAccountId };
+}
+
 export async function handleV1ProxyRequest(
   request: FastifyRequest,
   reply: FastifyReply,
@@ -90,6 +121,9 @@ export async function handleV1ProxyRequest(
     };
 
     let streamStarted = false;
+    // Which account the CORE actually used. Falls back to the leased account
+    // when the core did not report one (e.g. connection error before routing).
+    let servedByAccountId: string | undefined;
 
     try {
       const outcome = await new Promise<{
@@ -97,6 +131,7 @@ export async function handleV1ProxyRequest(
         headers: http.IncomingHttpHeaders;
         streamStarted: boolean;
         retryable: boolean;
+        servedByAccountId?: string;
         errorBody?: any;
       }>((resolve, reject) => {
         // Build forward headers
@@ -109,9 +144,15 @@ export async function handleV1ProxyRequest(
           forwardHeaders['content-length'] = rawBodyBuffer.length;
         }
 
-        // Attach routing attribution headers for core or tracing
-        forwardHeaders['x-account-id'] = account.id;
-        forwardHeaders['x-account-email'] = account.email;
+        // Deliberately NOT pinning x-account-id here. Pinning bypasses the
+        // core's per-model rate-limit tracking, quota-weighted round-robin and
+        // session affinity, and lets the core silently fall back to a different
+        // account than the one we cooled down. The core owns selection; we only
+        // pin on the explicit single-account test path (accountTester.ts).
+        // x-account-email is dropped too because the core ignores it.
+        delete forwardHeaders['x-account-id'];
+        delete forwardHeaders['x-account-email'];
+        delete forwardHeaders['x-single-account'];
 
         const upstreamReq = http.request(
           {
@@ -155,6 +196,7 @@ export async function handleV1ProxyRequest(
                   headers: upstreamRes.headers,
                   streamStarted: false,
                   retryable: !isPoolExhausted,
+                  servedByAccountId: readServedAccountId(upstreamRes.headers),
                   errorBody: parsedError,
                 });
               });
@@ -185,7 +227,7 @@ export async function handleV1ProxyRequest(
                 clientIp: request.ip || '127.0.0.1',
                 modelRequested: requestedModel || 'unknown',
                 modelRouted: requestedModel || 'unknown',
-                backingAccountEmail: account.email,
+                backingAccountEmail: resolveServedAccount(servedByAccountId, account, accounts).email,
                 status,
                 latencyMs: durationMs,
                 promptTokens: 0,
@@ -243,6 +285,9 @@ export async function handleV1ProxyRequest(
         upstreamReq.end();
       });
 
+      if (outcome.servedByAccountId) {
+        servedByAccountId = outcome.servedByAccountId;
+      }
       if (outcome.headers['retry-after']) {
         lastRetryAfter = String(outcome.headers['retry-after']);
       }
@@ -251,6 +296,11 @@ export async function handleV1ProxyRequest(
       }
 
       if (outcome.retryable && !outcome.streamStarted) {
+        // Cooldown and the verification flag must land on the account that
+        // ACTUALLY failed, which is not necessarily the one we leased — the
+        // core may fall back to another account when our choice is ineligible.
+        const failedAccount = resolveServedAccount(servedByAccountId, account, accounts);
+
         // Mark account in cooldown and retry on next account
         let cooldownMs = 2 * 60 * 1000;
         if (outcome.status === 403) {
@@ -279,8 +329,8 @@ export async function handleV1ProxyRequest(
             if (m) freshLink = m[0];
           }
           if (freshLink) {
-            account.hasValidationLink = true;
-            account.validationUrl = freshLink;
+            failedAccount.hasValidationLink = true;
+            failedAccount.validationUrl = freshLink;
           }
         } else {
           const retrySec = parseInt(lastRetryAfter, 10);
@@ -288,7 +338,11 @@ export async function handleV1ProxyRequest(
             cooldownMs = retrySec * 1000;
           }
         }
-        leaseManager.markCooldown(account.id, cooldownMs);
+        // Scoped to the model, so a quota burn on one model leaves the account
+        // usable for the rest of the pool.
+        leaseManager.markCooldown(failedAccount.id, cooldownMs, requestedModel);
+        // Never lease either account again for this request.
+        attemptedAccountIds.add(failedAccount.id);
         safeRelease();
         continue; // Try next account in loop
       }

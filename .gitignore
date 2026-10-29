@@ -25,3 +25,7 @@ tmpwebapp-node-modulesprepare.log
 
 # Patched-core side profile (contains account tokens)
 core-profile/
+
+# Google OAuth client secrets
+client_secret*.json
+*.secret.json

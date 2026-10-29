@@ -10,7 +10,10 @@ export interface LeaseManagerOptions {
 
 export class ConcurrencyLeaseManager extends EventEmitter {
   private inFlightMap = new Map<string, number>();
-  private cooldowns = new Map<string, number>(); // accountId -> expiresAtMs
+  // Cooldown keys are `accountId::model` so a quota burn on one model does not
+  // remove the account from unrelated models. `accountId::*` is the wildcard
+  // used when the failing request carried no model (account-wide cooldown).
+  private cooldowns = new Map<string, number>(); // cooldownKey -> expiresAtMs
   private maxConcurrentRequestsPerAccount: number;
   private capacityPolicy: 'queue' | 'reject_429';
   private queueTimeoutMs: number;
@@ -52,33 +55,95 @@ export class ConcurrencyLeaseManager extends EventEmitter {
     return this.queueTimeoutMs;
   }
 
-  isAccountInCooldown(accountId: string, now: number = Date.now()): boolean {
-    const expiresAt = this.cooldowns.get(accountId);
-    if (!expiresAt) return false;
-    if (now >= expiresAt) {
-      this.cooldowns.delete(accountId);
-      return false;
-    }
-    return true;
+  private static readonly WILDCARD_MODEL = '*';
+
+  private static normalizeModel(model?: string): string {
+    const trimmed = model?.trim().toLowerCase();
+    return trimmed ? trimmed : ConcurrencyLeaseManager.WILDCARD_MODEL;
   }
 
-  markCooldown(accountId: string, ttlMs?: number): void {
+  private static cooldownKey(accountId: string, model?: string): string {
+    return `${accountId}::${ConcurrencyLeaseManager.normalizeModel(model)}`;
+  }
+
+  /**
+   * True when ANY cooldown is active for this account, regardless of model.
+   * Used for display and for callers that have no model context.
+   */
+  isAccountInCooldown(accountId: string, now: number = Date.now()): boolean {
+    const prefix = `${accountId}::`;
+    for (const [key, expiresAt] of this.cooldowns.entries()) {
+      if (!key.startsWith(prefix)) continue;
+      if (now >= expiresAt) {
+        this.cooldowns.delete(key);
+        continue;
+      }
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * True when this account is cooling down for THIS model (or for the whole
+   * account). A cooldown recorded against a different model must not exclude
+   * the account — that is what keeps a Claude quota burn from starving Gemini
+   * traffic.
+   */
+  isAccountModelInCooldown(accountId: string, model?: string, now: number = Date.now()): boolean {
+    const modelKey = ConcurrencyLeaseManager.cooldownKey(accountId, model);
+    const wildcardKey = ConcurrencyLeaseManager.cooldownKey(accountId);
+    const candidates = modelKey === wildcardKey ? [wildcardKey] : [modelKey, wildcardKey];
+
+    for (const key of candidates) {
+      const expiresAt = this.cooldowns.get(key);
+      if (!expiresAt) continue;
+      if (now >= expiresAt) {
+        this.cooldowns.delete(key);
+        continue;
+      }
+      return true;
+    }
+    return false;
+  }
+
+  markCooldown(accountId: string, ttlMs?: number, model?: string): void {
     const ttl = ttlMs ?? this.cooldownTtlMs;
-    this.cooldowns.set(accountId, Date.now() + ttl);
+    this.cooldowns.set(
+      ConcurrencyLeaseManager.cooldownKey(accountId, model),
+      Date.now() + ttl
+    );
   }
 
   clearCooldown(accountId: string): void {
-    this.cooldowns.delete(accountId);
+    const prefix = `${accountId}::`;
+    for (const key of this.cooldowns.keys()) {
+      if (key.startsWith(prefix)) {
+        this.cooldowns.delete(key);
+      }
+    }
   }
 
-  getCooldownAccounts(now: number = Date.now()): Array<{ accountId: string; remainingSeconds: number }> {
-    const list: Array<{ accountId: string; remainingSeconds: number }> = [];
-    for (const [accountId, expiresAt] of this.cooldowns.entries()) {
-      if (now < expiresAt) {
-        list.push({ accountId, remainingSeconds: Math.ceil((expiresAt - now) / 1000) });
-      } else {
-        this.cooldowns.delete(accountId);
+  getCooldownAccounts(now: number = Date.now()): Array<{
+    accountId: string;
+    remainingSeconds: number;
+    model?: string;
+  }> {
+    // One row per (account, model) so the dashboard can show that an account is
+    // limited for one model but still serving others.
+    const list: Array<{ accountId: string; remainingSeconds: number; model?: string }> = [];
+    for (const [key, expiresAt] of this.cooldowns.entries()) {
+      if (now >= expiresAt) {
+        this.cooldowns.delete(key);
+        continue;
       }
+      const sep = key.lastIndexOf('::');
+      const accountId = sep === -1 ? key : key.slice(0, sep);
+      const model = sep === -1 ? undefined : key.slice(sep + 2);
+      list.push({
+        accountId,
+        remainingSeconds: Math.ceil((expiresAt - now) / 1000),
+        model: model === ConcurrencyLeaseManager.WILDCARD_MODEL ? undefined : model,
+      });
     }
     return list;
   }
@@ -111,7 +176,8 @@ export class ConcurrencyLeaseManager extends EventEmitter {
 
   /**
    * Selection algorithm:
-   * 1. Filters eligible accounts: status !== 'error', not in cooldown, inFlight < cap.
+   * 1. Filters eligible accounts: status !== 'error', not cooling down for
+   *    THIS model, inFlight < cap.
    * 2. Sorts by fewest in-flight leases ascending (least loaded first).
    * 3. Breaks ties by least quota used (highest remaining quota percentage).
    * 4. If all accounts are at cap:
@@ -136,7 +202,7 @@ export class ConcurrencyLeaseManager extends EventEmitter {
       const candidates = accounts.filter((acc) => {
         if (exclude.has(acc.id)) return false;
         if (acc.status === 'error' || acc.hasValidationLink) return false;
-        if (this.isAccountInCooldown(acc.id)) return false;
+        if (this.isAccountModelInCooldown(acc.id, options?.model)) return false;
         const currentInFlight = this.getInFlight(acc.id);
         if (currentInFlight >= this.maxConcurrentRequestsPerAccount) return false;
         return true;

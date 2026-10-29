@@ -278,3 +278,92 @@ test('concurrent streaming requests run in parallel across accounts without retr
   assert.deepEqual(Object.values(usageCount), [4, 4, 4]);
 });
 
+
+test('cooldown is scoped per model: a burn on one model leaves the account usable for others', async () => {
+  const accounts = createMockAccounts(2);
+  const manager = new ConcurrencyLeaseManager({ maxConcurrentRequestsPerAccount: 5 });
+
+  // Account 1 burns its quota on claude-sonnet only.
+  manager.markCooldown(accounts[0].id, 60_000, 'claude-sonnet-4');
+
+  assert.equal(
+    manager.isAccountModelInCooldown(accounts[0].id, 'claude-sonnet-4'),
+    true,
+    'must be cooling down for the model that failed'
+  );
+  assert.equal(
+    manager.isAccountModelInCooldown(accounts[0].id, 'gemini-2.5-pro'),
+    false,
+    'a different model must NOT be blocked'
+  );
+
+  // A gemini request must still be allowed onto account 1.
+  const lease = await manager.acquireLease(accounts, { model: 'gemini-2.5-pro' });
+  assert.ok(lease);
+  assert.equal(lease.account.id, accounts[0].id, 'account 1 must serve gemini traffic');
+  lease.release();
+});
+
+test('a cooldown with no model applies to every model (account-wide)', async () => {
+  const accounts = createMockAccounts(2);
+  const manager = new ConcurrencyLeaseManager({ maxConcurrentRequestsPerAccount: 5 });
+
+  manager.markCooldown(accounts[0].id, 60_000); // no model => wildcard
+
+  assert.equal(manager.isAccountModelInCooldown(accounts[0].id, 'gemini-2.5-pro'), true);
+  assert.equal(manager.isAccountModelInCooldown(accounts[0].id, 'claude-sonnet-4'), true);
+  assert.equal(manager.isAccountInCooldown(accounts[0].id), true);
+
+  const lease = await manager.acquireLease(accounts, { model: 'gemini-2.5-pro' });
+  assert.ok(lease);
+  assert.equal(lease.account.id, accounts[1].id, 'must fall through to the healthy account');
+  lease.release();
+});
+
+test('expired per-model cooldowns are pruned and do not block selection', async () => {
+  const accounts = createMockAccounts(2);
+  const manager = new ConcurrencyLeaseManager({ maxConcurrentRequestsPerAccount: 5 });
+
+  manager.markCooldown(accounts[0].id, 20, 'gemini-2.5-pro');
+  await wait(40);
+
+  assert.equal(manager.isAccountModelInCooldown(accounts[0].id, 'gemini-2.5-pro'), false);
+  assert.deepEqual(manager.getCooldownAccounts(), [], 'expired entries must be pruned');
+});
+
+test('getCooldownAccounts reports the model alongside the account', async () => {
+  const accounts = createMockAccounts(2);
+  const manager = new ConcurrencyLeaseManager({ maxConcurrentRequestsPerAccount: 5 });
+
+  manager.markCooldown(accounts[0].id, 60_000, 'claude-sonnet-4');
+  manager.markCooldown(accounts[1].id, 60_000); // account-wide
+
+  const rows = manager.getCooldownAccounts();
+  assert.equal(rows.length, 2);
+
+  const scoped = rows.find((r) => r.accountId === accounts[0].id);
+  assert.ok(scoped);
+  assert.equal(scoped.model, 'claude-sonnet-4');
+
+  const wildcard = rows.find((r) => r.accountId === accounts[1].id);
+  assert.ok(wildcard);
+  assert.equal(wildcard.model, undefined, 'account-wide cooldown has no model');
+});
+
+test('clearCooldown clears every model for that account only', async () => {
+  const accounts = createMockAccounts(2);
+  const manager = new ConcurrencyLeaseManager({ maxConcurrentRequestsPerAccount: 5 });
+
+  manager.markCooldown(accounts[0].id, 60_000, 'gemini-2.5-pro');
+  manager.markCooldown(accounts[0].id, 60_000, 'claude-sonnet-4');
+  manager.markCooldown(accounts[1].id, 60_000, 'gemini-2.5-pro');
+
+  manager.clearCooldown(accounts[0].id);
+
+  assert.equal(manager.isAccountInCooldown(accounts[0].id), false);
+  assert.equal(
+    manager.isAccountModelInCooldown(accounts[1].id, 'gemini-2.5-pro'),
+    true,
+    'other accounts must be untouched'
+  );
+});

@@ -2,8 +2,8 @@ import { spawn } from 'node:child_process';
 import path from 'node:path';
 import fs from 'node:fs';
 
-const CORE_REPO = 'D:/projectradom/AntigravityManager';
-const PROFILE_DIR = 'D:/projectradom/geminirouter/core-profile';
+const CORE_REPO = path.resolve('D:/projectradom/AntigravityManager');
+const PROFILE_DIR = path.resolve('D:/projectradom/geminirouter/core-profile');
 const API_KEY = fs.readFileSync(path.join(PROFILE_DIR, 'API_KEY.txt'), 'utf8').trim();
 
 const cleanEnv = { ...process.env };
