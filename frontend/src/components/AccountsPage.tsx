@@ -230,8 +230,20 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
         </div>
       ) : (
         <div className="space-y-4">
-          {accounts.map((acc, accIndex) => {
-            const isDropdownOpen = openDropdownId === acc.id;
+          {(() => {
+            // Stable sort: Primary account first, then by creation date ascending, then email.
+            // Guarantees account rows NEVER jump up or down when tested or refreshed!
+            const stableList = [...accounts].sort((a, b) => {
+              if (a.isDefaultRouting && !b.isDefaultRouting) return -1;
+              if (!a.isDefaultRouting && b.isDefaultRouting) return 1;
+              const tA = Number(a.addedAt) || new Date(a.addedAt).getTime() || 0;
+              const tB = Number(b.addedAt) || new Date(b.addedAt).getTime() || 0;
+              if (tA !== tB) return tA - tB;
+              return a.email.localeCompare(b.email);
+            });
+
+            return stableList.map((acc, accIndex) => {
+              const isDropdownOpen = openDropdownId === acc.id;
 
             const models5h =
               acc.models5h && acc.models5h.length > 0
@@ -564,9 +576,10 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
               )}
               </div>
             );
-          })}
-        </div>
-      )}
-    </div>
-  );
+          });
+        })()}
+      </div>
+    )}
+  </div>
+);
 };

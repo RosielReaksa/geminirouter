@@ -266,6 +266,18 @@ export async function createServer(): Promise<{
               lastTestResult: testRes,
             };
           });
+
+          // Stable sort: Primary account first, then by creation date ascending, then email.
+          // Never re-orders by lastUsedAt so accounts NEVER jump up or down on test or refresh!
+          mapped.sort((a, b) => {
+            if (a.isDefaultRouting && !b.isDefaultRouting) return -1;
+            if (!a.isDefaultRouting && b.isDefaultRouting) return 1;
+            const tA = Number(a.addedAt) || new Date(a.addedAt).getTime() || 0;
+            const tB = Number(b.addedAt) || new Date(b.addedAt).getTime() || 0;
+            if (tA !== tB) return tA - tB;
+            return a.email.localeCompare(b.email);
+          });
+
           store.setAccounts(mapped);
           return mapped;
         }
