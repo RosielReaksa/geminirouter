@@ -15,6 +15,7 @@ import {
   INITIAL_MOCK_TRAFFIC,
   MOCK_OAUTH_START_DATA,
 } from './mockData';
+import { authApi } from './authApi';
 
 // Clean any legacy demo accounts from earlier builds
 try {
@@ -68,6 +69,7 @@ export class ApiClient {
         signal: controller.signal,
         headers: {
           'Content-Type': 'application/json',
+          ...authApi.headers(),
           ...(options?.headers || {}),
         },
       });
@@ -77,6 +79,14 @@ export class ApiClient {
         const json = await res.json();
         this.isOnlineCache = true;
         return { data: json as T, isLiveApi: true };
+      }
+
+      // 401 means the session is missing or expired. Surface it so the app can
+      // route to the login page instead of silently showing mock data.
+      if (res.status === 401) {
+        this.isOnlineCache = false;
+        window.dispatchEvent(new CustomEvent('geminirouter:unauthorized'));
+        return { data: await mockFallbackFn(), isLiveApi: false };
       }
     } catch {
       // Backend is offline or not deployed yet, smoothly use mock store

@@ -80,3 +80,105 @@
 ::-webkit-scrollbar-thumb:hover {
   background: #C8C0B4;
 }
+
+/* ==========================================================================
+   Marketing site (public pages) — Claude-style editorial system
+   The dashboard keeps the denser tokens above; these are for the public site.
+   ========================================================================== */
+
+@layer base {
+  :root {
+    --mkt-paper: #F7F4EF;
+    --mkt-paper-2: #FBF9F5;
+    --mkt-ink: #191714;
+    --mkt-ink-2: #4A453E;
+    --mkt-ink-3: #7A736A;
+    --mkt-rule: #E4DED4;
+    --mkt-clay: #C25938;
+    --mkt-clay-deep: #A8462A;
+    --mkt-clay-wash: #F5E7E0;
+    --mkt-moss: #4E7B62;
+    --mkt-night: #14120F;
+  }
+}
+
+.mkt-body {
+  background: var(--mkt-paper-2);
+  color: var(--mkt-ink);
+  -webkit-font-smoothing: antialiased;
+  /* A marketing page must never scroll sideways; wide children (marquees,
+     code blocks) clip instead. */
+  overflow-x: hidden;
+}
+
+/* Fine editorial rule used between marketing sections. */
+.mkt-rule {
+  height: 1px;
+  background: var(--mkt-rule);
+}
+
+/* Subtle paper grain for large hero surfaces. */
+.mkt-grain {
+  position: relative;
+}
+.mkt-grain::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.035;
+  background-image: radial-gradient(circle at 1px 1px, #191714 1px, transparent 0);
+  background-size: 4px 4px;
+}
+
+/* Long-form display heading tracking, matching editorial serif settings. */
+.mkt-display {
+  font-family: 'Instrument Serif', Georgia, serif;
+  letter-spacing: -0.02em;
+  line-height: 0.98;
+}
+
+.mkt-eyebrow {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--mkt-ink-3);
+}
+
+/* Animated marquee for the model strip. */
+@keyframes mkt-marquee {
+  from { transform: translateX(0); }
+  to { transform: translateX(-50%); }
+}
+.mkt-marquee {
+  animation: mkt-marquee 38s linear infinite;
+}
+.mkt-marquee-wrap:hover .mkt-marquee {
+  animation-play-state: paused;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mkt-marquee { animation: none; }
+}
+
+/* Reveal-on-scroll: elements start slightly low and fade in. */
+.mkt-reveal {
+  opacity: 0;
+  transform: translateY(14px);
+  transition: opacity 0.6s cubic-bezier(0.22, 1, 0.36, 1), transform 0.6s cubic-bezier(0.22, 1, 0.36, 1);
+  /* Failsafe: if JS never marks it shown (headless capture, print), reveal
+     after a short delay rather than hiding the content permanently. */
+  animation: mkt-reveal-failsafe 0.01s linear 2s forwards;
+}
+
+@keyframes mkt-reveal-failsafe {
+  to { opacity: 1; transform: none; }
+}
+.mkt-reveal[data-shown='true'] {
+  opacity: 1;
+  transform: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .mkt-reveal { opacity: 1; transform: none; transition: none; }
+}

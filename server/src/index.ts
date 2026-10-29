@@ -10,7 +10,7 @@ import dotenv from 'dotenv';
 import { CoreClient } from './coreClient.js';
 import { CoreProcessManager } from './coreProcess.js';
 import { LocalStateStore, type GoogleAccount } from './store.js';
-import { createAuthMiddleware } from './auth.js';
+import { createAuthMiddleware, SessionStore, safeEqual } from './auth.js';
 import { derivePoolState, bridgeToCoreProxy, coreProxyToBridge } from './pool-state.js';
 import { readCoreProxyConfig, applyCoreProxyConfig } from './coreConfig.js';
 import { ConcurrencyLeaseManager } from './leaseManager.js';
@@ -91,7 +91,8 @@ export async function createServer(): Promise<{
   });
 
   // Admin authentication hook
-  app.addHook('onRequest', createAuthMiddleware(ADMIN_PASSWORD));
+  const sessions = new SessionStore();
+  app.addHook('onRequest', createAuthMiddleware(ADMIN_PASSWORD, sessions));
 
   // Determine frontend build directory (check relative to __dirname and cwd)
   const candidateFrontendDirs = [
@@ -137,6 +138,133 @@ export async function createServer(): Promise<{
   });
 
   // REST API Routes
+
+  // ---- Authentication (public) ----
+
+  // POST /api/auth/login — exchange the admin password for a session token.
+  app.post<{ Body?: { password?: string } }>('/api/auth/login', async (request, reply) => {
+    const password = request.body?.password;
+    if (typeof password !== 'string' || password.length === 0) {
+      return reply.code(400).send({ ok: false, error: 'Password is required.' });
+    }
+
+    if (!ADMIN_PASSWORD) {
+      // No password configured: the dashboard is open.
+      const session = sessions.create();
+      return { ok: true, token: session.token, expiresAt: session.expiresAt, open: true };
+    }
+
+    if (!safeEqual(password, ADMIN_PASSWORD)) {
+      app.log.warn('Failed dashboard login attempt');
+      return reply.code(401).send({ ok: false, error: 'Incorrect password.' });
+    }
+
+    const session = sessions.create();
+    return { ok: true, token: session.token, expiresAt: session.expiresAt, open: false };
+  });
+
+  // GET /api/auth/session — is the current token still valid?
+  app.get('/api/auth/session', async (request, reply) => {
+    if (!ADMIN_PASSWORD) {
+      return { authenticated: true, open: true, requiresPassword: false };
+    }
+    const header = request.headers['authorization'];
+    const token =
+      typeof header === 'string' && header.startsWith('Bearer ') ? header.slice(7) : undefined;
+    const valid = sessions.isValid(token) || (token ? safeEqual(token, ADMIN_PASSWORD) : false);
+    if (!valid) {
+      return reply.code(401).send({ authenticated: false, requiresPassword: true });
+    }
+    return { authenticated: true, open: false, requiresPassword: true };
+  });
+
+  // POST /api/auth/logout — drop the session token.
+  app.post('/api/auth/logout', async (request) => {
+    const header = request.headers['authorization'];
+    if (typeof header === 'string' && header.startsWith('Bearer ')) {
+      sessions.revoke(header.slice(7));
+    }
+    return { ok: true };
+  });
+
+  // ---- Public aggregates (safe for an unauthenticated marketing site) ----
+  // These expose counts and model ids only: never account emails, quota
+  // detail, traffic contents or the API key.
+
+  app.get('/api/public/stats', async () => {
+    const accounts = (await loadCoreAccounts()) ?? store.getAccounts();
+    const traffic = store.getTraffic();
+    const pool = derivePoolState(accounts, traffic);
+    const activeAccounts = accounts.filter((a) => a.status === 'active');
+    const { port: gatewayPort } = resolveGateway();
+
+    let gatewayResponding = false;
+    try {
+      const r = await axios.get(`http://127.0.0.1:${gatewayPort}/v1/models`, {
+        timeout: 2500,
+        validateStatus: () => true,
+      });
+      gatewayResponding = r.status >= 200 && r.status < 500;
+    } catch {
+      gatewayResponding = false;
+    }
+
+    return {
+      online: gatewayResponding,
+      uptimeSeconds: store.getUptimeSeconds(),
+      accountsConnected: activeAccounts.length,
+      accountsTotal: accounts.length,
+      requestsServed: pool.requestsLast24h,
+      tokensServed: pool.tokensLast24h,
+      averageLatencyMs: pool.averageLatencyMs,
+      successRate: pool.successRate,
+      version: BRIDGE_VERSION,
+    };
+  });
+
+  app.get('/api/public/models', async () => {
+    const { port: gatewayPort, apiKey } = resolveGateway();
+    try {
+      const res = await axios.get(`http://127.0.0.1:${gatewayPort}/v1/models`, {
+        timeout: 4000,
+        headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+      });
+      const ids: string[] = (res.data?.data || []).map((m: any) => m.id).filter(Boolean);
+      if (ids.length > 0) {
+        return {
+          source: 'gateway',
+          online: true,
+          models: ids.map((id) => {
+            const meta = MODEL_CATALOG.find((c) => c.id === id);
+            const isClaude = id.includes('claude');
+            const isGpt = id.includes('gpt') || id.includes('oss');
+            return {
+              id,
+              name: meta?.name || id,
+              provider:
+                meta?.provider ||
+                (isClaude ? 'Anthropic Claude' : isGpt ? 'OpenAI-compatible' : 'Google Gemini'),
+              contextLength: meta?.contextLength || (isClaude ? 200000 : 1048576),
+              maxOutputTokens: meta?.maxOutputTokens || 65535,
+            };
+          }),
+        };
+      }
+    } catch {
+      // fall through to the static catalog
+    }
+    return {
+      source: 'catalog',
+      online: false,
+      models: MODEL_CATALOG.map((m) => ({
+        id: m.id,
+        name: m.name,
+        provider: m.provider,
+        contextLength: m.contextLength,
+        maxOutputTokens: m.maxOutputTokens,
+      })),
+    };
+  });
 
   /**
    * Read the live account pool from the core and map it to the dashboard shape.

@@ -8,6 +8,8 @@ import { TrafficPage } from './components/TrafficPage';
 import { SettingsPage } from './components/SettingsPage';
 import { OAuthModal } from './components/OAuthModal';
 import { api } from './services/api';
+import { authApi } from './services/authApi';
+import { navigate } from './router';
 import {
   GatewayStatus,
   GoogleAccount,
@@ -21,7 +23,8 @@ import {
   INITIAL_MOCK_TRAFFIC,
 } from './services/mockData';
 
-export const App: React.FC = () => {
+/** The authenticated dashboard application (served at /app). */
+export const DashboardApp: React.FC = () => {
   const [currentTab, setCurrentTab] = useState<NavTab>('overview');
   const [isOAuthModalOpen, setIsOAuthModalOpen] = useState(false);
   const [isLiveApi, setIsLiveApi] = useState(false);
@@ -130,6 +133,10 @@ export const App: React.FC = () => {
         isRunning={status.isRunning}
         isLiveApi={isLiveApi}
         activeAccountsCount={accounts.filter((a) => a.status === 'active').length}
+        onSignOut={async () => {
+          await authApi.logout();
+          navigate('/login', { replace: true });
+        }}
       />
 
       {/* Main Content Pane */}
@@ -232,4 +239,4 @@ export const App: React.FC = () => {
   );
 };
 
-export default App;
+export default DashboardApp;

@@ -8,7 +8,10 @@ import {
   Sliders,
   ExternalLink,
   ShieldCheck,
+  Globe,
+  LogOut,
 } from 'lucide-react';
+import { Link } from '../router';
 
 export type NavTab = 'overview' | 'accounts' | 'models' | 'gateway' | 'traffic' | 'settings';
 
@@ -18,6 +21,7 @@ interface SidebarProps {
   isRunning: boolean;
   isLiveApi: boolean;
   activeAccountsCount: number;
+  onSignOut?: () => void;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -26,6 +30,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   isRunning,
   isLiveApi,
   activeAccountsCount,
+  onSignOut,
 }) => {
   const navItems = [
     {
@@ -108,6 +113,17 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
       {/* Navigation list */}
       <nav className="px-3 py-2 space-y-1">
+        {/* Back to the public site */}
+        <Link
+          to="/"
+          title="Back to the public site"
+          className="w-full text-left px-3.5 py-2.5 rounded-xl flex items-center gap-3 text-sm text-[#504C46] hover:bg-[#F2ECE4] hover:text-[#2A2723] transition-all duration-150"
+        >
+          <Globe className="w-4 h-4 text-[#706B65]" />
+          <span>Back to site</span>
+        </Link>
+
+        <div className="h-px bg-[#EAE5DE] mx-1 my-2" />
         {navItems.map((item) => {
           const Icon = item.icon;
           const isActive = currentTab === item.id;
@@ -170,6 +186,16 @@ export const Sidebar: React.FC<SidebarProps> = ({
             <ExternalLink className="w-3 h-3" />
           </a>
         </div>
+
+        {onSignOut && (
+          <button
+            onClick={onSignOut}
+            className="mt-3 w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-[11.5px] text-[#706B65] hover:bg-[#F2ECE4] hover:text-[#2A2723] transition-colors"
+          >
+            <LogOut className="w-3.5 h-3.5" />
+            <span>Sign out</span>
+          </button>
+        )}
       </div>
     </aside>
   );

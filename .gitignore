@@ -29,3 +29,4 @@ core-profile/
 # Google OAuth client secrets
 client_secret*.json
 *.secret.json
+qa-*.png
