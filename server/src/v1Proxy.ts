@@ -220,6 +220,13 @@ export async function handleV1ProxyRequest(
             upstreamRes.on('end', () => {
               safeRelease();
               const durationMs = Date.now() - startedAt;
+              // Read the serving account from THIS response's headers; the
+              // outer servedByAccountId is only assigned after this resolves.
+              const recordAccount = resolveServedAccount(
+                readServedAccountId(upstreamRes.headers),
+                account,
+                accounts
+              );
               store.addTrafficRecord({
                 id: `tr-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 6)}`,
                 timestamp: new Date().toISOString(),
@@ -227,7 +234,7 @@ export async function handleV1ProxyRequest(
                 clientIp: request.ip || '127.0.0.1',
                 modelRequested: requestedModel || 'unknown',
                 modelRouted: requestedModel || 'unknown',
-                backingAccountEmail: resolveServedAccount(servedByAccountId, account, accounts).email,
+                backingAccountEmail: recordAccount.email,
                 status,
                 latencyMs: durationMs,
                 promptTokens: 0,
@@ -239,6 +246,7 @@ export async function handleV1ProxyRequest(
                 headers: upstreamRes.headers,
                 streamStarted: true,
                 retryable: false,
+                servedByAccountId: recordAccount.id,
               });
             });
 

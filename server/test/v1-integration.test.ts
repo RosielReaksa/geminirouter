@@ -38,7 +38,7 @@ const { createServer } = await import('../src/index.js');
 // ---- Fake upstream (stands in for the core gateway) ----
 // Like the real core, this selects an account itself (the bridge no longer
 // pins x-account-id) and reports the choice back via x-antigravity-account-id.
-type Mode = 'slow' | 'failover' | 'stream-break' | 'misdirect';
+type Mode = 'slow' | 'failover' | 'stream-break' | 'misdirect' | 'serve-other';
 let mode: Mode = 'slow';
 let hits: Record<string, number> = {};
 let upstreamSocketsClosed = 0;
@@ -62,6 +62,23 @@ const upstream = http.createServer((req, res) => {
   let body = '';
   req.on('data', (c) => (body += c));
   req.on('end', () => {
+    if (mode === 'serve-other') {
+      // Success, but served by a different account than the bridge leased.
+      // The traffic record must name the account that actually served it.
+      const actual = 'fail-acc-b';
+      res.writeHead(200, {
+        'Content-Type': 'application/json',
+        'x-antigravity-account-id': actual,
+      });
+      res.end(
+        JSON.stringify({
+          id: 'cmpl-2',
+          choices: [{ message: { role: 'assistant', content: 'pong' } }],
+          served_by: actual,
+        }),
+      );
+      return;
+    }
     if (mode === 'misdirect') {
       // The core routes to a DIFFERENT account than the bridge would have
       // leased, and that account is the one that is rate limited. The bridge
@@ -250,6 +267,31 @@ test('cooldown lands on the account the core actually used, not the one leased',
 
   leaseManager.clearCooldown('fail-acc-a');
   leaseManager.clearCooldown('fail-acc-b');
+});
+
+test('traffic record names the account the core actually served, not the leased one', async () => {
+  mode = 'serve-other';
+  setPool(
+    makeAccounts('fail', 2).map((a, i) => ({ ...a, id: i === 0 ? 'fail-acc-a' : 'fail-acc-b' })),
+  );
+  hits = {};
+  const before = store.getTraffic().length;
+
+  const res = await fetch(`http://127.0.0.1:${bridgePort}/v1/chat/completions`, chatInit());
+  assert.equal(res.status, 200);
+  await res.json();
+
+  const records = store.getTraffic();
+  assert.ok(records.length > before, 'a traffic record must be written');
+  // Records are unshifted (newest first).
+  const latest = records[0];
+  assert.equal(
+    latest.backingAccountEmail,
+    'fail2@gmail.com',
+    'traffic must be attributed to the serving account (fail-acc-b)'
+  );
+
+  mode = 'slow';
 });
 
 test('client abort mid-stream aborts the upstream socket and releases the lease', async () => {
