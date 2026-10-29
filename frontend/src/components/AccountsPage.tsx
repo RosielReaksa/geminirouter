@@ -292,7 +292,7 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
                           Primary
                         </span>
                       )}
-                      {acc.hasValidationLink && (
+                      {acc.hasValidationLink && !acc.lastTestResult?.ok && (
                         <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-300 flex items-center gap-1 animate-pulse">
                           <AlertTriangle className="w-3 h-3 text-amber-600" />
                           <span>Verification Required</span>
@@ -304,7 +304,7 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
                       <span className="font-mono-code">{acc.email}</span>
                       <span className="text-[#DDD7CE]">·</span>
 
-                      {acc.hasValidationLink ? (
+                      {acc.hasValidationLink && !acc.lastTestResult?.ok ? (
                         <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-amber-800 bg-amber-50 border border-amber-300 rounded px-2 py-0.5">
                           <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
                           <span>Needs Google Verification (Quarantined)</span>
@@ -431,7 +431,7 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
               </div>
 
               {/* Google Security Checkpoint Alert Bar */}
-              {(acc.hasValidationLink || acc.lastTestResult?.requiresValidation) && (
+              {(acc.hasValidationLink || acc.lastTestResult?.requiresValidation) && !acc.lastTestResult?.ok && (
                 <div className="bg-amber-50/90 border border-amber-300 rounded-xl p-3 mb-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-amber-900 shadow-sm animate-in fade-in">
                   <div className="flex items-center gap-2.5">
                     <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />

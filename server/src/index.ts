@@ -235,10 +235,13 @@ export async function createServer(): Promise<{
               : 'Not in use';
 
             const testRes = accountTester.getLastResult(cv.id);
+            // If the account recently passed a live test call (200 OK), it is operational and does NOT require verification
             const requiresVerification =
-              Boolean(cv.health?.validation?.has_verification_link) ||
-              accountTester.isValidationRequired(cv.id) ||
-              Boolean(testRes?.requiresValidation);
+              testRes?.ok === true
+                ? false
+                : Boolean(cv.health?.validation?.has_verification_link) ||
+                  accountTester.isValidationRequired(cv.id) ||
+                  Boolean(testRes?.requiresValidation);
 
             const status = requiresVerification ? 'error' : cv.status === 'active' ? 'active' : 'standby';
 
