@@ -34,7 +34,6 @@ export const App: React.FC = () => {
 
   // Action loaders
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const [isTogglingGateway, setIsTogglingGateway] = useState(false);
   const [notification, setNotification] = useState<string | null>(null);
 
   const showNotification = (msg: string) => {
@@ -91,25 +90,6 @@ export const App: React.FC = () => {
       showNotification('Error refreshing account quotas.');
     } finally {
       setIsRefreshing(false);
-    }
-  };
-
-  const handleToggleGateway = async () => {
-    setIsTogglingGateway(true);
-    try {
-      const nextState = !status.isRunning;
-      const { data, isLiveApi: live } = await api.toggleGateway(nextState);
-      setStatus(data);
-      setIsLiveApi(live);
-      showNotification(
-        nextState
-          ? 'Gateway daemon started on port ' + data.port
-          : 'Gateway daemon paused.'
-      );
-    } catch {
-      showNotification('Failed to toggle gateway daemon.');
-    } finally {
-      setIsTogglingGateway(false);
     }
   };
 
@@ -195,10 +175,10 @@ export const App: React.FC = () => {
               status={status}
               accounts={accounts}
               traffic={traffic}
-              onToggleGateway={handleToggleGateway}
               onNavigateToAccounts={() => setCurrentTab('accounts')}
               onNavigateToGateway={() => setCurrentTab('gateway')}
-              isToggling={isTogglingGateway}
+              onNavigateToModels={() => setCurrentTab('models')}
+              onNavigateToTraffic={() => setCurrentTab('traffic')}
             />
           )}
 

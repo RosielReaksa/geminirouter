@@ -25,6 +25,10 @@ export interface GoogleAccount {
   tier: 'Free Tier' | 'Google AI Studio' | 'Workspace Pay-As-You-Go';
   quotas: ModelQuota[];
   quotaGroups?: any[];
+  /** Compact per-model 5h remaining-quota list for dashboard display. */
+  models5h?: Array<{ name: string; reset: string; percentage: number }>;
+  /** Compact per-model weekly remaining-quota list for dashboard display. */
+  modelsWeekly?: Array<{ name: string; reset: string; percentage: number }>;
   isDefaultRouting: boolean;
   totalRequests24h: number;
   hasValidationLink?: boolean;

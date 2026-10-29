@@ -62,6 +62,27 @@ export async function createServer(): Promise<{
   // Start background auto-test scheduler: calls test model on every account every 5 hours!
   accountTester.startAutoTestScheduler(5);
 
+  /**
+   * The gateway is always-on: the router is useless without it, so there is no
+   * "pause" state. This (re)asserts the running gateway and is used by both the
+   * startup path and the supervisor below.
+   */
+  const ensureGatewayRunning = async (): Promise<boolean> => {
+    // Use resolveGateway(), not the stored port: the store default can be a
+    // stale 8045 while the real core gateway runs on the env/profile port.
+    const { port: targetPort } = resolveGateway();
+    if (!(await coreClient.isCoreAlive())) {
+      return false;
+    }
+    try {
+      await coreClient.callRpc('gatewayStart', { port: targetPort });
+      store.setGatewayRunning(true, targetPort);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
   // Enable CORS
   await app.register(fastifyCors, {
     origin: true,
@@ -117,6 +138,124 @@ export async function createServer(): Promise<{
 
   // REST API Routes
 
+  /**
+   * Read the live account pool from the core and map it to the dashboard shape.
+   * Shared by /api/status and /api/accounts so both always agree.
+   * Returns null when the core is unreachable or returns nothing usable.
+   */
+  const loadCoreAccounts = async (): Promise<GoogleAccount[] | null> => {
+    if (!(await coreClient.isCoreAlive())) return null;
+    try {
+      const coreViews = await coreClient.callRpc<any[]>('accountViews');
+      if (!Array.isArray(coreViews)) return null;
+
+      const mapped: GoogleAccount[] = coreViews.map((cv: any) => {
+        const quotas = cv.quota?.models
+          ? Object.entries(cv.quota.models).map(([modelId, q]: [string, any]) => ({
+              modelId,
+              modelName: q.display_name || modelId,
+              requestsIn5h: Math.round((1 - (q.percentage || 0) / 100) * 50),
+              limitIn5h: 50,
+              resetTime5h: q.resetTime || 'in 3h',
+              tokensIn7d: 100000,
+              limitIn7d: 2000000,
+              resetTime7d: 'in 4 days',
+              isThrottled: (q.percentage || 0) <= 0,
+            }))
+          : [];
+
+        const quotaGroups = Array.isArray(cv.quota?.quota_groups)
+          ? cv.quota.quota_groups.map((g: any) => ({
+              displayName: g.display_name,
+              description: g.description,
+              buckets: Array.isArray(g.buckets)
+                ? g.buckets.map((b: any) => ({
+                    bucketId: b.bucket_id,
+                    window: b.window,
+                    remainingFraction: b.remaining_fraction,
+                    resetTime: b.reset_time,
+                    displayName: b.display_name,
+                  }))
+                : [],
+            }))
+          : undefined;
+
+        const clientTarget = cv.is_active_ide
+          ? 'IDE'
+          : cv.is_active_agy
+          ? 'CLI'
+          : cv.is_active_classic
+          ? 'Classic'
+          : 'Not in use';
+
+        const testRes = accountTester.getLastResult(cv.id);
+
+        // Compact per-model quota lists for the overview. The core reports
+        // `percentage` as REMAINING quota (0 = exhausted, 100 = untouched),
+        // so it is surfaced as-is under a "remaining" label.
+        const coreModels: Record<string, any> = cv.quota?.models || {};
+        const models5h = Object.entries(coreModels)
+          .filter(([, q]: [string, any]) => typeof q?.percentage === 'number')
+          .map(([id, q]: [string, any]) => ({
+            name: q.display_name || id,
+            reset: q.resetTime || '',
+            percentage: Math.round(q.percentage),
+          }))
+          .sort((a, b) => b.percentage - a.percentage)
+          .slice(0, 6);
+
+        // If the account recently passed a live test call (200 OK), it is operational and does NOT require verification
+        const requiresVerification =
+          testRes?.ok === true
+            ? false
+            : Boolean(cv.health?.validation?.has_verification_link) ||
+              accountTester.isValidationRequired(cv.id) ||
+              Boolean(testRes?.requiresValidation);
+
+        const status = requiresVerification ? 'error' : cv.status === 'active' ? 'active' : 'standby';
+
+        return {
+          id: cv.id,
+          email: cv.email,
+          name: cv.name || cv.email.split('@')[0],
+          avatarUrl: cv.avatar_url,
+          status,
+          addedAt: cv.created_at || new Date().toISOString(),
+          lastUsedAt: cv.last_used,
+          tier: (cv.quota?.subscription_tier as any) || 'Google AI Studio',
+          clientTarget,
+          quotas,
+          quotaGroups,
+          models5h,
+          isDefaultRouting: cv.is_active || false,
+          totalRequests24h: 0,
+          hasValidationLink: requiresVerification,
+          statusReason: requiresVerification
+            ? 'Google requires account verification'
+            : cv.status_reason || undefined,
+          lastTestResult: testRes,
+        };
+      });
+
+      // Stable sort: Primary account first, then by creation date ascending, then email.
+      // Never re-orders by lastUsedAt so accounts NEVER jump up or down on test or refresh!
+      mapped.sort((a, b) => {
+        if (a.isDefaultRouting && !b.isDefaultRouting) return -1;
+        if (!a.isDefaultRouting && b.isDefaultRouting) return 1;
+        const tA = Number(a.addedAt) || new Date(a.addedAt).getTime() || 0;
+        const tB = Number(b.addedAt) || new Date(b.addedAt).getTime() || 0;
+        if (tA !== tB) return tA - tB;
+        return a.email.localeCompare(b.email);
+      });
+
+      store.setAccounts(mapped);
+      return mapped;
+    } catch (err) {
+      app.log.warn('Could not read core accounts, falling back to local store');
+      return null;
+    }
+  };
+
   // 1. GET /api/status — real state only. Numbers are derived from real
   // traffic records; nothing here is fabricated. Per-request failover and
   // cooldowns are owned by the core (docs/ACCOUNT-FAILOVER.md); the bridge
@@ -150,13 +289,17 @@ export async function createServer(): Promise<{
       store.setGatewayRunning(gatewayResponding, gatewayPort);
     }
 
-    const accounts = store.getAccounts();
+    // Live pool from the core so the overview always has quota detail.
+    const accounts = (await loadCoreAccounts()) ?? store.getAccounts();
     const traffic = store.getTraffic();
     const pool = derivePoolState(accounts, traffic);
     const activeAccounts = accounts.filter((a) => a.status === 'active');
 
     return {
       isRunning: gatewayResponding,
+      // The gateway is always-on by design; `isRunning` above is the observed
+      // probe result, `alwaysOn` tells the UI not to offer a pause control.
+      alwaysOn: true,
       port: gatewayPort,
       host: store.getConfig().host,
       uptimeSeconds: store.getUptimeSeconds(),
@@ -182,6 +325,27 @@ export async function createServer(): Promise<{
       coreEndpoint: coreClient.getEndpoint(),
       corePid: coreStatus?.pid,
       version: BRIDGE_VERSION,
+      // Extra overview surface: everything the dashboard needs in one call.
+      accounts: accounts.map((a) => ({
+        id: a.id,
+        email: a.email,
+        name: a.name,
+        avatarUrl: a.avatarUrl,
+        status: a.status,
+        tier: a.tier,
+        isDefaultRouting: a.isDefaultRouting,
+        hasValidationLink: Boolean(a.hasValidationLink),
+        statusReason: a.statusReason,
+        lastTestResult: accountTester.getLastResult(a.id) ?? undefined,
+        models5h: a.models5h ?? [],
+        modelsWeekly: a.modelsWeekly ?? [],
+        quotaGroups: a.quotaGroups ?? [],
+      })),
+      config: {        rotationStrategy: store.getConfig().rotationStrategy,
+        autoSwitchOnQuotaLimit: store.getConfig().autoSwitchOnQuotaLimit,
+        enableStreamRelay: store.getConfig().enableStreamRelay,
+        quotaWarningThresholdPercent: store.getConfig().quotaWarningThresholdPercent,
+      },
     };
   });
 
@@ -190,103 +354,7 @@ export async function createServer(): Promise<{
     // Real core accounts whenever the core is reachable — including an empty
     // pool. The demo fallback is ONLY for core-offline demo mode; it must
     // never mask the real pool state.
-    if (await coreClient.isCoreAlive()) {
-      try {
-        const coreViews = await coreClient.callRpc<any[]>('accountViews');
-        if (Array.isArray(coreViews)) {
-          // Map core views to GoogleAccount format
-          const mapped: GoogleAccount[] = coreViews.map((cv: any) => {
-            const quotas = cv.quota?.models
-              ? Object.entries(cv.quota.models).map(([modelId, q]: [string, any]) => ({
-                  modelId,
-                  modelName: q.display_name || modelId,
-                  requestsIn5h: Math.round((1 - (q.percentage || 0) / 100) * 50),
-                  limitIn5h: 50,
-                  resetTime5h: q.resetTime || 'in 3h',
-                  tokensIn7d: 100000,
-                  limitIn7d: 2000000,
-                  resetTime7d: 'in 4 days',
-                  isThrottled: (q.percentage || 0) <= 0,
-                }))
-              : [];
-
-            const quotaGroups = Array.isArray(cv.quota?.quota_groups)
-              ? cv.quota.quota_groups.map((g: any) => ({
-                  displayName: g.display_name,
-                  description: g.description,
-                  buckets: Array.isArray(g.buckets)
-                    ? g.buckets.map((b: any) => ({
-                        bucketId: b.bucket_id,
-                        window: b.window,
-                        remainingFraction: b.remaining_fraction,
-                        resetTime: b.reset_time,
-                        displayName: b.display_name,
-                      }))
-                    : [],
-                }))
-              : undefined;
-
-            const clientTarget = cv.is_active_ide
-              ? 'IDE'
-              : cv.is_active_agy
-              ? 'CLI'
-              : cv.is_active_classic
-              ? 'Classic'
-              : 'Not in use';
-
-            const testRes = accountTester.getLastResult(cv.id);
-            // If the account recently passed a live test call (200 OK), it is operational and does NOT require verification
-            const requiresVerification =
-              testRes?.ok === true
-                ? false
-                : Boolean(cv.health?.validation?.has_verification_link) ||
-                  accountTester.isValidationRequired(cv.id) ||
-                  Boolean(testRes?.requiresValidation);
-
-            const status = requiresVerification ? 'error' : cv.status === 'active' ? 'active' : 'standby';
-
-            return {
-              id: cv.id,
-              email: cv.email,
-              name: cv.name || cv.email.split('@')[0],
-              avatarUrl: cv.avatar_url,
-              status,
-              addedAt: cv.created_at || new Date().toISOString(),
-              lastUsedAt: cv.last_used,
-              tier: (cv.quota?.subscription_tier as any) || 'Google AI Studio',
-              clientTarget,
-              quotas,
-              quotaGroups,
-              isDefaultRouting: cv.is_active || false,
-              totalRequests24h: 0,
-              hasValidationLink: requiresVerification,
-              statusReason: requiresVerification
-                ? 'Google requires account verification'
-                : cv.status_reason || undefined,
-              lastTestResult: testRes,
-            };
-          });
-
-          // Stable sort: Primary account first, then by creation date ascending, then email.
-          // Never re-orders by lastUsedAt so accounts NEVER jump up or down on test or refresh!
-          mapped.sort((a, b) => {
-            if (a.isDefaultRouting && !b.isDefaultRouting) return -1;
-            if (!a.isDefaultRouting && b.isDefaultRouting) return 1;
-            const tA = Number(a.addedAt) || new Date(a.addedAt).getTime() || 0;
-            const tB = Number(b.addedAt) || new Date(b.addedAt).getTime() || 0;
-            if (tA !== tB) return tA - tB;
-            return a.email.localeCompare(b.email);
-          });
-
-          store.setAccounts(mapped);
-          return mapped;
-        }
-      } catch (err) {
-        app.log.warn('Could not read core accounts, falling back to local store');
-      }
-    }
-
-    return store.getAccounts();
+    return (await loadCoreAccounts()) ?? store.getAccounts();
   });
 
   // 2b. GET /api/accounts/:id/validation-url — resolves fresh, live Google account checkpoint URL
@@ -498,7 +566,7 @@ export async function createServer(): Promise<{
 
   // 7. POST /api/gateway/start
   app.post<{ Body?: { port?: number } }>('/api/gateway/start', async (request) => {
-    const targetPort = request.body?.port || store.getGatewayPort() || INTERNAL_GATEWAY_PORT;
+    const targetPort = request.body?.port || resolveGateway().port || INTERNAL_GATEWAY_PORT;
     if (await coreClient.isCoreAlive()) {
       try {
         await coreClient.callRpc('gatewayStart', { port: targetPort });
@@ -516,20 +584,18 @@ export async function createServer(): Promise<{
   });
 
   // 8. POST /api/gateway/stop
+  // The gateway is always-on by design: stopping it would take the whole router
+  // offline. The endpoint is kept for API compatibility but refuses and
+  // re-asserts the running state instead of pausing.
   app.post('/api/gateway/stop', async () => {
-    if (await coreClient.isCoreAlive()) {
-      try {
-        await coreClient.callRpc('gatewayStop');
-      } catch (e) {
-        app.log.warn('Could not invoke gatewayStop via core RPC');
-      }
-    }
-
-    store.setGatewayRunning(false);
+    app.log.warn('gatewayStop refused: the gateway is always-on by design');
+    await ensureGatewayRunning();
     return {
-      success: true,
-      isRunning: false,
-      port: store.getGatewayPort(),
+      success: false,
+      refused: true,
+      isRunning: true,
+      port: resolveGateway().port,
+      message: 'The gateway is always-on and cannot be paused.',
     };
   });
 
@@ -779,6 +845,37 @@ export async function createServer(): Promise<{
       return reply.sendFile('index.html');
     });
   }
+
+  // Always-on gateway: assert it at boot, then re-assert if it ever drops.
+  // The router cannot serve traffic without the gateway, so there is no pause
+  // state to preserve.
+  void ensureGatewayRunning();
+  const gatewaySupervisor = setInterval(() => {
+    void (async () => {
+      if (!(await coreClient.isCoreAlive())) return;
+      const { port: gatewayPort, apiKey } = resolveGateway();
+      let responding = false;
+      try {
+        const r = await axios.get(`http://127.0.0.1:${gatewayPort}/v1/models`, {
+          timeout: 2500,
+          validateStatus: () => true,
+          headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+        });
+        responding = r.status >= 200 && r.status < 500;
+      } catch {
+        responding = false;
+      }
+      if (!responding) {
+        app.log.warn('Gateway not responding; re-asserting always-on gateway');
+        await ensureGatewayRunning();
+      }
+    })();
+  }, 30_000);
+  // Do not hold the event loop open on shutdown.
+  gatewaySupervisor.unref?.();
+  app.addHook('onClose', async () => {
+    clearInterval(gatewaySupervisor);
+  });
 
   return { app, coreClient, store, leaseManager, accountTester };
 }

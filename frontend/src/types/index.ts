@@ -63,7 +63,7 @@ export interface GoogleAccount {
   status: 'active' | 'standby' | 'cooldown' | 'error';
   statusMessage?: string;
   addedAt: string;
-  lastUsedAt?: string;
+  lastUsedAt?: string | number;
   tier: 'Free Tier' | 'Google AI Studio' | 'Workspace Pay-As-You-Go' | 'Google AI Pro';
   clientTarget?: 'CLI' | 'IDE' | 'Classic' | 'Not in use';
   credits?: number; // e.g. 0
@@ -79,8 +79,27 @@ export interface GoogleAccount {
   lastTestResult?: AccountTestResult;
 }
 
+export interface OverviewAccountSummary {
+  id: string;
+  email: string;
+  name: string;
+  avatarUrl?: string;
+  status: 'active' | 'standby' | 'cooldown' | 'error';
+  tier: string;
+  isDefaultRouting: boolean;
+  hasValidationLink: boolean;
+  statusReason?: string;
+  lastUsedAt?: string | number;
+  lastTestResult?: AccountTestResult;
+  models5h: CompactModelQuota[];
+  modelsWeekly: WeeklyQuota[];
+  quotaGroups: QuotaGroup[];
+}
+
 export interface GatewayStatus {
   isRunning: boolean;
+  /** The gateway is always-on by design; there is no pause state. */
+  alwaysOn?: boolean;
   port: number;
   host: string;
   uptimeSeconds: number;
@@ -96,6 +115,24 @@ export interface GatewayStatus {
   totalCapacity?: number;
   maxConcurrentRequestsPerAccount?: number;
   capacityPolicy?: 'queue' | 'reject_429';
+  queueTimeoutMs?: number;
+  coreConnected?: boolean;
+  coreEndpoint?: string;
+  corePid?: number;
+  cooldownAccounts?: Array<{ id: string; email: string; status: string }>;
+  lastSwitch?: {
+    fromEmail: string | null;
+    toEmail: string;
+    at: string;
+    reason: string;
+  } | null;
+  accounts?: OverviewAccountSummary[];
+  config?: {
+    rotationStrategy: string;
+    autoSwitchOnQuotaLimit: boolean;
+    enableStreamRelay: boolean;
+    quotaWarningThresholdPercent: number;
+  };
   version: string;
   healthy: boolean;
 }
