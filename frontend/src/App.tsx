@@ -3,6 +3,7 @@ import { Sidebar, NavTab } from './components/Sidebar';
 import { OverviewPage } from './components/OverviewPage';
 import { AccountsPage } from './components/AccountsPage';
 import { ModelsPage } from './components/ModelsPage';
+import { PlaygroundPage } from './components/PlaygroundPage';
 import { GatewayPage } from './components/GatewayPage';
 import { TrafficPage } from './components/TrafficPage';
 import { SettingsPage } from './components/SettingsPage';
@@ -153,6 +154,8 @@ export const DashboardApp: React.FC = () => {
                 ? 'Accounts & Quotas'
                 : currentTab === 'models'
                 ? 'Available Models'
+                : currentTab === 'playground'
+                ? 'Playground'
                 : currentTab === 'gateway'
                 ? 'API Gateway & Routing'
                 : currentTab === 'traffic'
@@ -212,6 +215,8 @@ export const DashboardApp: React.FC = () => {
               onNavigateToGateway={() => setCurrentTab('gateway')}
             />
           )}
+
+          {currentTab === 'playground' && <PlaygroundPage />}
 
           {currentTab === 'gateway' && (
             <GatewayPage

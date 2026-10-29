@@ -214,3 +214,17 @@ export interface ModelTestResult {
   httpStatus?: number | null;
   error?: string;
 }
+
+export interface PlaygroundResult {
+  ok: boolean;
+  model: string;
+  response?: string;
+  latencyMs: number;
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    total_tokens?: number;
+  };
+  error?: string;
+  httpStatus?: number | null;
+}

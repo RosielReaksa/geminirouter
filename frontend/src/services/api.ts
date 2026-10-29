@@ -7,6 +7,7 @@ import {
   OAuthCompleteResponse,
   ModelsResponse,
   ModelTestResult,
+  PlaygroundResult,
 } from '../types';
 import {
   INITIAL_MOCK_ACCOUNTS,
@@ -330,6 +331,28 @@ export class ApiClient {
       body: JSON.stringify({ model }),
     });
     return res.json();
+  }
+
+  async playgroundRequest(input: {
+    model: string;
+    prompt: string;
+    systemPrompt?: string;
+    temperature: number;
+    maxTokens: number;
+  }): Promise<PlaygroundResult> {
+    const res = await fetch('/api/playground', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...authApi.headers(),
+      },
+      body: JSON.stringify(input),
+    });
+    const result = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(result.error || `Request failed with HTTP ${res.status}`);
+    }
+    return result as PlaygroundResult;
   }
 
   // Helper: Delete account

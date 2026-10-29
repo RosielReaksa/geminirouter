@@ -5,13 +5,14 @@ import {
   Boxes,
   Network,
   Activity,
+  FlaskConical,
   Sliders,
   ExternalLink,
   ShieldCheck,
   LogOut,
 } from 'lucide-react';
 
-export type NavTab = 'overview' | 'accounts' | 'models' | 'gateway' | 'traffic' | 'settings';
+export type NavTab = 'overview' | 'accounts' | 'models' | 'playground' | 'gateway' | 'traffic' | 'settings';
 
 interface SidebarProps {
   currentTab: NavTab;
@@ -49,6 +50,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
       label: 'Available Models',
       icon: Boxes,
       desc: 'Real model catalog & live test calls',
+    },
+    {
+      id: 'playground' as NavTab,
+      label: 'Playground',
+      icon: FlaskConical,
+      desc: 'Try prompts and compare models',
     },
     {
       id: 'gateway' as NavTab,

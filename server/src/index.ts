@@ -943,6 +943,82 @@ export async function createServer(): Promise<{
     }
   });
 
+  // 13a. POST /api/playground — run a user-provided prompt through the local gateway
+  app.post<{
+    Body: {
+      model?: unknown;
+      prompt?: unknown;
+      systemPrompt?: unknown;
+      temperature?: unknown;
+      maxTokens?: unknown;
+    };
+  }>('/api/playground', async (request, reply) => {
+    const { model, prompt, systemPrompt, temperature, maxTokens } = request.body || {};
+    if (typeof model !== 'string' || !model.trim()) {
+      return reply.code(400).send({ ok: false, error: 'Choose a model to run.' });
+    }
+    if (typeof prompt !== 'string' || !prompt.trim()) {
+      return reply.code(400).send({ ok: false, error: 'Enter a prompt to run.' });
+    }
+    if (prompt.length > 20000 || (typeof systemPrompt === 'string' && systemPrompt.length > 5000)) {
+      return reply.code(413).send({ ok: false, error: 'Prompt is too long.' });
+    }
+
+    const safeTemperature = typeof temperature === 'number' && Number.isFinite(temperature)
+      ? Math.max(0, Math.min(2, temperature))
+      : 0.7;
+    const safeMaxTokens = typeof maxTokens === 'number' && Number.isFinite(maxTokens)
+      ? Math.max(1, Math.min(8192, Math.floor(maxTokens)))
+      : 1024;
+    const { port: gatewayPort, apiKey } = resolveGateway();
+    const startedAt = Date.now();
+    const messages = [
+      ...(typeof systemPrompt === 'string' && systemPrompt.trim()
+        ? [{ role: 'system', content: systemPrompt.trim() }]
+        : []),
+      { role: 'user', content: prompt.trim() },
+    ];
+
+    try {
+      const response = await axios.post(
+        `http://127.0.0.1:${gatewayPort}/v1/chat/completions`,
+        { model: model.trim(), messages, temperature: safeTemperature, max_tokens: safeMaxTokens },
+        {
+          timeout: 30000,
+          headers: {
+            'Content-Type': 'application/json',
+            ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+          },
+        },
+      );
+      const content = response.data?.choices?.[0]?.message?.content;
+      const resultText = typeof content === 'string'
+        ? content
+        : Array.isArray(content)
+          ? content.map((part: any) => typeof part?.text === 'string' ? part.text : '').join('')
+          : '';
+      return {
+        ok: true,
+        model: model.trim(),
+        response: resultText || '(empty response)',
+        latencyMs: Date.now() - startedAt,
+        usage: response.data?.usage || undefined,
+      };
+    } catch (error: any) {
+      const status = error?.response?.status;
+      const detail = error?.response?.data?.error?.message || error?.response?.data?.message || error?.code || error?.message;
+      return reply.code(status ? 502 : 503).send({
+        ok: false,
+        model: model.trim(),
+        latencyMs: Date.now() - startedAt,
+        httpStatus: status ?? null,
+        error: status
+          ? `Gateway returned HTTP ${status}: ${detail}`
+          : `Gateway unreachable on port ${gatewayPort}. Start the gateway first (${detail})`,
+      });
+    }
+  });
+
   // 14. Core process control endpoints
   app.post('/api/core/start', async () => {
     const res = processManager.startCore();
