@@ -134,6 +134,8 @@ export const DashboardApp: React.FC = () => {
         isLiveApi={isLiveApi}
         activeAccountsCount={accounts.filter((a) => a.status === 'active').length}
         onSignOut={async () => {
+          // logout() clears the token and records the explicit sign-out so the
+          // router does not immediately re-authenticate in open mode.
           await authApi.logout();
           navigate('/login', { replace: true });
         }}

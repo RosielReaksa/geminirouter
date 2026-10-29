@@ -143,15 +143,16 @@ export async function createServer(): Promise<{
 
   // POST /api/auth/login — exchange the admin password for a session token.
   app.post<{ Body?: { password?: string } }>('/api/auth/login', async (request, reply) => {
+    // Open mode (no admin password): issue a session with no credential at all,
+    // so signing out and back in still works.
+    if (!ADMIN_PASSWORD) {
+      const session = sessions.create();
+      return { ok: true, token: session.token, expiresAt: session.expiresAt, open: true };
+    }
+
     const password = request.body?.password;
     if (typeof password !== 'string' || password.length === 0) {
       return reply.code(400).send({ ok: false, error: 'Password is required.' });
-    }
-
-    if (!ADMIN_PASSWORD) {
-      // No password configured: the dashboard is open.
-      const session = sessions.create();
-      return { ok: true, token: session.token, expiresAt: session.expiresAt, open: true };
     }
 
     if (!safeEqual(password, ADMIN_PASSWORD)) {

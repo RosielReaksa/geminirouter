@@ -8,12 +8,30 @@ export const LoginPage: React.FC<{ onSuccess?: () => void }> = ({ onSuccess }) =
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // True when the gateway has no admin password configured. Signing out is
+  // still meaningful (it hides the dashboard), so offer a way back in.
+  const [openMode, setOpenMode] = useState(false);
 
-  const submit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  React.useEffect(() => {
+    let cancelled = false;
+    // Probe without the sign-out flag in play so we learn the real mode.
+    fetch('/api/auth/session')
+      .then((r) => r.json())
+      .then((d) => {
+        if (!cancelled && d?.open === true) setOpenMode(true);
+      })
+      .catch(() => {
+        /* ignore */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const enter = async (value: string) => {
     setBusy(true);
     setError(null);
-    const res = await authApi.login(password);
+    const res = await authApi.login(value);
     setBusy(false);
     if (!res.ok) {
       setError(res.error || 'Sign in failed.');
@@ -21,6 +39,15 @@ export const LoginPage: React.FC<{ onSuccess?: () => void }> = ({ onSuccess }) =
     }
     onSuccess?.();
     navigate('/app', { replace: true });
+  };
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (openMode && password.length === 0) {
+      await enter('');
+      return;
+    }
+    await enter(password);
   };
 
   return (
@@ -38,31 +65,35 @@ export const LoginPage: React.FC<{ onSuccess?: () => void }> = ({ onSuccess }) =
 
             <h1 className="text-[19px] font-semibold text-[#191714]">Sign in</h1>
             <p className="mt-1.5 text-[13px] text-[#7A736A]">
-              Enter the admin password for this gateway.
+              {openMode
+                ? 'This gateway has no admin password set, so anyone with access can open the dashboard.'
+                : 'Enter the admin password for this gateway.'}
             </p>
 
             <form onSubmit={submit} className="mt-6 space-y-3">
-              <div>
-                <label
-                  htmlFor="password"
-                  className="block text-[11px] uppercase tracking-wider text-[#A39C92] mb-1.5"
-                >
-                  Admin password
-                </label>
-                <input
-                  id="password"
-                  type="password"
-                  autoFocus
-                  autoComplete="current-password"
-                  value={password}
-                  onChange={(e) => {
-                    setPassword(e.target.value);
-                    setError(null);
-                  }}
-                  className="w-full px-3.5 py-2.5 rounded-xl border border-[#E4DED4] bg-[#FBF9F5] text-[14px] text-[#191714] focus:outline-none focus:border-[#C25938] focus:ring-2 focus:ring-[#F5E7E0] transition"
-                  placeholder="••••••••"
-                />
-              </div>
+              {!openMode && (
+                <div>
+                  <label
+                    htmlFor="password"
+                    className="block text-[11px] uppercase tracking-wider text-[#A39C92] mb-1.5"
+                  >
+                    Admin password
+                  </label>
+                  <input
+                    id="password"
+                    type="password"
+                    autoFocus
+                    autoComplete="current-password"
+                    value={password}
+                    onChange={(e) => {
+                      setPassword(e.target.value);
+                      setError(null);
+                    }}
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-[#E4DED4] bg-[#FBF9F5] text-[14px] text-[#191714] focus:outline-none focus:border-[#C25938] focus:ring-2 focus:ring-[#F5E7E0] transition"
+                    placeholder="••••••••"
+                  />
+                </div>
+              )}
 
               {error && (
                 <div className="flex items-start gap-2 text-[12.5px] text-[#A8462A] bg-[#FAF2EF] border border-[#EBD3C7] rounded-lg px-3 py-2">
@@ -73,7 +104,7 @@ export const LoginPage: React.FC<{ onSuccess?: () => void }> = ({ onSuccess }) =
 
               <button
                 type="submit"
-                disabled={busy || password.length === 0}
+                disabled={busy || (!openMode && password.length === 0)}
                 className="group w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-[#191714] text-white text-[13.5px] font-medium hover:bg-[#332E28] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
               >
                 {busy ? 'Signing in…' : 'Continue'}

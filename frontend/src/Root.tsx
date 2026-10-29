@@ -51,7 +51,10 @@ export const Root: React.FC = () => {
       if (!res.authenticated && pathname.startsWith('/app')) {
         navigate('/login', { replace: true });
       }
-      if (res.authenticated && pathname === '/login') {
+      // Only bounce /login -> /app on a real session. After an explicit sign-out
+      // the server may still report "authenticated" (open mode), so this must
+      // not fight the sign-out flag in authApi.check().
+      if (res.authenticated && pathname === '/login' && !authApi.isSignedOut()) {
         navigate('/app', { replace: true });
       }
     });
