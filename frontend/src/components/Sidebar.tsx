@@ -1,4 +1,5 @@
 import React from 'react';
+import { Link } from '../router';
 import {
   LayoutDashboard,
   Users,
@@ -9,6 +10,7 @@ import {
   ExternalLink,
   ShieldCheck,
   LogOut,
+  LifeBuoy,
 } from 'lucide-react';
 
 export type NavTab = 'overview' | 'accounts' | 'models' | 'gateway' | 'traffic' | 'settings';
@@ -173,6 +175,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
             <ExternalLink className="w-3 h-3" />
           </a>
         </div>
+
+        <Link
+          to="/help"
+          className="mt-2 w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-[11.5px] text-[#706B65] hover:bg-[#F2ECE4] hover:text-[#2A2723] transition-colors"
+        >
+          <LifeBuoy className="w-3.5 h-3.5" />
+          <span>Help centre</span>
+        </Link>
 
         {onSignOut && (
           <button

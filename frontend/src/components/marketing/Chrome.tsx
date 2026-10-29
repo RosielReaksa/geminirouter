@@ -70,6 +70,7 @@ const NAV_LINKS = [
   { to: '/models', label: 'Models' },
   { to: '/pricing', label: 'Pricing' },
   { to: '/docs', label: 'Docs' },
+  { to: '/help', label: 'Help' },
 ];
 
 export const Wordmark: React.FC<{ dark?: boolean; small?: boolean }> = ({ dark, small }) => (
@@ -222,6 +223,11 @@ export const PublicFooter: React.FC = () => (
               </Link>
             </li>
             <li>
+              <Link to="/help" className="text-[#4A453E] hover:text-[#C25938] transition-colors">
+                Help centre
+              </Link>
+            </li>
+            <li>
               <Link to="/app" className="text-[#4A453E] hover:text-[#C25938] transition-colors">
                 Dashboard
               </Link>
@@ -250,6 +256,11 @@ export const PublicFooter: React.FC = () => (
             <li>
               <Link to="/docs#limits" className="text-[#4A453E] hover:text-[#C25938] transition-colors">
                 Rate limits
+              </Link>
+            </li>
+            <li>
+              <Link to="/help#troubleshooting" className="text-[#4A453E] hover:text-[#C25938] transition-colors">
+                Troubleshooting
               </Link>
             </li>
           </ul>

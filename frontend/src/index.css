@@ -107,8 +107,10 @@
   color: var(--mkt-ink);
   -webkit-font-smoothing: antialiased;
   /* A marketing page must never scroll sideways; wide children (marquees,
-     code blocks) clip instead. */
-  overflow-x: hidden;
+     code blocks) clip instead. `clip` rather than `hidden` on purpose:
+     `overflow-x: hidden` makes this element a scroll container, which
+     silently breaks every `position: sticky` table of contents inside it. */
+  overflow-x: clip;
 }
 
 /* Fine editorial rule used between marketing sections. */
