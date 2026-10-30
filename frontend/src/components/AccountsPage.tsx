@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { GoogleAccount } from '../types';
 import { api } from '../services/api';
+import { authApi } from '../services/authApi';
 
 interface AccountsPageProps {
   accounts: GoogleAccount[];
@@ -51,19 +52,25 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
     try {
       const res = await fetch(`/api/accounts/${encodeURIComponent(accountId)}/test`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...authApi.headers(),
+        },
         body: JSON.stringify({ model: 'gemini-3.8-flash-low' }),
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
+      if (res.status === 401) {
+        window.dispatchEvent(new CustomEvent('geminirouter:unauthorized'));
+      }
       if (data.ok) {
         if (onShowNotification) {
           onShowNotification(`✓ Test passed: Google AI Studio responded in ${data.latencyMs}ms with "${data.sample}". Quotas refreshed.`);
         }
       } else {
         if (onShowNotification) {
-          onShowNotification(`⚠ Test failed: ${data.error || 'Unknown error'}`);
+          onShowNotification(`⚠ Test failed: ${data.message || data.error || 'Unknown error'}`);
         } else {
-          alert(`Test call failed: ${data.error || 'Unknown error'}`);
+          alert(`Test call failed: ${data.message || data.error || 'Unknown error'}`);
         }
       }
 
@@ -97,8 +104,13 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
       if (onShowNotification) {
         onShowNotification('Requesting fresh verification link from Google...');
       }
-      const res = await fetch(`/api/accounts/${encodeURIComponent(accountId)}/validation-url`);
+      const res = await fetch(`/api/accounts/${encodeURIComponent(accountId)}/validation-url`, {
+        headers: authApi.headers(),
+      });
       const data = await res.json();
+      if (res.status === 401) {
+        window.dispatchEvent(new CustomEvent('geminirouter:unauthorized'));
+      }
       if (data.ok && data.url) {
         if (newTab) {
           newTab.location.href = data.url;
@@ -129,10 +141,16 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
     try {
       const res = await fetch(`/api/accounts/${encodeURIComponent(accountId)}/switch`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...authApi.headers(),
+        },
         body: JSON.stringify({ appTarget }),
       });
       const data = await res.json();
+      if (res.status === 401) {
+        window.dispatchEvent(new CustomEvent('geminirouter:unauthorized'));
+      }
       if (data.success) {
         onRefreshQuotas();
       } else {

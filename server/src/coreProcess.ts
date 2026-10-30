@@ -7,14 +7,14 @@ export class CoreProcessManager {
   private coreMainPath: string;
 
   constructor() {
-    // Check multiple candidate locations for AntigravityManager core build output
+    // The core is an external dependency, resolved via CORE_MAIN_PATH or CORE_HOME.
+    const coreHome = process.env.CORE_HOME || '';
     const candidates = [
       process.env.CORE_MAIN_PATH || '',
-      path.resolve(process.cwd(), '../AntigravityManager/dist/core/main.cjs'),
-      path.resolve('D:/projectradom/AntigravityManager/dist/core/main.cjs'),
+      coreHome ? path.join(coreHome, 'dist', 'core', 'main.cjs') : '',
       path.resolve(process.cwd(), '../core/dist/core/main.cjs'),
       path.resolve('/opt/geminirouter/core/dist/core/main.cjs'),
-      path.resolve(process.cwd(), '../../AntigravityManager/dist/core/main.cjs'),
+      path.resolve(process.cwd(), '../AntigravityManager/dist/core/main.cjs'),
     ].filter(Boolean);
 
     let found = '';
@@ -47,7 +47,7 @@ export class CoreProcessManager {
     if (!fs.existsSync(this.coreMainPath)) {
       return {
         success: false,
-        message: `Core bundle not found at ${this.coreMainPath}. Please run "pnpm run build:core" in AntigravityManager directory first.`,
+        message: `Core bundle not found at ${this.coreMainPath}. Install the AntigravityManager core separately and set CORE_MAIN_PATH (or CORE_HOME) to its location.`,
       };
     }
 

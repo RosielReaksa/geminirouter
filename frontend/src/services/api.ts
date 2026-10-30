@@ -8,6 +8,8 @@ import {
   ModelsResponse,
   ModelTestResult,
   PlaygroundResult,
+  TrafficVolumeRange,
+  TrafficVolumeResponse,
 } from '../types';
 import {
   INITIAL_MOCK_ACCOUNTS,
@@ -296,9 +298,12 @@ export class ApiClient {
   }
 
   // 9. GET /api/traffic
-  async getTraffic(): Promise<{ data: TrafficRecord[]; isLiveApi: boolean }> {
+  async getTraffic(range?: { from: number; to: number }): Promise<{ data: TrafficRecord[]; isLiveApi: boolean }> {
+    const query = range
+      ? `?from=${encodeURIComponent(range.from)}&to=${encodeURIComponent(range.to)}`
+      : '';
     return this.fetchWithFallback<TrafficRecord[]>(
-      '/api/traffic',
+      `/api/traffic${query}`,
       { method: 'GET' },
       () => {
         return getStored<TrafficRecord[]>(
@@ -306,6 +311,29 @@ export class ApiClient {
           INITIAL_MOCK_TRAFFIC
         );
       }
+    );
+  }
+
+  async getTrafficVolume(range: TrafficVolumeRange): Promise<{ data: TrafficVolumeResponse; isLiveApi: boolean }> {
+    const durations: Record<TrafficVolumeRange, number> = {
+      '12h': 12 * 60 * 60 * 1000,
+      '24h': 24 * 60 * 60 * 1000,
+      '7d': 7 * 24 * 60 * 60 * 1000,
+    };
+    const windowEnd = Date.now();
+    return this.fetchWithFallback<TrafficVolumeResponse>(
+      `/api/traffic/volume?range=${range}`,
+      { method: 'GET' },
+      () => ({
+        range,
+        available: false,
+        windowStart: new Date(windowEnd - durations[range]).toISOString(),
+        windowEnd: new Date(windowEnd).toISOString(),
+        bucketMs: range === '7d' ? 6 * 60 * 60 * 1000 : 60 * 60 * 1000,
+        buckets: [],
+        totalRequests: 0,
+        totalErrors: 0,
+      }),
     );
   }
 
@@ -327,9 +355,30 @@ export class ApiClient {
   async testModel(model: string): Promise<ModelTestResult> {
     const res = await fetch('/api/models/test', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        ...authApi.headers(),
+      },
       body: JSON.stringify({ model }),
     });
+    if (res.status === 401) {
+      window.dispatchEvent(new CustomEvent('geminirouter:unauthorized'));
+    }
+    return res.json();
+  }
+
+  async testAllModelsAcrossAccounts(): Promise<{ ok: boolean; models?: number; accounts?: number; error?: string }> {
+    const res = await fetch('/api/models/test-all-accounts', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...authApi.headers(),
+      },
+      body: JSON.stringify({}),
+    });
+    if (res.status === 401) {
+      window.dispatchEvent(new CustomEvent('geminirouter:unauthorized'));
+    }
     return res.json();
   }
 
@@ -359,7 +408,12 @@ export class ApiClient {
   async deleteAccount(accountId: string): Promise<GoogleAccount[]> {    try {
       const res = await fetch(`/api/accounts/${encodeURIComponent(accountId)}`, {
         method: 'DELETE',
+        headers: authApi.headers(),
       });
+      if (res.status === 401) {
+        window.dispatchEvent(new CustomEvent('geminirouter:unauthorized'));
+        return [];
+      }
       if (res.ok) {
         const { data } = await this.getAccounts();
         return data;

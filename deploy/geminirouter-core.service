@@ -7,11 +7,13 @@ Wants=network-online.target
 Type=simple
 User=geminirouter
 Group=geminirouter
-WorkingDirectory=/opt/geminirouter
+WorkingDirectory=/opt/geminirouter/core
 Environment=NODE_ENV=production
 Environment=PORT=8045
+Environment=CORE_HOME=/opt/geminirouter/core
+Environment=CORE_MAIN_PATH=/opt/geminirouter/core/dist/core/main.cjs
 EnvironmentFile=-/opt/geminirouter/.env
-ExecStart=/usr/bin/node /opt/geminirouter/dist/core/main.cjs
+ExecStart=/usr/bin/node /opt/geminirouter/core/dist/core/main.cjs
 Restart=always
 RestartSec=5s
 

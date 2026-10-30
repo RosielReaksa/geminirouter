@@ -24,7 +24,10 @@ export function navigate(to: string, options?: { replace?: boolean }): void {
     window.history.pushState({}, '', to);
   }
   window.dispatchEvent(new PopStateEvent('popstate'));
-  window.scrollTo({ top: 0, behavior: 'instant' as ScrollBehavior });
+  if (window.scrollY > 0) {
+    const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    window.scrollTo({ top: 0, behavior: reduceMotion ? 'instant' as ScrollBehavior : 'smooth' });
+  }
 }
 
 interface LinkProps extends React.AnchorHTMLAttributes<HTMLAnchorElement> {

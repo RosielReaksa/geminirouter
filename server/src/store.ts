@@ -34,6 +34,10 @@ export interface GoogleAccount {
   hasValidationLink?: boolean;
   validationUrl?: string;
   statusReason?: string;
+  /** Raw core status (`active` | `rate_limited` | `expired`). */
+  coreStatus?: string;
+  /** True when the core reports the OAuth refresh is blocked (needs reauth). */
+  refreshBlocked?: boolean;
 }
 
 export interface GatewayConfig {
@@ -69,6 +73,19 @@ export interface TrafficRecord {
   completionTokens: number;
   totalTokens: number;
   cachedTokens?: number;
+}
+
+export interface ModelAvailabilityResult {
+  model: string;
+  ok: boolean;
+  status?: 'working' | 'temporarily_unavailable' | 'expired' | 'needs_verification';
+  checkedAccounts?: number;
+  workingAccounts?: number;
+  latencyMs: number;
+  sample?: string;
+  httpStatus?: number | null;
+  error?: string;
+  checkedAt: string;
 }
 
 export interface GatewayStatus {
@@ -116,6 +133,7 @@ export class LocalStateStore {
   private config: GatewayConfig;
   private accounts: GoogleAccount[];
   private traffic: TrafficRecord[];
+  private modelTests: Record<string, ModelAvailabilityResult>;
   private startTime = Date.now();
   private gatewayRunning = true;
   private gatewayPort = 8045;
@@ -132,6 +150,7 @@ export class LocalStateStore {
     this.config = loaded.config || { ...DEFAULT_CONFIG };
     this.accounts = loaded.accounts || [...DEFAULT_ACCOUNTS];
     this.traffic = loaded.traffic || [...DEFAULT_TRAFFIC];
+    this.modelTests = loaded.modelTests || {};
     this.gatewayPort = this.config.port || 8045;
   }
 
@@ -139,6 +158,7 @@ export class LocalStateStore {
     config?: GatewayConfig;
     accounts?: GoogleAccount[];
     traffic?: TrafficRecord[];
+    modelTests?: Record<string, ModelAvailabilityResult>;
   } {
     if (fs.existsSync(this.stateFile)) {
       try {
@@ -160,6 +180,7 @@ export class LocalStateStore {
             config: this.config,
             accounts: this.accounts,
             traffic: this.traffic.slice(0, 100), // persist recent 100 logs
+            modelTests: this.modelTests,
           },
           null,
           2
@@ -173,6 +194,16 @@ export class LocalStateStore {
 
   getConfig(): GatewayConfig {
     return { ...this.config };
+  }
+
+  getModelTest(model: string): ModelAvailabilityResult | undefined {
+    const result = this.modelTests[model];
+    return result ? { ...result } : undefined;
+  }
+
+  setModelTest(result: ModelAvailabilityResult): void {
+    this.modelTests[result.model] = result;
+    this.saveState();
   }
 
   updateConfig(partial: Partial<GatewayConfig>): GatewayConfig {

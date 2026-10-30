@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Sidebar, NavTab } from './components/Sidebar';
 import { OverviewPage } from './components/OverviewPage';
 import { AccountsPage } from './components/AccountsPage';
@@ -8,9 +8,10 @@ import { GatewayPage } from './components/GatewayPage';
 import { TrafficPage } from './components/TrafficPage';
 import { SettingsPage } from './components/SettingsPage';
 import { OAuthModal } from './components/OAuthModal';
+import { LoadingScreen } from './components/LoadingScreen';
 import { api } from './services/api';
 import { authApi } from './services/authApi';
-import { navigate } from './router';
+import { navigate, usePathname } from './router';
 import {
   GatewayStatus,
   GoogleAccount,
@@ -26,9 +27,33 @@ import {
 
 /** The authenticated dashboard application (served at /app). */
 export const DashboardApp: React.FC = () => {
-  const [currentTab, setCurrentTab] = useState<NavTab>('overview');
+  const pathname = usePathname();
+  const tabSegment = pathname.split('/')[2] as NavTab | undefined;
+  const currentTab: NavTab = tabSegment && [
+    'overview', 'accounts', 'models', 'playground', 'gateway', 'traffic', 'settings',
+  ].includes(tabSegment) ? tabSegment : 'overview';
+  const previousTab = useRef(currentTab);
+  const [isPageSwitchLoading, setIsPageSwitchLoading] = useState(false);
+  const pageName = currentTab === 'accounts' ? 'Accounts & Quotas'
+    : currentTab === 'models' ? 'Available Models'
+    : currentTab === 'playground' ? 'Playground'
+    : currentTab === 'gateway' ? 'API Gateway & Routing'
+    : currentTab === 'traffic' ? 'Traffic Monitor'
+    : currentTab === 'settings' ? 'Settings'
+    : 'Overview';
+  const trafficQuery = new URLSearchParams(window.location.search);
+  const hasSelectedTrafficRange = currentTab === 'traffic'
+    && trafficQuery.has('from')
+    && trafficQuery.has('to')
+    && Number.isFinite(Number(trafficQuery.get('from')))
+    && Number.isFinite(Number(trafficQuery.get('to')))
+    && Number(trafficQuery.get('to')) > Number(trafficQuery.get('from'));
+  const navigateToTab = (tab: NavTab) => {
+    navigate(tab === 'overview' ? '/app' : `/app/${tab}`);
+  };
   const [isOAuthModalOpen, setIsOAuthModalOpen] = useState(false);
   const [isLiveApi, setIsLiveApi] = useState(false);
+  const [isInitialLoading, setIsInitialLoading] = useState(true);
 
   // Core Data States
   const [status, setStatus] = useState<GatewayStatus>(INITIAL_MOCK_STATUS);
@@ -62,6 +87,8 @@ export const DashboardApp: React.FC = () => {
       setIsLiveApi(statusRes.isLiveApi);
     } catch (err) {
       console.error('Data load error:', err);
+    } finally {
+      setIsInitialLoading(false);
     }
   };
 
@@ -80,6 +107,26 @@ export const DashboardApp: React.FC = () => {
 
     return () => clearInterval(interval);
   }, []);
+
+  useEffect(() => {
+    if (previousTab.current === currentTab) return;
+    previousTab.current = currentTab;
+    setIsPageSwitchLoading(true);
+    // These pages use data already loaded into the dashboard shell. The
+    // overview and model tools fetch their own live catalog and clear the
+    // overlay from their request's finally handler.
+    if (!['overview', 'models', 'playground'].includes(currentTab) && !hasSelectedTrafficRange) {
+      setIsPageSwitchLoading(false);
+    }
+  }, [currentTab]);
+
+  const handlePageReady = (tab: NavTab) => {
+    const segment = window.location.pathname.split('/')[2] as NavTab | undefined;
+    const activeTab: NavTab = segment && [
+      'overview', 'accounts', 'models', 'playground', 'gateway', 'traffic', 'settings',
+    ].includes(segment) ? segment : 'overview';
+    if (activeTab === tab) setIsPageSwitchLoading(false);
+  };
 
   const handleRefreshQuotas = async () => {
     setIsRefreshing(true);
@@ -125,12 +172,19 @@ export const DashboardApp: React.FC = () => {
     showNotification(`Added ${newAccount.email} to quota pool.`);
   };
 
+  if (isInitialLoading) {
+    return <LoadingScreen detail="Connecting your accounts and models…" />;
+  }
+
   return (
     <div className="min-h-screen bg-[#FBF9F5] flex flex-col md:flex-row text-[#2A2723]">
+      {isPageSwitchLoading && (
+        <LoadingScreen title={`Opening ${pageName}`} detail="Getting this page ready…" />
+      )}
       {/* Sidebar Navigation */}
       <Sidebar
         currentTab={currentTab}
-        onSelectTab={setCurrentTab}
+        onSelectTab={navigateToTab}
         isRunning={status.isRunning}
         isLiveApi={isLiveApi}
         activeAccountsCount={accounts.filter((a) => a.status === 'active').length}
@@ -147,7 +201,7 @@ export const DashboardApp: React.FC = () => {
         {/* Top Floating App Bar */}
         <header className="h-16 border-b border-[#EAE5DE] px-6 sm:px-10 flex items-center justify-between bg-white/70 backdrop-blur-sm sticky top-0 z-20">
           <div className="flex items-center gap-3">
-            <span className="font-serif-editorial text-xl font-bold text-[#2A2723] capitalize">
+            <span key={currentTab} className="font-serif-editorial text-xl font-bold text-[#2A2723] capitalize dashboard-title-enter">
               {currentTab === 'overview'
                 ? 'Overview'
                 : currentTab === 'accounts'
@@ -182,15 +236,23 @@ export const DashboardApp: React.FC = () => {
 
         {/* Tab Page Container */}
         <div className="p-6 sm:p-10 max-w-6xl w-full mx-auto pb-20">
+          <div key={currentTab} className="dashboard-page-enter">
           {currentTab === 'overview' && (
             <OverviewPage
               status={status}
               accounts={accounts}
               traffic={traffic}
-              onNavigateToAccounts={() => setCurrentTab('accounts')}
-              onNavigateToGateway={() => setCurrentTab('gateway')}
-              onNavigateToModels={() => setCurrentTab('models')}
-              onNavigateToTraffic={() => setCurrentTab('traffic')}
+              onReady={() => handlePageReady('overview')}
+              onNavigateToAccounts={() => navigateToTab('accounts')}
+              onNavigateToGateway={() => navigateToTab('gateway')}
+              onNavigateToModels={() => navigateToTab('models')}
+              onNavigateToTraffic={(range) => {
+                if (range) {
+                  navigate(`/app/traffic?from=${range.from}&to=${range.to}`);
+                } else {
+                  navigateToTab('traffic');
+                }
+              }}
             />
           )}
 
@@ -212,11 +274,14 @@ export const DashboardApp: React.FC = () => {
           {currentTab === 'models' && (
             <ModelsPage
               gatewayOnline={status.isRunning}
-              onNavigateToGateway={() => setCurrentTab('gateway')}
+              onReady={() => handlePageReady('models')}
+              onNavigateToGateway={() => navigateToTab('gateway')}
             />
           )}
 
-          {currentTab === 'playground' && <PlaygroundPage />}
+          {currentTab === 'playground' && (
+            <PlaygroundPage onReady={() => handlePageReady('playground')} />
+          )}
 
           {currentTab === 'gateway' && (
             <GatewayPage
@@ -225,7 +290,9 @@ export const DashboardApp: React.FC = () => {
             />
           )}
 
-          {currentTab === 'traffic' && <TrafficPage traffic={traffic} />}
+          {currentTab === 'traffic' && (
+            <TrafficPage traffic={traffic} onReady={() => handlePageReady('traffic')} />
+          )}
 
           {currentTab === 'settings' && (
             <SettingsPage
@@ -233,6 +300,7 @@ export const DashboardApp: React.FC = () => {
               onUpdateConfig={handleUpdateConfig}
             />
           )}
+          </div>
         </div>
       </main>
 

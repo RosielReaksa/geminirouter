@@ -201,8 +201,10 @@ before(async () => {
 });
 
 after(async () => {
+  appInstance.server.closeAllConnections?.();
   await appInstance.close();
-  upstream.close();
+  upstream.closeAllConnections?.();
+  await new Promise<void>((resolve) => upstream.close(() => resolve()));
   try {
     fs.rmSync(tempHome, { recursive: true, force: true });
   } catch {

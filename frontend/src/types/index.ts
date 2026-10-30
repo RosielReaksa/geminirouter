@@ -107,6 +107,11 @@ export interface GatewayStatus {
   totalAccountsCount: number;
   requestsLast24h: number;
   tokensLast24h: number;
+  requestsLast12h?: number;
+  errorsLast12h?: number;
+  errorsLast24h?: number;
+  requestVolume12h?: number[];
+  requestVolume12hWindowEnd?: string;
   averageLatencyMs: number | null;
   successRate: number | null; // percentage, e.g. 99.4
   activeBackingAccountEmail?: string | null;
@@ -197,6 +202,44 @@ export interface ModelInfo {
   contextLength: number;
   maxOutputTokens: number;
   live: boolean;
+  availability?: ModelTestResult & { checkedAt: string };
+  availabilityHistory?: ModelAvailabilityHistory;
+}
+
+export interface ModelAvailabilityHistory {
+  windowStart: string;
+  windowEnd: string;
+  bucketMs: number;
+  buckets: Array<{
+    state: 'ok' | 'partial' | 'error' | 'empty';
+    requests: number;
+    successes: number;
+    failures: number;
+  }>;
+  totalRequests: number;
+  successfulRequests: number;
+  failedRequests: number;
+  availabilityPercent: number | null;
+}
+
+export type TrafficVolumeRange = '12h' | '24h' | '7d';
+
+export interface TrafficVolumeBucket {
+  from: string;
+  to: string;
+  requests: number;
+  errors: number;
+}
+
+export interface TrafficVolumeResponse {
+  range: TrafficVolumeRange;
+  available: boolean;
+  windowStart: string;
+  windowEnd: string;
+  bucketMs: number;
+  buckets: TrafficVolumeBucket[];
+  totalRequests: number;
+  totalErrors: number;
 }
 
 export interface ModelsResponse {
@@ -209,6 +252,9 @@ export interface ModelsResponse {
 export interface ModelTestResult {
   ok: boolean;
   model: string;
+  status?: 'working' | 'temporarily_unavailable' | 'expired' | 'needs_verification';
+  checkedAccounts?: number;
+  workingAccounts?: number;
   latencyMs: number;
   sample?: string;
   httpStatus?: number | null;

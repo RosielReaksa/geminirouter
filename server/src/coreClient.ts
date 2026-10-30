@@ -126,6 +126,7 @@ export class CoreClient {
 
   async startOAuth(
     oauthClientKey?: string,
+    redirectUri?: string,
   ): Promise<
     | { ok: true; sessionId: string; authorizationUrl: string }
     | { ok: false; status: number; error: string }
@@ -143,6 +144,7 @@ export class CoreClient {
       data: {
         diagnosticId,
         ...(oauthClientKey ? { oauthClientKey } : {}),
+        ...(redirectUri ? { redirectUri } : {}),
       },
     });
 

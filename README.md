@@ -112,11 +112,19 @@ corepack enable
 ```bash
 useradd -m -s /bin/bash geminirouter
 mkdir -p /opt/geminirouter
-cp -r . /opt/geminirouter/
+cp -r frontend server deploy /opt/geminirouter/
 cd /opt/geminirouter
-pnpm install --frozen-lockfile
-pnpm run build:core
-pnpm run build
+pnpm --dir server install --frozen-lockfile && pnpm --dir server build
+pnpm --dir frontend install --frozen-lockfile && pnpm --dir frontend build
+```
+
+The AntigravityManager core is **not included** in this repository. Install it separately
+into `/opt/geminirouter/core` (or any path) and point the services at it:
+
+```bash
+# in /opt/geminirouter/.env
+CORE_HOME=/opt/geminirouter/core
+CORE_MAIN_PATH=/opt/geminirouter/core/dist/core/main.cjs
 ```
 
 ### Step 3: Configure Environment Variables
@@ -190,6 +198,26 @@ nginx -t && systemctl reload nginx
    - Follow the OAuth authentication flow.
    - You can connect multiple Google accounts. Each account adds independent quota capacity to your cluster.
 4. The system will continuously monitor quotas and automatically route incoming prompts across active accounts with minimal concurrency and zero rate-limit collisions.
+
+### Hosted sign-in and the `aicode` scope
+
+Antigravity accounts require the private `https://www.googleapis.com/auth/aicode` scope, which only
+Antigravity's own OAuth client is allowed to request. A self-registered Google **Web application**
+client is rejected by Google with `Error 400: invalid_scope`, so the built-in Antigravity client is
+the only working option.
+
+That client only accepts the loopback redirect `http://127.0.0.1:41209/oauth-callback`, which is
+resolved on **the device running the browser**:
+
+- **Desktop (Windows):** run the bundled sign-in helper (`/FramecallSignInHelper.zip`) so the
+  loopback redirect is forwarded to `https://<your-domain>/oauth/callback`.
+- **Phone / macOS / Linux:** nothing can listen on the device's loopback, so after Google sign-in the
+  page fails to load. Copy the full URL (it contains `code=…`) and paste it into the dashboard's
+  **Enter a code manually** field. Accounts are server-side, so adding them once from a PC is enough.
+
+`ANTIGRAVITY_OAUTH_CLIENTS` / `ANTIGRAVITY_OAUTH_CLIENT_KEY` are still honoured by the core for
+advanced setups, and `OAUTH_CALLBACK_URL` overrides the hosted callback URL, but neither bypasses
+the `aicode` scope restriction.
 
 ---
 
@@ -313,13 +341,26 @@ To ensure your private router remains exclusively yours:
 | Stop All Services | `systemctl stop geminirouter-core geminirouter` |
 | Check Memory & PID | `systemctl status geminirouter-core geminirouter` |
 | (Optional) PM2 Status | `pm2 status` |
+| Check core OAuth credential drift | `systemctl start geminirouter-core-creds && journalctl -u geminirouter-core-creds -n 20` |
+| Update the external core | `sudo ./deploy/update-core.sh --bundle <main.cjs>` (auto-rollback) |
+
+The core's OAuth client credentials are public upstream, so they can be rotated by Google.
+See [docs/CORE-CREDENTIALS.md](./docs/CORE-CREDENTIALS.md) for detection and the update runbook.
 
 ---
 
 ## 📄 License & Attribution
-The geminirouter dashboard and bridge server (this repository) are MIT licensed,
-created for private, personal, and self-hosted developer use.
 
-This project is a companion UI for the [AntigravityManager](https://github.com/Draculabo/AntigravityManager)
-core (not included in this repository), which is licensed **CC BY-NC-SA 4.0** — non-commercial
-use, with attribution. Respect that license when using or modifying the core.
+**Copyright © 2026 Framecall. All Rights Reserved.**
+
+The geminirouter web dashboard, marketing site, bridge server, deployment tooling, and
+documentation in this repository are **proprietary software** owned by Framecall. No license
+is granted to use, copy, modify, or distribute them except as expressly permitted in writing.
+See [LICENSE](./LICENSE) for the full terms.
+
+**Third-party core (not included).** This repository does not contain AntigravityManager source
+code. The [AntigravityManager](https://github.com/Draculabo/AntigravityManager) core is an external
+runtime dependency, separately licensed by Draculabo under **CC BY-NC-SA 4.0**
+(Attribution-NonCommercial-ShareAlike). It is not covered by the Framecall license and may not be
+used commercially. Any fork or patch of the core remains under CC BY-NC-SA 4.0.
+See [NOTICE](./NOTICE) for the full scope breakdown and attribution.

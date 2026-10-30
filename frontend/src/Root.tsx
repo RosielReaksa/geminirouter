@@ -8,6 +8,7 @@ import { DocsPage } from './components/marketing/DocsPage';
 import { LegalPage } from './components/marketing/LegalPage';
 import { LoginPage } from './components/marketing/LoginPage';
 import { NotFoundPage } from './components/marketing/NotFoundPage';
+import { LoadingScreen } from './components/LoadingScreen';
 import DashboardApp from './App';
 import { authApi } from './services/authApi';
 
@@ -89,14 +90,7 @@ export const Root: React.FC = () => {
 
   if (pathname.startsWith('/app')) {
     if (auth === 'checking') {
-      return (
-        <div className="mkt-body min-h-screen flex items-center justify-center">
-          <div className="flex items-center gap-2.5 text-[13px] text-[#7A736A]">
-            <span className="w-2 h-2 rounded-full bg-[#C25938] animate-pulse" />
-            Verifying session…
-          </div>
-        </div>
-      );
+      return <LoadingScreen title="Checking your session" detail="Warming up your private gateway…" />;
     }
     if (auth === 'anon') {
       // The redirect effect will move us to /login; render nothing meanwhile.

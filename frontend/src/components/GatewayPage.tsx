@@ -22,7 +22,11 @@ export const GatewayPage: React.FC<GatewayPageProps> = ({ config }) => {
   const [copiedKey, setCopiedKey] = useState(false);
   const [copiedSnippet, setCopiedSnippet] = useState(false);
 
-  const baseUrl = `http://${config.host}:${config.port}`;
+  // The reverse proxy exposes the gateway on the same HTTPS origin as the
+  // dashboard. Keep generated client snippets valid for both local and VPS use.
+  const baseUrl = typeof window !== 'undefined'
+    ? window.location.origin
+    : `http://${config.host}:${config.port}`;
   const v1Url = `${baseUrl}/v1`;
 
   const handleCopyKey = () => {

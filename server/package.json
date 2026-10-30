@@ -2,13 +2,15 @@
   "name": "@geminirouter/server",
   "version": "1.0.0",
   "description": "High-performance backend bridge server for geminirouter",
+  "private": true,
+  "license": "UNLICENSED",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "test": "pnpm run build && tsx --test test/pool-state.test.ts test/bridge-proxy.test.ts test/concurrency-leases.test.ts test/v1-integration.test.ts"
+    "test": "pnpm run build && tsx --test test/pool-state.test.ts test/bridge-proxy.test.ts test/concurrency-leases.test.ts test/account-tester-status.test.ts test/v1-integration.test.ts"
   },
   "dependencies": {
     "fastify": "^5.2.1",

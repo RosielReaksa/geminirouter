@@ -1,6 +1,6 @@
 import axios from 'axios';
 import type { CoreClient } from './coreClient.js';
-import type { LocalStateStore, GoogleAccount } from './store.js';
+import type { LocalStateStore, GoogleAccount, ModelAvailabilityResult } from './store.js';
 
 export interface AccountTestResult {
   accountId: string;
@@ -10,9 +10,44 @@ export interface AccountTestResult {
   validationUrl?: string;
   model: string;
   latencyMs: number;
+  httpStatus?: number;
   sample?: string;
   error?: string;
   timestamp: string;
+}
+
+export function summarizeModelAccountTests(
+  model: string,
+  results: AccountTestResult[],
+): ModelAvailabilityResult {
+  const workingAccounts = results.filter((result) => result.ok).length;
+  const allExpired = results.length > 0 && results.every((result) =>
+    result.httpStatus === 404 || result.httpStatus === 410 ||
+    /model (was )?(not found|expired|deprecated)|unknown model/i.test(result.error || ''),
+  );
+  const allNeedVerification = results.length > 0 && results.every((result) => result.requiresValidation);
+  const status = workingAccounts > 0
+    ? 'working'
+    : allExpired
+    ? 'expired'
+    : allNeedVerification
+    ? 'needs_verification'
+    : 'temporarily_unavailable';
+  const firstFailure = results.find((result) => !result.ok);
+
+  return {
+    model,
+    ok: workingAccounts > 0,
+    status,
+    checkedAccounts: results.length,
+    workingAccounts,
+    latencyMs: results.length
+      ? Math.round(results.reduce((sum, result) => sum + result.latencyMs, 0) / results.length)
+      : 0,
+    httpStatus: firstFailure?.httpStatus,
+    error: workingAccounts > 0 ? undefined : firstFailure?.error,
+    checkedAt: new Date().toISOString(),
+  };
 }
 
 export class AccountTester {
@@ -50,7 +85,8 @@ export class AccountTester {
    */
   async testAndRefreshAccount(
     account: GoogleAccount,
-    model: string = 'gemini-3.8-flash-low'
+    model: string = 'gemini-3.8-flash-low',
+    refreshQuota = true,
   ): Promise<AccountTestResult> {
     const { port, apiKey } = this.resolveGateway();
     const startedAt = Date.now();
@@ -60,6 +96,7 @@ export class AccountTester {
     let freshValidationUrl: string | undefined;
     let sample: string | undefined;
     let error: string | undefined;
+    let httpStatus: number | undefined;
 
     try {
       const response = await axios.post(
@@ -83,6 +120,7 @@ export class AccountTester {
       sample =
         response.data?.choices?.[0]?.message?.content?.toString().trim() || 'ok';
       ok = response.status === 200;
+      httpStatus = response.status;
 
       // If test call succeeded, clear any previous validation requirement
       this.validationRequiredAccounts.delete(account.id);
@@ -90,6 +128,7 @@ export class AccountTester {
     } catch (err: any) {
       ok = false;
       const status = err?.response?.status;
+      httpStatus = status;
       const data = err?.response?.data;
 
       // Check for Google's VALIDATION_REQUIRED in 403 error body
@@ -158,6 +197,7 @@ export class AccountTester {
       validationUrl: freshValidationUrl,
       model,
       latencyMs,
+      httpStatus,
       sample,
       error,
       timestamp: new Date().toISOString(),
@@ -166,7 +206,7 @@ export class AccountTester {
     this.lastResults.set(account.id, result);
 
     // Refresh quotas from Google via core RPC
-    if (await this.coreClient.isCoreAlive()) {
+    if (refreshQuota && await this.coreClient.isCoreAlive()) {
       try {
         await this.coreClient.callRpc('accountRefreshQuota', { accountId: account.id });
       } catch {
@@ -237,30 +277,50 @@ export class AccountTester {
     return results;
   }
 
+  /** Tests every model advertised by the gateway against every connected account. */
+  async testAllModelsAcrossAccounts(): Promise<{ models: number; accounts: number }> {
+    const accounts = this.store.getAccounts();
+    const { port, apiKey } = this.resolveGateway();
+    if (!accounts.length) return { models: 0, accounts: 0 };
+
+    const response = await axios.get(`http://127.0.0.1:${port}/v1/models`, {
+      timeout: 10000,
+      headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+    });
+    const models: string[] = [...new Set<string>(
+      (response.data?.data || [])
+        .map((item: any) => item?.id)
+        .filter((id: unknown): id is string => typeof id === 'string' && id.trim().length > 0),
+    )];
+
+    for (const model of models) {
+      const results: AccountTestResult[] = [];
+      for (const account of accounts) {
+        results.push(await this.testAndRefreshAccount(account, model, false));
+      }
+
+      this.store.setModelTest(summarizeModelAccountTests(model, results));
+    }
+
+    return { models: models.length, accounts: accounts.length };
+  }
+
   /**
    * Starts a background loop that automatically tests all accounts every N hours (default 5h).
    */
-  startAutoTestScheduler(intervalHours: number = 5): void {
+  startAutoTestScheduler(intervalHours: number = 24): void {
     if (this.autoTestTimer) {
       clearInterval(this.autoTestTimer);
     }
 
     const intervalMs = intervalHours * 60 * 60 * 1000;
-    console.log(`[AccountTester] 5-hour automated test scheduler active (interval: ${intervalHours}h).`);
+    console.log(`[AccountTester] Scheduled full model/account test active (interval: ${intervalHours}h).`);
 
     this.autoTestTimer = setInterval(async () => {
-      console.log(`[AccountTester] Executing scheduled 5-hour health test on all accounts...`);
+      console.log(`[AccountTester] Testing all advertised models against all accounts...`);
       try {
-        const results = await this.testAndRefreshAll();
-        for (const r of results) {
-          if (r.ok) {
-            console.log(`[AccountTester] Account ${r.email}: OPERATIONAL (${r.latencyMs}ms)`);
-          } else if (r.requiresValidation) {
-            console.warn(`[AccountTester] Account ${r.email}: REQUIRES GOOGLE VERIFICATION (link captured)`);
-          } else {
-            console.warn(`[AccountTester] Account ${r.email}: FAILED (${r.error})`);
-          }
-        }
+        const counts = await this.testAllModelsAcrossAccounts();
+        console.log(`[AccountTester] Finished ${counts.models} models across ${counts.accounts} accounts.`);
       } catch (err: any) {
         console.error('[AccountTester] Scheduled test error:', err.message);
       }

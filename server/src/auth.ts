@@ -91,6 +91,7 @@ const PUBLIC_EXACT = new Set([
   '/api/auth/session',
   '/api/auth/logout',
   '/api/health',
+  '/oauth/callback',
 ]);
 
 const PUBLIC_PREFIXES = ['/assets/', '/v1/'];

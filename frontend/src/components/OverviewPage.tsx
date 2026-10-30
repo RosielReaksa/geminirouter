@@ -4,7 +4,6 @@ import {
   Users,
   Clock,
   ArrowUpRight,
-  Sparkles,
   ChevronRight,
   ShieldCheck,
   ShieldAlert,
@@ -16,18 +15,27 @@ import {
   Zap,
   CircleDot,
   AlertTriangle,
+  Loader2,
 } from 'lucide-react';
-import { GatewayStatus, GoogleAccount, TrafficRecord, ModelsResponse } from '../types';
+import {
+  GatewayStatus,
+  GoogleAccount,
+  TrafficRecord,
+  ModelsResponse,
+  TrafficVolumeRange,
+  TrafficVolumeResponse,
+} from '../types';
 import { api } from '../services/api';
 
 interface OverviewPageProps {
   status: GatewayStatus;
   accounts: GoogleAccount[];
   traffic: TrafficRecord[];
+  onReady?: () => void;
   onNavigateToAccounts: () => void;
   onNavigateToGateway: () => void;
   onNavigateToModels: () => void;
-  onNavigateToTraffic: () => void;
+  onNavigateToTraffic: (range?: { from: number; to: number }) => void;
 }
 
 const formatUptime = (seconds: number): string => {
@@ -122,6 +130,7 @@ export const OverviewPage: React.FC<OverviewPageProps> = ({
   status,
   accounts,
   traffic,
+  onReady,
   onNavigateToAccounts,
   onNavigateToGateway,
   onNavigateToModels,
@@ -129,6 +138,9 @@ export const OverviewPage: React.FC<OverviewPageProps> = ({
 }) => {
   const [models, setModels] = useState<ModelsResponse | null>(null);
   const [modelError, setModelError] = useState(false);
+  const [graphRange, setGraphRange] = useState<TrafficVolumeRange>('12h');
+  const [rangeVolume, setRangeVolume] = useState<TrafficVolumeResponse | null>(null);
+  const [rangeLoading, setRangeLoading] = useState(false);
 
   // Load the live model catalog so the overview shows what the gateway serves.
   useEffect(() => {
@@ -140,11 +152,34 @@ export const OverviewPage: React.FC<OverviewPageProps> = ({
       })
       .catch(() => {
         if (!cancelled) setModelError(true);
+      })
+      .finally(() => {
+        if (!cancelled) onReady?.();
       });
     return () => {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (graphRange === '12h') {
+      setRangeLoading(false);
+      return;
+    }
+
+    let active = true;
+    setRangeLoading(true);
+    api.getTrafficVolume(graphRange).then(({ data, isLiveApi }) => {
+      if (!active) return;
+      setRangeVolume(isLiveApi ? data : { ...data, available: false });
+    }).catch(() => {
+      if (active) setRangeVolume(null);
+    }).finally(() => {
+      if (active) setRangeLoading(false);
+    });
+
+    return () => { active = false; };
+  }, [graphRange]);
 
   const activeAccounts = accounts.filter((a) => a.status === 'active');
   const blockedAccounts = accounts.filter((a) => a.status === 'error');
@@ -169,10 +204,9 @@ export const OverviewPage: React.FC<OverviewPageProps> = ({
   const totalModelCount = models?.models?.length ?? 0;
 
   const recent = traffic.slice(0, 6);
-  const errorCount24h = traffic.filter((t) => t.status >= 400).length;
-
-  // Requests per hour for the last 12 hours, derived from real records only.
-  const hourly = React.useMemo(() => {
+  // Use the server's complete 12-hour audit summary; the traffic table only
+  // loads its latest 50 rows and is not a complete source for this chart.
+  const fallbackHourly = React.useMemo(() => {
     const now = Date.now();
     const buckets = Array.from({ length: 12 }, () => 0);
     for (const t of traffic) {
@@ -183,64 +217,201 @@ export const OverviewPage: React.FC<OverviewPageProps> = ({
     }
     return buckets;
   }, [traffic]);
-  const hourlyMax = Math.max(1, ...hourly);
+  const hourly = status.requestVolume12h ?? fallbackHourly;
+  const requestsLast12h = status.requestsLast12h ?? traffic.length;
+  const statusWindowEnd = Date.parse(status.requestVolume12hWindowEnd || '');
+  const chartWindowEnd = Number.isFinite(statusWindowEnd) ? statusWindowEnd : Date.now();
+  const fallbackBuckets = hourly.map((requests, index) => ({
+    from: new Date(chartWindowEnd - (hourly.length - index) * 60 * 60 * 1000).toISOString(),
+    to: new Date(chartWindowEnd - (hourly.length - index - 1) * 60 * 60 * 1000).toISOString(),
+    requests,
+    errors: 0,
+  }));
+  const currentRangeVolume = rangeVolume?.range === graphRange ? rangeVolume : null;
+  const graphAvailable = graphRange === '12h' || currentRangeVolume?.available === true;
+  const graphBuckets = graphRange === '12h'
+    ? fallbackBuckets
+    : graphAvailable
+    ? (currentRangeVolume?.buckets || [])
+    : [];
+  const graphRequestTotal = graphRange === '12h'
+    ? requestsLast12h
+    : currentRangeVolume?.totalRequests ?? 0;
+  const fallbackErrors12h = traffic.filter((record) => {
+    const age = Date.now() - Date.parse(record.timestamp);
+    return record.status >= 400 && age >= 0 && age < 12 * 60 * 60 * 1000;
+  }).length;
+  const graphErrorTotal = graphRange === '12h'
+    ? status.errorsLast12h ?? fallbackErrors12h
+    : currentRangeVolume?.totalErrors ?? 0;
+  const graphPeakRequests = Math.max(0, ...graphBuckets.map((bucket) => bucket.requests));
+  const graphPeakLabel = graphRange === '7d' ? 'Peak 6h interval' : 'Peak hour';
+  const hourlyMax = Math.max(1, ...graphBuckets.map((bucket) => bucket.requests));
+  const chartLeft = 52;
+  const chartRight = 992;
+  const chartTop = 18;
+  const chartBottom = 190;
+  const chartHeight = chartBottom - chartTop;
+  const chartPoints = graphBuckets.map((bucket, index) => ({
+    x: chartLeft + index * ((chartRight - chartLeft) / Math.max(1, graphBuckets.length - 1)),
+    y: chartBottom - (bucket.requests / hourlyMax) * chartHeight,
+    count: bucket.requests,
+    from: Date.parse(bucket.from),
+    to: Date.parse(bucket.to),
+  }));
+  const chartLine = chartPoints.map((point, index) =>
+    `${index === 0 ? 'M' : 'L'} ${point.x} ${point.y}`,
+  ).join(' ');
+  const chartArea = chartPoints.length
+    ? `${chartLine} L ${chartRight} ${chartBottom} L ${chartLeft} ${chartBottom} Z`
+    : '';
+  const timelineLabels: Record<TrafficVolumeRange, string[]> = {
+    '12h': ['12 hours ago', '9h', '6h', '3h', 'Now'],
+    '24h': ['24 hours ago', '18h', '12h', '6h', 'Now'],
+    '7d': ['7 days ago', '5d', '3d', '1d', 'Now'],
+  };
 
   return (
     <div className="space-y-6 animate-in fade-in duration-200">
-      {/* ============ Hero: system status ============ */}
-      <div className="bg-gradient-to-r from-[#FAF2EF] to-[#FBF9F5] border border-[#EAE5DE] rounded-3xl p-7 relative overflow-hidden shadow-soft">
-        <div className="relative z-10">
-          <div className="flex flex-wrap items-center gap-2 mb-3">
-            <div className="inline-flex items-center gap-2 px-2.5 py-1 rounded-full bg-white/80 border border-[#EAE5DE] text-[11px] font-medium text-[#C25938]">
-              <Sparkles className="w-3.5 h-3.5" />
-              <span>Private Google AI Studio &amp; Gemini Relay</span>
-            </div>
-            <div
-              className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium border ${
+      {/* ============ Full-width live request graph ============ */}
+      <section className="bg-white border border-[#EAE5DE] rounded-3xl p-5 sm:p-6 shadow-soft">
+        <div className="flex flex-wrap items-start justify-between gap-5">
+          <div>
+            <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-[#C25938]">
+              <Radio className="w-4 h-4" />
+              <span>Live traffic · last {graphRange}</span>
+              <span className={`ml-1 inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 normal-case tracking-normal ${
                 status.isRunning
-                  ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
-                  : 'bg-amber-50 text-amber-700 border-amber-200'
-              }`}
-            >
-              <span className={`w-1.5 h-1.5 rounded-full ${status.isRunning ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'}`} />
-              <span>{status.isRunning ? 'Always-On · Serving' : 'Reconnecting'}</span>
+                  ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                  : 'border-amber-200 bg-amber-50 text-amber-700'
+              }`}>
+                <span className={`h-1.5 w-1.5 rounded-full ${status.isRunning ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'}`} />
+                {status.isRunning ? 'Serving' : 'Reconnecting'}
+              </span>
             </div>
+            <h2 className="mt-1.5 font-serif-editorial text-2xl sm:text-3xl font-semibold leading-tight text-[#2A2723]">
+              Request volume
+            </h2>
+            <p className="mt-1 text-[13px] text-[#706B65]">
+              {graphRange === '7d' ? 'Requests grouped into six-hour intervals.' : 'Requests grouped by hour.'} Select a point to inspect its requests.
+            </p>
           </div>
-
-          <div className="flex flex-wrap items-end justify-between gap-4">
-            <div>
-              <h2 className="font-serif-editorial text-3xl sm:text-4xl font-semibold text-[#2A2723] leading-tight">
-                Everything, at a glance.
-              </h2>
-              <p className="text-sm text-[#706B65] mt-2 leading-relaxed font-sans-ui max-w-xl">
-                Live state of the gateway, the account pool, per-model quota and the request
-                stream. The gateway is always on — there is nothing to start or pause.
-              </p>
+          <div className="flex flex-col items-end gap-2">
+            <div role="group" aria-label="Graph time range" className="inline-flex rounded-xl border border-[#EAE5DE] bg-[#FAF7F2] p-1">
+              {(['12h', '24h', '7d'] as const).map((range) => (
+                <button
+                  key={range}
+                  type="button"
+                  aria-pressed={graphRange === range}
+                  onClick={() => setGraphRange(range)}
+                  className={`min-w-11 rounded-lg px-3 py-1.5 text-[11px] font-semibold transition-colors ${graphRange === range ? 'bg-[#C25938] text-white shadow-soft' : 'text-[#706B65] hover:text-[#2A2723]'}`}
+                >
+                  {range}
+                </button>
+              ))}
             </div>
-
-            <div className="flex flex-wrap items-center gap-2">
+            <div className="flex flex-wrap items-center justify-end gap-2">
               <button
                 onClick={onNavigateToGateway}
-                className="flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-[#C25938] hover:bg-[#B24E2E] text-white text-xs font-semibold shadow-soft transition-colors"
+                className="flex items-center gap-1.5 rounded-xl bg-[#C25938] px-4 py-2.5 text-xs font-semibold text-white shadow-soft transition-colors hover:bg-[#B24E2E]"
               >
                 <span>API Keys &amp; Endpoints</span>
-                <ArrowUpRight className="w-3.5 h-3.5" />
+                <ArrowUpRight className="h-3.5 w-3.5" />
               </button>
               <button
                 onClick={onNavigateToModels}
-                className="flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-[#FFFFFF] border border-[#EAE5DE] hover:bg-[#FAF7F2] text-xs font-medium text-[#2A2723] shadow-soft transition-colors"
+                className="flex items-center gap-1.5 rounded-xl border border-[#EAE5DE] bg-white px-4 py-2.5 text-xs font-medium text-[#2A2723] shadow-soft transition-colors hover:bg-[#FAF7F2]"
               >
-                <Layers className="w-3.5 h-3.5 text-[#706B65]" />
+                <Layers className="h-3.5 w-3.5 text-[#706B65]" />
                 <span>Browse Models</span>
               </button>
             </div>
           </div>
         </div>
 
-        <div className="absolute right-6 -bottom-8 opacity-5 select-none pointer-events-none hidden md:block">
-          <span className="font-serif-editorial text-[180px] font-bold text-[#C25938]">g</span>
+        <div className="relative mt-4 h-36 w-full sm:h-40 lg:h-44">
+          <svg
+            viewBox="0 0 1000 214"
+            preserveAspectRatio="none"
+            role="img"
+            aria-label={graphAvailable ? `Request volume over the last ${graphRange}. ${graphRequestTotal.toLocaleString()} requests total.` : `Request history for the last ${graphRange} is unavailable.`}
+            className="h-full w-full overflow-visible"
+          >
+            <defs>
+              <linearGradient id="request-volume-fill" x1="0" x2="0" y1="0" y2="1">
+                <stop offset="0%" stopColor="#C25938" stopOpacity="0.24" />
+                <stop offset="100%" stopColor="#C25938" stopOpacity="0.015" />
+              </linearGradient>
+            </defs>
+            {[chartTop, chartTop + chartHeight / 2, chartBottom].map((y, index) => {
+              const value = index === 0 ? hourlyMax : index === 1 ? Math.round(hourlyMax / 2) : 0;
+              return (
+                <g key={y}>
+                  <line x1={chartLeft} x2={chartRight} y1={y} y2={y} stroke="#EEEAE4" strokeDasharray={index === 2 ? '0' : '4 6'} />
+                  <text x="0" y={y + 4} fill="#9E988F" fontSize="11" fontFamily="monospace">{value.toLocaleString()}</text>
+                </g>
+              );
+            })}
+            {chartArea && <path d={chartArea} fill="url(#request-volume-fill)" />}
+            {chartLine && <path d={chartLine} fill="none" stroke="#C25938" strokeWidth="3" vectorEffect="non-scaling-stroke" strokeLinecap="round" strokeLinejoin="round" />}
+            {chartPoints.map((point, index) => (
+              <g
+                key={index}
+                role="button"
+                tabIndex={0}
+                aria-label={`${point.count.toLocaleString()} requests between ${new Date(point.from).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} and ${new Date(point.to).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}. Open traffic details.`}
+                className="cursor-pointer outline-none"
+                onClick={() => onNavigateToTraffic({ from: point.from, to: point.to })}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault();
+                    onNavigateToTraffic({ from: point.from, to: point.to });
+                  }
+                }}
+              >
+                <circle cx={point.x} cy={point.y} r="13" fill="transparent" />
+                <circle
+                  cx={point.x}
+                  cy={point.y}
+                  r={index === chartPoints.length - 1 ? 5 : 3.5}
+                  fill={index === chartPoints.length - 1 ? '#4E7B62' : '#FFFFFF'}
+                  stroke={index === chartPoints.length - 1 ? '#FFFFFF' : '#C25938'}
+                  strokeWidth="2"
+                />
+                <title>{`${point.count.toLocaleString()} requests. Click to inspect this hour.`}</title>
+              </g>
+            ))}
+          </svg>
+          {rangeLoading && (
+            <div className="absolute inset-0 flex items-center justify-center bg-white/75 text-xs text-[#706B65] backdrop-blur-[1px]" role="status">
+              <span className="inline-flex items-center gap-2"><Loader2 className="h-4 w-4 animate-spin text-[#C25938]" />Loading {graphRange} traffic…</span>
+            </div>
+          )}
+          {!rangeLoading && !graphAvailable && (
+            <div className="absolute inset-0 flex items-center justify-center text-xs text-[#9E988F]">
+              Live traffic history is unavailable for this range.
+            </div>
+          )}
         </div>
-      </div>
+        <div className="ml-12 mt-0.5 flex justify-between text-[10px] font-mono-code text-[#9E988F]">
+          {timelineLabels[graphRange].map((label) => <span key={label}>{label}</span>)}
+        </div>
+
+        <div className="mt-3 grid grid-cols-1 gap-3 border-t border-[#EAE5DE] pt-3 sm:grid-cols-3 sm:gap-0">
+          <div className="sm:pr-6">
+            <div className="text-[11px] text-[#706B65]">Requests · last {graphRange}</div>
+            <div className="mt-0.5 font-serif-editorial text-xl font-bold text-[#2A2723]">{graphAvailable ? graphRequestTotal.toLocaleString() : '—'}</div>
+          </div>
+          <div className="sm:border-l sm:border-[#EAE5DE] sm:px-6">
+            <div className="text-[11px] text-[#706B65]">{graphPeakLabel}</div>
+            <div className="mt-0.5 font-serif-editorial text-xl font-bold text-[#2A2723]">{graphAvailable ? graphPeakRequests.toLocaleString() : '—'}<span className="ml-1 text-xs font-sans-ui font-normal text-[#706B65]">requests</span></div>
+          </div>
+          <div className="sm:border-l sm:border-[#EAE5DE] sm:pl-6">
+            <div className="text-[11px] text-[#706B65]">Errors · last {graphRange}</div>
+            <div className={`mt-0.5 font-serif-editorial text-xl font-bold ${graphErrorTotal > 0 ? 'text-red-600' : 'text-[#2A2723]'}`}>{graphAvailable ? graphErrorTotal.toLocaleString() : '—'}</div>
+          </div>
+        </div>
+      </section>
 
       {/* ============ Primary metric row ============ */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -369,7 +540,9 @@ export const OverviewPage: React.FC<OverviewPageProps> = ({
           <div>
             <h3 className="font-serif-editorial text-xl font-bold text-[#2A2723]">Account Pool</h3>
             <p className="text-xs text-[#706B65] mt-0.5">
-              Every connected Google account, its live quota and test state
+              {accounts.length > 3
+                ? `Showing 3 of ${accounts.length} connected accounts with live quota and test state`
+                : 'Every connected Google account, its live quota and test state'}
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -399,7 +572,7 @@ export const OverviewPage: React.FC<OverviewPageProps> = ({
           </div>
         ) : (
           <div className="divide-y divide-[#EAE5DE]">
-            {accounts.map((a) => {
+            {accounts.slice(0, 3).map((a) => {
               const topModels = (a.models5h || []).slice(0, 3);
               // Name the lowest model explicitly — a bare "low 39%" is unreadable.
               const lowest = (a.models5h || []).reduce<{ name: string; percentage: number } | null>(
@@ -511,7 +684,7 @@ export const OverviewPage: React.FC<OverviewPageProps> = ({
       </div>
 
       {/* ============ Routing + Traffic ============ */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Routing / system config */}
         <div className="bg-[#FFFFFF] border border-[#EAE5DE] rounded-2xl p-6 shadow-soft">
           <div className="flex items-center justify-between mb-4">
@@ -597,54 +770,6 @@ export const OverviewPage: React.FC<OverviewPageProps> = ({
           </div>
         </div>
 
-        {/* Traffic volume sparkline */}
-        <div className="bg-[#FFFFFF] border border-[#EAE5DE] rounded-2xl p-6 shadow-soft">
-          <div className="flex items-center justify-between mb-4">
-            <h3 className="font-serif-editorial text-lg font-bold text-[#2A2723]">
-              Request Volume
-            </h3>
-            <Radio className="w-4 h-4 text-[#706B65]" />
-          </div>
-
-          <div className="flex items-end gap-1 h-24">
-            {hourly.map((count, i) => (
-              <div key={i} className="flex-1 flex flex-col justify-end h-full">
-                <div
-                  className={`w-full rounded-t transition-all ${
-                    count === 0 ? 'bg-[#F2ECE4]' : 'bg-[#C25938]/70'
-                  }`}
-                  style={{ height: `${Math.max(3, (count / hourlyMax) * 100)}%` }}
-                  title={`${count} request${count === 1 ? '' : 's'}`}
-                />
-              </div>
-            ))}
-          </div>
-          <div className="flex justify-between text-[10px] text-[#B0AAA1] mt-2 font-mono-code">
-            <span>-12h</span>
-            <span>-6h</span>
-            <span>now</span>
-          </div>
-
-          <div className="mt-4 pt-4 border-t border-[#EAE5DE] grid grid-cols-2 gap-3 text-xs">
-            <div>
-              <div className="text-[#706B65] text-[11px]">Total records</div>
-              <div className="font-serif-editorial text-xl font-bold text-[#2A2723]">
-                {traffic.length}
-              </div>
-            </div>
-            <div>
-              <div className="text-[#706B65] text-[11px]">Errors 24h</div>
-              <div
-                className={`font-serif-editorial text-xl font-bold ${
-                  errorCount24h > 0 ? 'text-red-600' : 'text-[#2A2723]'
-                }`}
-              >
-                {errorCount24h}
-              </div>
-            </div>
-          </div>
-        </div>
-
         {/* Models */}
         <div className="bg-[#FFFFFF] border border-[#EAE5DE] rounded-2xl p-6 shadow-soft flex flex-col">
           <div className="flex items-center justify-between mb-4">
@@ -703,7 +828,7 @@ export const OverviewPage: React.FC<OverviewPageProps> = ({
             </p>
           </div>
           <button
-            onClick={onNavigateToTraffic}
+            onClick={() => onNavigateToTraffic()}
             className="flex items-center gap-1 px-3 py-1.5 rounded-lg border border-[#EAE5DE] text-[11px] font-medium text-[#504C46] hover:bg-[#FAF7F2] transition-colors"
           >
             Full traffic log
@@ -715,7 +840,7 @@ export const OverviewPage: React.FC<OverviewPageProps> = ({
           <div className="py-8 text-center text-xs text-[#9E988F]">
             No requests yet. Point a client at{' '}
             <span className="font-mono-code text-[#504C46]">
-              http://localhost:{status.port}/v1
+              {typeof window !== 'undefined' ? window.location.origin : `http://localhost:${status.port}`}/v1
             </span>{' '}
             to see activity here.
           </div>

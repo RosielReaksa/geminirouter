@@ -26,6 +26,10 @@ tmpwebapp-node-modulesprepare.log
 # Patched-core side profile (contains account tokens)
 core-profile/
 
+# External AntigravityManager core (not part of this repository)
+core/
+AntigravityManager/
+
 # Google OAuth client secrets
 client_secret*.json
 *.secret.json

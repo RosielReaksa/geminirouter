@@ -1,0 +1,64 @@
+PROPRIETARY SOFTWARE LICENSE
+Copyright (c) 2026 Framecall. All Rights Reserved.
+
+======================================================================
+1. OWNERSHIP
+======================================================================
+
+This software, including all source code, object code, build scripts,
+configuration templates, documentation, user interface designs, text,
+graphics, and any other materials authored by Framecall (collectively,
+the "Software"), is the exclusive property of Framecall and is protected
+by copyright and other intellectual property laws.
+
+======================================================================
+2. SCOPE
+======================================================================
+
+This license applies to the following original works authored by Framecall
+within this repository:
+
+  - frontend/          (web dashboard and marketing site)
+  - server/            (bridge API gateway)
+  - deploy/            (deployment tooling and service definitions)
+  - docs/              (documentation)
+  - scripts/           (development and QA tooling)
+  - all root-level files not otherwise licensed
+
+This license does NOT apply to third-party or upstream components. In
+particular, the AntigravityManager core (an external runtime dependency
+that is not included in this repository) is separately licensed and is
+governed exclusively by its own license terms, as described in the NOTICE
+file accompanying this Software. Nothing in this license grants, extends,
+or restricts any rights under those third-party licenses.
+
+======================================================================
+3. RIGHTS
+======================================================================
+
+No license, express or implied, is granted to any person or entity to use,
+copy, modify, merge, publish, distribute, sublicense, sell, rent, lease,
+host as a service, or otherwise exploit the Software, in whole or in part,
+except as expressly permitted in writing by Framecall.
+
+Access to this repository does not constitute a grant of any such rights.
+All rights not expressly granted are reserved.
+
+======================================================================
+4. NO WARRANTY
+======================================================================
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE, TITLE, AND NON-INFRINGEMENT. IN NO EVENT
+SHALL THE COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING
+FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+======================================================================
+5. LICENSING INQUIRIES
+======================================================================
+
+For permission requests, commercial licensing, or questions regarding
+these terms, contact the copyright holder: Framecall.

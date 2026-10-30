@@ -108,12 +108,28 @@ fi
 
 cd "$INSTALL_DIR"
 
-if [ -f "package.json" ]; then
-  echo "Installing project dependencies..."
-  pnpm install --frozen-lockfile || pnpm install
-  echo "Building production bundles..."
-  pnpm run build:core || true
-  pnpm run build || true
+if [ -f "server/package.json" ]; then
+  echo "Installing bridge dependencies..."
+  pnpm --dir server install --frozen-lockfile || pnpm --dir server install
+  echo "Building bridge..."
+  pnpm --dir server build || true
+fi
+
+if [ -f "frontend/package.json" ]; then
+  echo "Installing frontend dependencies..."
+  pnpm --dir frontend install --frozen-lockfile || pnpm --dir frontend install
+  echo "Building frontend..."
+  pnpm --dir frontend build || true
+fi
+
+# The AntigravityManager core is an external dependency and is not part of this repository.
+CORE_MAIN_PATH="${CORE_MAIN_PATH:-$INSTALL_DIR/core/dist/core/main.cjs}"
+if [ -f "$CORE_MAIN_PATH" ]; then
+  echo -e "${GREEN}✓ Core bundle found at $CORE_MAIN_PATH${NC}"
+else
+  echo -e "${YELLOW}! Core bundle not found at $CORE_MAIN_PATH${NC}"
+  echo -e "${YELLOW}  Install the AntigravityManager core separately, or set CORE_MAIN_PATH${NC}"
+  echo -e "${YELLOW}  in $INSTALL_DIR/.env before starting geminirouter-core.service.${NC}"
 fi
 
 # Ensure ecosystem.config.js is copied to INSTALL_DIR
@@ -215,10 +231,13 @@ chmod 600 "$INSTALL_DIR/.env"
 echo -e "${CYAN}[6/7] Configuring systemd services...${NC}"
 cp "$SCRIPT_DIR/geminirouter-core.service" /etc/systemd/system/geminirouter-core.service
 cp "$SCRIPT_DIR/geminirouter.service" /etc/systemd/system/geminirouter.service
+cp "$SCRIPT_DIR/geminirouter-core-creds.service" /etc/systemd/system/geminirouter-core-creds.service
+cp "$SCRIPT_DIR/geminirouter-core-creds.timer" /etc/systemd/system/geminirouter-core-creds.timer
 
 systemctl daemon-reload
 systemctl enable geminirouter-core.service
 systemctl enable geminirouter.service
+systemctl enable --now geminirouter-core-creds.timer
 systemctl restart geminirouter-core.service || true
 systemctl restart geminirouter.service || true
 systemctl restart caddy

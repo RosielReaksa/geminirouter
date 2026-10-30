@@ -14,8 +14,19 @@ REM  keeps running independently. No connection between them.
 REM ============================================================
 setlocal
 set "ROOT=%~dp0.."
-set "CORE_REPO=D:\projectradom\AntigravityManager"
+if defined CORE_HOME (
+  set "CORE_REPO=%CORE_HOME%"
+) else (
+  set "CORE_REPO=%ROOT%\core"
+)
 set "SITE_HOME=%ROOT%\core-profile"
+
+if not exist "%CORE_REPO%\dist\core\main.cjs" (
+  echo [ERROR] Core bundle not found at %CORE_REPO%\dist\core\main.cjs
+  echo         Install the AntigravityManager core and set CORE_HOME to its directory.
+  pause
+  exit /b 1
+)
 
 REM Read the website system's API key (gitignored file)
 set "API_KEY="

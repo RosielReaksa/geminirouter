@@ -4,18 +4,73 @@ import {
   Search,
   CheckCircle2,
   XCircle,
+  Loader2,
+  X,
 } from 'lucide-react';
 import { TrafficRecord } from '../types';
+import { api } from '../services/api';
+import { navigate } from '../router';
+
+interface TrafficTimeRange {
+  from: number;
+  to: number;
+}
+
+const readTrafficTimeRange = (): TrafficTimeRange | null => {
+  const params = new URLSearchParams(window.location.search);
+  if (!params.has('from') || !params.has('to')) return null;
+  const from = Number(params.get('from'));
+  const to = Number(params.get('to'));
+  return Number.isFinite(from) && Number.isFinite(to) && to > from ? { from, to } : null;
+};
+
+const formatRangeTime = (timestamp: number) => new Date(timestamp).toLocaleString([], {
+  month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+});
 
 interface TrafficPageProps {
   traffic: TrafficRecord[];
+  onReady?: () => void;
 }
 
-export const TrafficPage: React.FC<TrafficPageProps> = ({ traffic }) => {
+export const TrafficPage: React.FC<TrafficPageProps> = ({ traffic, onReady }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | '200' | '429'>('all');
+  const [timeRange, setTimeRange] = useState<TrafficTimeRange | null>(readTrafficTimeRange);
+  const [rangeTraffic, setRangeTraffic] = useState<TrafficRecord[]>([]);
+  const [rangeLoading, setRangeLoading] = useState(() => Boolean(readTrafficTimeRange()));
+  const [rangeIsLive, setRangeIsLive] = useState(true);
 
-  const filteredTraffic = traffic.filter((t) => {
+  React.useEffect(() => {
+    if (!timeRange) {
+      setRangeTraffic([]);
+      setRangeLoading(false);
+      return;
+    }
+
+    let active = true;
+    setRangeLoading(true);
+    api.getTraffic(timeRange).then(({ data, isLiveApi }) => {
+      if (!active) return;
+      setRangeTraffic(data);
+      setRangeIsLive(isLiveApi);
+    }).catch(() => {
+      if (active) {
+        setRangeTraffic([]);
+        setRangeIsLive(false);
+      }
+    }).finally(() => {
+      if (active) {
+        setRangeLoading(false);
+        onReady?.();
+      }
+    });
+
+    return () => { active = false; };
+  }, [timeRange?.from, timeRange?.to]);
+
+  const visibleTraffic = timeRange ? rangeTraffic : traffic;
+  const filteredTraffic = visibleTraffic.filter((t) => {
     const matchesSearch =
       t.clientName.toLowerCase().includes(searchTerm.toLowerCase()) ||
       t.modelRequested.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -29,7 +84,13 @@ export const TrafficPage: React.FC<TrafficPageProps> = ({ traffic }) => {
         : t.status === 429;
 
     return matchesSearch && matchesStatus;
-  });
+  }).sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp));
+  const rangeErrorCount = rangeTraffic.filter((record) => record.status >= 400).length;
+  const rangeModelCount = new Set(rangeTraffic.map((record) => record.modelRequested)).size;
+  const rangeAccountCount = new Set(rangeTraffic.map((record) => record.backingAccountEmail)).size;
+  const rangeAverageLatency = rangeTraffic.length
+    ? Math.round(rangeTraffic.reduce((sum, record) => sum + record.latencyMs, 0) / rangeTraffic.length)
+    : 0;
 
   return (
     <div className="space-y-8 animate-in fade-in duration-200">
@@ -47,6 +108,50 @@ export const TrafficPage: React.FC<TrafficPageProps> = ({ traffic }) => {
           and which Google account served each request.
         </p>
       </div>
+
+      {timeRange && (
+        <section className="rounded-2xl border border-[#EAE5DE] bg-white p-4 sm:p-5 shadow-soft">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[#C25938]">
+                Selected graph hour
+              </div>
+              <div className="mt-1 text-sm font-medium text-[#2A2723]">
+                {formatRangeTime(timeRange.from)} – {formatRangeTime(timeRange.to)}
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                setTimeRange(null);
+                navigate('/app/traffic', { replace: true });
+              }}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-[#EAE5DE] px-3 py-1.5 text-xs font-medium text-[#706B65] hover:bg-[#FAF7F2] hover:text-[#2A2723]"
+            >
+              <X className="h-3.5 w-3.5" /> Clear hour
+            </button>
+          </div>
+
+          {rangeLoading ? (
+            <div className="mt-4 flex items-center gap-2 text-xs text-[#706B65]" role="status">
+              <Loader2 className="h-4 w-4 animate-spin text-[#C25938]" />
+              Loading requests for this hour…
+            </div>
+          ) : (
+            <>
+              <div className="mt-4 grid grid-cols-2 gap-4 border-t border-[#EEEAE4] pt-4 sm:grid-cols-4">
+                <div><div className="text-[10px] text-[#9E988F]">Requests</div><div className="mt-0.5 font-serif-editorial text-xl font-semibold">{rangeTraffic.length.toLocaleString()}</div></div>
+                <div><div className="text-[10px] text-[#9E988F]">Errors</div><div className={`mt-0.5 font-serif-editorial text-xl font-semibold ${rangeErrorCount ? 'text-red-600' : ''}`}>{rangeErrorCount.toLocaleString()}</div></div>
+                <div><div className="text-[10px] text-[#9E988F]">Models · accounts</div><div className="mt-0.5 font-serif-editorial text-xl font-semibold">{rangeModelCount} · {rangeAccountCount}</div></div>
+                <div><div className="text-[10px] text-[#9E988F]">Avg. latency</div><div className="mt-0.5 font-serif-editorial text-xl font-semibold">{rangeAverageLatency.toLocaleString()}<span className="ml-1 text-[11px] font-sans-ui font-normal text-[#706B65]">ms</span></div></div>
+              </div>
+              {!rangeIsLive && (
+                <p className="mt-3 text-[11px] text-amber-700">Live audit data is unavailable; showing local traffic data where available.</p>
+              )}
+            </>
+          )}
+        </section>
+      )}
 
       {/* Filter and Search Bar */}
       <div className="flex flex-col sm:flex-row items-center justify-between gap-3 bg-[#FFFFFF] border border-[#EAE5DE] p-4 rounded-2xl shadow-soft">
@@ -95,10 +200,16 @@ export const TrafficPage: React.FC<TrafficPageProps> = ({ traffic }) => {
               </tr>
             </thead>
             <tbody className="divide-y divide-[#EAE5DE] text-[#2A2723]">
-              {filteredTraffic.length === 0 ? (
+              {rangeLoading ? (
+                <tr>
+                  <td colSpan={7} className="py-10 text-center text-[#706B65]">
+                    <span className="inline-flex items-center gap-2"><Loader2 className="h-4 w-4 animate-spin text-[#C25938]" />Loading matching requests…</span>
+                  </td>
+                </tr>
+              ) : filteredTraffic.length === 0 ? (
                 <tr>
                   <td colSpan={7} className="text-center py-10 text-[#706B65]">
-                    No traffic records matched your filter.
+                    {timeRange ? 'No requests were recorded during this hour.' : 'No traffic records matched your filter.'}
                   </td>
                 </tr>
               ) : (

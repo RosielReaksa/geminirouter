@@ -9,7 +9,7 @@ import dotenv from 'dotenv';
 
 import { CoreClient } from './coreClient.js';
 import { CoreProcessManager } from './coreProcess.js';
-import { LocalStateStore, type GoogleAccount } from './store.js';
+import { LocalStateStore, type GoogleAccount, type TrafficRecord } from './store.js';
 import { createAuthMiddleware, SessionStore, safeEqual } from './auth.js';
 import { derivePoolState, bridgeToCoreProxy, coreProxyToBridge } from './pool-state.js';
 import { readCoreProxyConfig, applyCoreProxyConfig } from './coreConfig.js';
@@ -34,6 +34,31 @@ const PORT = parseInt(process.env.PORT || '3000', 10);
 const HOST = process.env.HOST || '0.0.0.0';
 const ADMIN_PASSWORD = process.env.GEMINIROUTER_ADMIN_PASSWORD || '';
 const INTERNAL_GATEWAY_PORT = parseInt(process.env.INTERNAL_GATEWAY_PORT || '8045', 10);
+const WEBSITE_OAUTH_CALLBACK_URI =
+  process.env.OAUTH_CALLBACK_URL || 'https://framecall.site/oauth/callback';
+const LOCAL_OAUTH_RELAY_REDIRECT_URI = 'http://127.0.0.1:41209/oauth-callback';
+
+interface CoreCredentialState {
+  checkedAt?: string;
+  drift?: boolean;
+  deployedFingerprint?: string;
+  upstreamFingerprint?: string;
+  error?: string;
+}
+
+function dataDirPath(): string {
+  return process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.resolve(process.cwd(), '.data');
+}
+
+function readCoreCredentialState(): CoreCredentialState | null {
+  try {
+    const file = path.join(dataDirPath(), 'core-credentials.json');
+    if (!fs.existsSync(file)) return null;
+    return JSON.parse(fs.readFileSync(file, 'utf-8')) as CoreCredentialState;
+  } catch {
+    return null;
+  }
+}
 
 export async function createServer(): Promise<{
   app: FastifyInstance;
@@ -47,9 +72,11 @@ export async function createServer(): Promise<{
       level: process.env.LOG_LEVEL || 'info',
     },
     bodyLimit: 10 * 1024 * 1024, // 10MB
+    forceCloseConnections: true,
   });
 
   const coreClient = new CoreClient();
+  let hostedOAuthSession: { sessionId: string; state: string; expiresAt: number } | null = null;
   const processManager = new CoreProcessManager();
   const store = new LocalStateStore();
   const initialCfg = store.getConfig();
@@ -59,8 +86,11 @@ export async function createServer(): Promise<{
     queueTimeoutMs: initialCfg.queueTimeoutMs,
   });
   const accountTester = new AccountTester(coreClient, store, () => resolveGateway());
-  // Start background auto-test scheduler: calls test model on every account every 5 hours!
-  accountTester.startAutoTestScheduler(5);
+  const autoTestIntervalHours = Math.max(
+    1,
+    Math.min(168, Number.parseInt(process.env.MODEL_ACCOUNT_TEST_INTERVAL_HOURS || '24', 10) || 24),
+  );
+  accountTester.startAutoTestScheduler(autoTestIntervalHours);
 
   /**
    * The gateway is always-on: the router is useless without it, so there is no
@@ -100,7 +130,7 @@ export async function createServer(): Promise<{
     path.resolve(__dirname, '../frontend/dist'),
     path.resolve(process.cwd(), '../frontend/dist'),
     path.resolve(process.cwd(), 'frontend/dist'),
-    'D:/projectradom/geminirouter/frontend/dist',
+    ...(process.env.FRONTEND_DIST ? [path.resolve(process.env.FRONTEND_DIST)] : []),
   ];
   let frontendDistPath = '';
   for (const dir of candidateFrontendDirs) {
@@ -342,6 +372,8 @@ export async function createServer(): Promise<{
               Boolean(testRes?.requiresValidation);
 
         const status = requiresVerification ? 'error' : cv.status === 'active' ? 'active' : 'standby';
+        const coreStatus = typeof cv.status === 'string' ? cv.status : undefined;
+        const refreshBlocked = Boolean(cv.health?.oauth?.refresh_blocked);
 
         return {
           id: cv.id,
@@ -362,6 +394,8 @@ export async function createServer(): Promise<{
           statusReason: requiresVerification
             ? 'Google requires account verification'
             : cv.status_reason || undefined,
+          coreStatus,
+          refreshBlocked,
           lastTestResult: testRes,
         };
       });
@@ -383,6 +417,183 @@ export async function createServer(): Promise<{
       app.log.warn('Could not read core accounts, falling back to local store');
       return null;
     }
+  };
+
+  const mapCoreTrafficItems = (items: any[], accounts: GoogleAccount[]): TrafficRecord[] => {
+    const emailsByAccountId = new Map(accounts.map((account) => [account.id, account.email]));
+    return items.map((item: any) => {
+      const routedModel = item.mappedModel || item.physicalModel || item.model || 'unknown';
+      const promptTokens = item.inputTokens ?? 0;
+      const completionTokens = item.outputTokens ?? 0;
+      return {
+        id: item.id,
+        timestamp: new Date(item.timestamp).toISOString(),
+        clientName: item.clientName || item.userAgent || item.protocol || 'HTTP Client',
+        clientIp: item.clientIp || '127.0.0.1',
+        modelRequested: item.model || routedModel,
+        modelRouted: routedModel,
+        backingAccountEmail:
+          emailsByAccountId.get(item.attributedAccountId) || item.attributedAccountId || 'unknown',
+        status: item.status ?? 0,
+        latencyMs: item.durationMs ?? 0,
+        promptTokens,
+        completionTokens,
+        totalTokens: promptTokens + completionTokens,
+      };
+    });
+  };
+
+  const loadCoreModelTraffic = async (options: {
+    from?: number;
+    to?: number;
+    allPages?: boolean;
+    accounts?: GoogleAccount[];
+  } = {}): Promise<{ total: number; records: TrafficRecord[] } | null> => {
+    if (!(await coreClient.isCoreAlive())) return null;
+    try {
+      const limit = 200;
+      let query: { from?: number; to?: number; trafficClass: string; limit: number; offset: number } = {
+        from: options.from,
+        to: options.to,
+        trafficClass: 'model',
+        limit,
+        offset: 0,
+      };
+      let firstPage = await coreClient.callRpc<any>('audit/list', query);
+      // Older core builds may not accept an upper time bound. Retry with the
+      // supported lower bound and apply `to` after mapping the returned rows.
+      if (!firstPage && options.to !== undefined) {
+        query = { from: options.from, trafficClass: 'model', limit, offset: 0 };
+        firstPage = await coreClient.callRpc<any>('audit/list', query);
+      }
+      if (!firstPage || !Array.isArray(firstPage.items)) return null;
+
+      const items = [...firstPage.items];
+      if (options.allPages) {
+        const total = Number(firstPage.total) || items.length;
+        for (let offset = limit; offset < total; offset += limit) {
+          const page = await coreClient.callRpc<any>('audit/list', { ...query, offset });
+          if (!page || !Array.isArray(page.items) || page.items.length === 0) break;
+          items.push(...page.items);
+        }
+      }
+
+      const accounts = options.accounts ?? (await loadCoreAccounts()) ?? store.getAccounts();
+      return {
+        total: Number(firstPage.total) || items.length,
+        records: mapCoreTrafficItems(items, accounts),
+      };
+    } catch {
+      return null;
+    }
+  };
+
+  type AvailabilityBucketState = 'ok' | 'partial' | 'error' | 'empty';
+  type ModelAvailabilityHistory = {
+    windowStart: string;
+    windowEnd: string;
+    bucketMs: number;
+    buckets: Array<{
+      state: AvailabilityBucketState;
+      requests: number;
+      successes: number;
+      failures: number;
+    }>;
+    totalRequests: number;
+    successfulRequests: number;
+    failedRequests: number;
+    availabilityPercent: number | null;
+  };
+
+  let modelHistoryCache: {
+    expiresAt: number;
+    histories: Record<string, ModelAvailabilityHistory>;
+  } | null = null;
+
+  const loadModelAvailabilityHistory = async (): Promise<Record<string, ModelAvailabilityHistory>> => {
+    const now = Date.now();
+    if (modelHistoryCache && modelHistoryCache.expiresAt > now) {
+      return modelHistoryCache.histories;
+    }
+
+    const bucketMs = 60 * 60 * 1000;
+    const bucketCount = 72;
+    const windowStart = now - bucketMs * bucketCount;
+    const liveTraffic = await loadCoreModelTraffic({ from: windowStart, allPages: true, accounts: [] });
+    if (!liveTraffic) return {};
+
+    const mutable = new Map<string, Array<{ requests: number; successes: number; failures: number }>>();
+    for (const record of liveTraffic.records) {
+      const model = record.modelRequested;
+      const timestamp = Date.parse(record.timestamp);
+      if (!model || model === 'unknown' || !Number.isFinite(timestamp)) continue;
+      const index = Math.floor((timestamp - windowStart) / bucketMs);
+      if (index < 0 || index >= bucketCount) continue;
+
+      let buckets = mutable.get(model);
+      if (!buckets) {
+        buckets = Array.from({ length: bucketCount }, () => ({ requests: 0, successes: 0, failures: 0 }));
+        mutable.set(model, buckets);
+      }
+      const bucket = buckets[index];
+      bucket.requests += 1;
+      if (record.status >= 200 && record.status < 400) bucket.successes += 1;
+      else if (record.status >= 400) bucket.failures += 1;
+    }
+
+    const histories: Record<string, ModelAvailabilityHistory> = {};
+    for (const [model, counts] of mutable) {
+      const successfulRequests = counts.reduce((sum, bucket) => sum + bucket.successes, 0);
+      const failedRequests = counts.reduce((sum, bucket) => sum + bucket.failures, 0);
+      const completedRequests = successfulRequests + failedRequests;
+      histories[model] = {
+        windowStart: new Date(windowStart).toISOString(),
+        windowEnd: new Date(now).toISOString(),
+        bucketMs,
+        buckets: counts.map((bucket) => ({
+          ...bucket,
+          state:
+            bucket.requests === 0 || (bucket.successes === 0 && bucket.failures === 0)
+              ? 'empty'
+              : bucket.failures === 0
+              ? 'ok'
+              : bucket.successes === 0
+              ? 'error'
+              : 'partial',
+        })),
+        totalRequests: counts.reduce((sum, bucket) => sum + bucket.requests, 0),
+        successfulRequests,
+        failedRequests,
+        availabilityPercent:
+          completedRequests > 0
+            ? Math.round((successfulRequests / completedRequests) * 10000) / 100
+            : null,
+      };
+    }
+
+    modelHistoryCache = { expiresAt: now + 30_000, histories };
+    return histories;
+  };
+
+  const emptyModelAvailabilityHistory = (): ModelAvailabilityHistory => {
+    const windowEnd = Date.now();
+    const bucketMs = 60 * 60 * 1000;
+    const bucketCount = 72;
+    return {
+      windowStart: new Date(windowEnd - bucketMs * bucketCount).toISOString(),
+      windowEnd: new Date(windowEnd).toISOString(),
+      bucketMs,
+      buckets: Array.from({ length: bucketCount }, () => ({
+        state: 'empty' as const,
+        requests: 0,
+        successes: 0,
+        failures: 0,
+      })),
+      totalRequests: 0,
+      successfulRequests: 0,
+      failedRequests: 0,
+      availabilityPercent: null,
+    };
   };
 
   // 1. GET /api/status — real state only. Numbers are derived from real
@@ -420,8 +631,27 @@ export async function createServer(): Promise<{
 
     // Live pool from the core so the overview always has quota detail.
     const accounts = (await loadCoreAccounts()) ?? store.getAccounts();
-    const traffic = store.getTraffic();
+    const liveTraffic = isCoreAlive
+      ? await loadCoreModelTraffic({ from: Date.now() - 24 * 60 * 60 * 1000, allPages: true, accounts })
+      : null;
+    const traffic = liveTraffic?.records ?? store.getTraffic();
     const pool = derivePoolState(accounts, traffic);
+    const now = Date.now();
+    const requestVolume12h = Array.from({ length: 12 }, () => 0);
+    let requestsLast12h = 0;
+    let errorsLast12h = 0;
+    let errorsLast24h = 0;
+    for (const record of traffic) {
+      const ageMs = now - Date.parse(record.timestamp);
+      if (!Number.isFinite(ageMs) || ageMs < 0 || ageMs >= 24 * 60 * 60 * 1000) continue;
+      if (record.status >= 400) errorsLast24h += 1;
+      if (ageMs < 12 * 60 * 60 * 1000) {
+        if (record.status >= 400) errorsLast12h += 1;
+        const hoursAgo = Math.floor(ageMs / (60 * 60 * 1000));
+        requestVolume12h[11 - hoursAgo] += 1;
+        requestsLast12h += 1;
+      }
+    }
     const activeAccounts = accounts.filter((a) => a.status === 'active');
 
     return {
@@ -436,6 +666,11 @@ export async function createServer(): Promise<{
       totalAccountsCount: accounts.length,
       requestsLast24h: pool.requestsLast24h,
       tokensLast24h: pool.tokensLast24h,
+      requestsLast12h,
+      errorsLast12h,
+      errorsLast24h,
+      requestVolume12h,
+      requestVolume12hWindowEnd: new Date(now).toISOString(),
       averageLatencyMs: pool.averageLatencyMs,
       successRate: pool.successRate,
       activeBackingAccountEmail: pool.activeBackingAccountEmail,
@@ -450,6 +685,12 @@ export async function createServer(): Promise<{
       // Real health: gateway answering AND at least one usable account,
       // or a reachable core that can still serve its own error states.
       healthy: gatewayResponding && (activeAccounts.length > 0 || isCoreAlive),
+      // Accounts whose OAuth refresh is blocked need reauthorization; a jump
+      // here is the first sign the Antigravity client was rotated or revoked.
+      accountsNeedingReauth: accounts.filter(
+        (a) => a.refreshBlocked || a.coreStatus === 'expired',
+      ).length,
+      coreCredentials: readCoreCredentialState(),
       coreConnected: isCoreAlive,
       coreEndpoint: coreClient.getEndpoint(),
       corePid: coreStatus?.pid,
@@ -465,6 +706,8 @@ export async function createServer(): Promise<{
         isDefaultRouting: a.isDefaultRouting,
         hasValidationLink: Boolean(a.hasValidationLink),
         statusReason: a.statusReason,
+        coreStatus: a.coreStatus,
+        refreshBlocked: Boolean(a.refreshBlocked),
         lastTestResult: accountTester.getLastResult(a.id) ?? undefined,
         models5h: a.models5h ?? [],
         modelsWeekly: a.modelsWeekly ?? [],
@@ -567,8 +810,7 @@ export async function createServer(): Promise<{
     async (request, reply) => {
       const { id } = request.params;
       const model = request.body?.model || 'gemini-2.5-flash';
-      const accounts = await (app as any).inject({ method: 'GET', url: '/api/accounts' });
-      const list: GoogleAccount[] = JSON.parse(accounts.body);
+      const list = (await loadCoreAccounts()) ?? store.getAccounts();
       const acc = list.find((a) => a.id === id);
 
       if (!acc) {
@@ -600,11 +842,7 @@ export async function createServer(): Promise<{
       } catch {
         app.log.warn('testAndRefreshAll failed; returning last known accounts');
       }
-      const accountsAfter = await (app as any).inject({
-        method: 'GET',
-        url: '/api/accounts',
-      });
-      return JSON.parse(accountsAfter.body);
+      return (await loadCoreAccounts()) ?? store.getAccounts();
     }
 
     // Core offline: keep last known data untouched. Do not invent numbers.
@@ -630,8 +868,16 @@ export async function createServer(): Promise<{
   });
 
   // 5. POST /api/oauth/start — requires the core; no fake authorization URLs.
-  app.post<{ Body: { oauthClientKey?: string } }>('/api/oauth/start', async (request, reply) => {
-    const { oauthClientKey } = request.body || {};
+  app.post<{ Body: { oauthClientKey?: string; callbackMode?: 'local-relay' | 'hosted' } }>(
+    '/api/oauth/start',
+    async (request, reply) => {
+    const { oauthClientKey, callbackMode } = request.body || {};
+    if (callbackMode && callbackMode !== 'local-relay' && callbackMode !== 'hosted') {
+      return reply.code(400).send({ error: 'Unsupported OAuth callback mode' });
+    }
+    if (callbackMode === 'local-relay' && oauthClientKey !== 'antigravity_enterprise') {
+      return reply.code(400).send({ error: 'The local relay requires Antigravity sign-in' });
+    }
     if (!(await coreClient.isCoreAlive())) {
       return reply.code(503).send({
         error: 'Core is offline',
@@ -640,7 +886,15 @@ export async function createServer(): Promise<{
       });
     }
 
-    const coreOAuth = await coreClient.startOAuth(oauthClientKey);
+    hostedOAuthSession = null;
+    const useHostedCallback =
+      callbackMode === 'hosted' || (callbackMode !== 'local-relay' && oauthClientKey === 'framecall_web');
+    const redirectUri = callbackMode === 'local-relay'
+      ? LOCAL_OAUTH_RELAY_REDIRECT_URI
+      : useHostedCallback
+        ? WEBSITE_OAUTH_CALLBACK_URI
+        : undefined;
+    const coreOAuth = await coreClient.startOAuth(oauthClientKey, redirectUri);
     if (!coreOAuth.ok) {
       return reply.code(coreOAuth.status === 409 ? 409 : 502).send({
         error: coreOAuth.error,
@@ -651,12 +905,70 @@ export async function createServer(): Promise<{
       });
     }
 
+    if (redirectUri) {
+      const state = new URL(coreOAuth.authorizationUrl).searchParams.get('state');
+      if (!state) {
+        await coreClient.cancelOAuth(coreOAuth.sessionId);
+        return reply.code(502).send({
+          error: 'Invalid OAuth session',
+          message: 'The Google sign-in session did not provide a state token. Please retry.',
+        });
+      }
+      hostedOAuthSession = {
+        sessionId: coreOAuth.sessionId,
+        state,
+        expiresAt: Date.now() + 5 * 60 * 1000,
+      };
+    }
+
     return {
       authorizationUrl: coreOAuth.authorizationUrl,
       sessionId: coreOAuth.sessionId,
       expiresInSeconds: 600,
     };
   });
+
+  // Google redirects here for hosted web OAuth. The random state binds this
+  // public callback to the authenticated dashboard session that started it.
+  app.get<{ Querystring: { state?: string; code?: string; error?: string } }>(
+    '/oauth/callback',
+    { logLevel: 'silent' },
+    async (request, reply) => {
+      const pending = hostedOAuthSession;
+      const { state, code, error } = request.query;
+      if (!pending || !state || !safeEqual(state, pending.state)) {
+        return reply.code(400).type('text/html; charset=utf-8').send(
+          '<!doctype html><html><body><h1>Sign-in session not found</h1><p>Return to geminirouter and start a new Google sign-in.</p></body></html>',
+        );
+      }
+      if (Date.now() > pending.expiresAt) {
+        hostedOAuthSession = null;
+        return reply.code(410).type('text/html; charset=utf-8').send(
+          '<!doctype html><html><body><h1>Sign-in expired</h1><p>Return to geminirouter and start a new Google sign-in.</p></body></html>',
+        );
+      }
+      if (error || !code) {
+        hostedOAuthSession = null;
+        await coreClient.cancelOAuth(pending.sessionId);
+        return reply.code(400).type('text/html; charset=utf-8').send(
+          '<!doctype html><html><body><h1>Sign-in cancelled</h1><p>Return to geminirouter to try again.</p></body></html>',
+        );
+      }
+
+      const accepted = await coreClient.completeOAuth(pending.sessionId, code);
+      if (!accepted) {
+        hostedOAuthSession = null;
+        return reply.code(400).type('text/html; charset=utf-8').send(
+          '<!doctype html><html><body><h1>Sign-in could not be completed</h1><p>Return to geminirouter and start a new Google sign-in.</p></body></html>',
+        );
+      }
+
+      hostedOAuthSession = null;
+      return reply.type('text/html; charset=utf-8').send(
+        '<!doctype html><html><body><h1>Google sign-in complete</h1><p>Return to the geminirouter tab. Your account will appear shortly.</p><script>setTimeout(()=>window.close(),1200)</script></body></html>',
+      );
+    },
+  );
 
   // 6. POST /api/oauth/complete — requires the core; never fabricates an account.
   app.post<{ Body: { sessionId: string; codeOrUrl?: string; code?: string } }>(
@@ -765,33 +1077,70 @@ export async function createServer(): Promise<{
   });
 
   // 11. GET /api/traffic
-  app.get('/api/traffic', async () => {
-    if (await coreClient.isCoreAlive()) {
-      try {
-        const auditList = await coreClient.callRpc<any>('audit.list', { limit: 50, offset: 0 });
-        if (auditList && Array.isArray(auditList.items) && auditList.items.length > 0) {
-          const records = auditList.items.map((item: any) => ({
-            id: item.id,
-            timestamp: new Date(item.timestamp).toISOString(),
-            clientName: item.protocol || 'HTTP Client',
-            clientIp: '127.0.0.1',
-            modelRequested: item.model || 'gemini-2.5-pro',
-            modelRouted: item.mappedModel || item.model || 'gemini-2.5-pro',
-            backingAccountEmail: item.attributedAccountId || 'default',
-            status: item.status || 200,
-            latencyMs: item.durationMs || 450,
-            promptTokens: item.inputTokens || 0,
-            completionTokens: item.outputTokens || 0,
-            totalTokens: (item.inputTokens || 0) + (item.outputTokens || 0),
-          }));
-          return records;
-        }
-      } catch {
-        // Fallback to store
+  app.get<{ Querystring: { from?: string; to?: string } }>('/api/traffic', async (request) => {
+    const from = request.query.from ? Number(request.query.from) : undefined;
+    const to = request.query.to ? Number(request.query.to) : undefined;
+    const hasValidRange = Number.isFinite(from) && Number.isFinite(to) && (to as number) > (from as number);
+    const liveTraffic = await loadCoreModelTraffic({
+      ...(hasValidRange ? { from, to, allPages: true } : {}),
+    });
+    const records = liveTraffic?.records ?? store.getTraffic();
+    if (hasValidRange) {
+      return records.filter((record) => {
+        const timestamp = Date.parse(record.timestamp);
+        return timestamp >= (from as number) && timestamp < (to as number);
+      });
+    }
+    return records.slice(0, 50);
+  });
+
+  // 11a. GET /api/traffic/volume — aggregated live request counts for the Overview graph.
+  type TrafficVolumeRange = '12h' | '24h' | '7d';
+  const trafficVolumeCache = new Map<string, { expiresAt: number; value: any }>();
+  app.get<{ Querystring: { range?: string } }>('/api/traffic/volume', async (request) => {
+    const range: TrafficVolumeRange = request.query.range === '24h' || request.query.range === '7d'
+      ? request.query.range
+      : '12h';
+    const cached = trafficVolumeCache.get(range);
+    if (cached && cached.expiresAt > Date.now()) return cached.value;
+
+    const durationMs = range === '7d' ? 7 * 24 * 60 * 60 * 1000 : range === '24h' ? 24 * 60 * 60 * 1000 : 12 * 60 * 60 * 1000;
+    const bucketMs = range === '7d' ? 6 * 60 * 60 * 1000 : 60 * 60 * 1000;
+    const bucketCount = durationMs / bucketMs;
+    const windowEnd = Date.now();
+    const windowStart = windowEnd - durationMs;
+    const liveTraffic = await loadCoreModelTraffic({ from: windowStart, to: windowEnd, allPages: true, accounts: [] });
+    const buckets = Array.from({ length: bucketCount }, (_, index) => ({
+      from: new Date(windowStart + index * bucketMs).toISOString(),
+      to: new Date(Math.min(windowStart + (index + 1) * bucketMs, windowEnd)).toISOString(),
+      requests: 0,
+      errors: 0,
+    }));
+
+    if (liveTraffic) {
+      for (const record of liveTraffic.records) {
+        const timestamp = Date.parse(record.timestamp);
+        if (!Number.isFinite(timestamp) || timestamp < windowStart || timestamp >= windowEnd) continue;
+        const index = Math.floor((timestamp - windowStart) / bucketMs);
+        const bucket = buckets[index];
+        if (!bucket) continue;
+        bucket.requests += 1;
+        if (record.status >= 400) bucket.errors += 1;
       }
     }
 
-    return store.getTraffic();
+    const value = {
+      range,
+      available: Boolean(liveTraffic),
+      windowStart: new Date(windowStart).toISOString(),
+      windowEnd: new Date(windowEnd).toISOString(),
+      bucketMs,
+      buckets: liveTraffic ? buckets : [],
+      totalRequests: buckets.reduce((total, bucket) => total + bucket.requests, 0),
+      totalErrors: buckets.reduce((total, bucket) => total + bucket.errors, 0),
+    };
+    trafficVolumeCache.set(range, { expiresAt: Date.now() + 15_000, value });
+    return value;
   });
 
   // 12. GET /api/models — real model catalog merged with live gateway listing
@@ -849,6 +1198,7 @@ export async function createServer(): Promise<{
 
   app.get('/api/models', async () => {
     const { port: gatewayPort, apiKey, source: keySource } = resolveGateway();
+    const availabilityHistory = await loadModelAvailabilityHistory();
     app.log.info(`resolveGateway: port=${gatewayPort} keySource=${keySource} hasKey=${Boolean(apiKey)}`);
     const baseUrl = `http://127.0.0.1:${gatewayPort}`;
 
@@ -872,6 +1222,8 @@ export async function createServer(): Promise<{
             contextLength: meta?.contextLength || (isClaude ? 200000 : 1048576),
             maxOutputTokens: meta?.maxOutputTokens || 65535,
             live: true,
+            availability: store.getModelTest(id),
+            availabilityHistory: availabilityHistory[id] ?? emptyModelAvailabilityHistory(),
           };
         });
         return { source: 'gateway', gatewayOnline: true, gatewayPort, models };
@@ -884,8 +1236,23 @@ export async function createServer(): Promise<{
       source: 'catalog',
       gatewayOnline: false,
       gatewayPort,
-      models: MODEL_CATALOG.map((m) => ({ ...m, live: false })),
+      models: MODEL_CATALOG.map((m) => ({
+        ...m,
+        live: false,
+        availability: store.getModelTest(m.id),
+        availabilityHistory: availabilityHistory[m.id] ?? emptyModelAvailabilityHistory(),
+      })),
     };
+  });
+
+  app.post('/api/models/test-all-accounts', async (_request, reply) => {
+    try {
+      const counts = await accountTester.testAllModelsAcrossAccounts();
+      return { ok: true, ...counts };
+    } catch (err: any) {
+      app.log.warn({ err: err?.message }, 'Full model/account check failed');
+      return reply.code(503).send({ ok: false, error: 'Could not run the full model check. Verify the gateway is online.' });
+    }
   });
 
   // 13. POST /api/models/test — send a tiny real request through the gateway to verify a model works
@@ -917,12 +1284,16 @@ export async function createServer(): Promise<{
 
       const sample =
         res.data?.choices?.[0]?.message?.content?.toString().slice(0, 200) || '(empty response)';
-      return {
+      const result = {
         ok: true,
+        status: 'working' as const,
         model,
         latencyMs: Date.now() - startedAt,
         sample,
+        checkedAt: new Date().toISOString(),
       };
+      store.setModelTest(result);
+      return result;
     } catch (err: any) {
       const status = err?.response?.status;
       const detail =
@@ -931,15 +1302,19 @@ export async function createServer(): Promise<{
         err?.code ||
         err?.message ||
         'Unknown error';
-      return {
+      const result = {
         ok: false,
+        status: status === 404 || status === 410 ? 'expired' as const : 'temporarily_unavailable' as const,
         model,
         latencyMs: Date.now() - startedAt,
         httpStatus: status ?? null,
         error: status
           ? `Gateway returned HTTP ${status}: ${detail}`
           : `Gateway unreachable on port ${gatewayPort}. Start the gateway first (${detail})`,
+        checkedAt: new Date().toISOString(),
       };
+      store.setModelTest(result);
+      return result;
     }
   });
 

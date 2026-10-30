@@ -16,6 +16,7 @@ import { ModelInfo, ModelTestResult } from '../types';
 interface ModelsPageProps {
   gatewayOnline: boolean;
   onNavigateToGateway: () => void;
+  onReady: () => void;
 }
 
 const PROVIDER_BADGE: Record<string, string> = {
@@ -24,9 +25,28 @@ const PROVIDER_BADGE: Record<string, string> = {
   'OpenAI-compatible': 'bg-[#FDF6EC] text-[#C97A1E] border-[#EAD9B8]',
 };
 
+const availabilityLabel = (result: ModelTestResult) => {
+  if (result.status === 'needs_verification') return 'Needs verification';
+  if (result.status === 'expired') return 'Expired';
+  if (result.status === 'temporarily_unavailable') return 'Temporarily unavailable';
+  if (result.status === 'working') return 'Working';
+  return result.httpStatus === 404 || result.httpStatus === 410 || /model (was )?(not found|expired|deprecated)|unknown model/i.test(result.error || '')
+    ? 'Expired'
+    : 'Unavailable';
+};
+
+const formatHistoryTime = (value: string) =>
+  new Date(value).toLocaleString([], {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  });
+
 export const ModelsPage: React.FC<ModelsPageProps> = ({
   gatewayOnline,
   onNavigateToGateway,
+  onReady,
 }) => {
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [source, setSource] = useState<'gateway' | 'catalog'>('catalog');
@@ -39,23 +59,34 @@ export const ModelsPage: React.FC<ModelsPageProps> = ({
   const [testingId, setTestingId] = useState<string | null>(null);
   const [results, setResults] = useState<Record<string, ModelTestResult>>({});
   const [copiedId, setCopiedId] = useState<string | null>(null);
-
-  const loadModels = async () => {
-    setLoading(true);
-    try {
-      const res = await api.getModels();
-      setModels(res.data.models || []);
-      setSource(res.data.source);
-      setIsLiveApi(res.isLiveApi);
-    } catch {
-      setModels([]);
-    } finally {
-      setLoading(false);
-    }
-  };
+  const [testingAll, setTestingAll] = useState(false);
 
   useEffect(() => {
-    loadModels();
+    let active = true;
+    const loadModels = async () => {
+      try {
+        const res = await api.getModels();
+        if (!active) return;
+        const loadedModels = res.data.models || [];
+        setModels(loadedModels);
+        setResults(Object.fromEntries(
+          loadedModels
+            .filter((model) => model.availability)
+            .map((model) => [model.id, model.availability!]),
+        ));
+        setSource(res.data.source);
+        setIsLiveApi(res.isLiveApi);
+      } catch {
+        if (active) setModels([]);
+      } finally {
+        if (active) {
+          setLoading(false);
+          onReady();
+        }
+      }
+    };
+    void loadModels();
+    return () => { active = false; };
   }, []);
 
   const handleTest = async (modelId: string) => {
@@ -75,6 +106,27 @@ export const ModelsPage: React.FC<ModelsPageProps> = ({
       }));
     } finally {
       setTestingId(null);
+    }
+  };
+
+  const handleTestAll = async () => {
+    setTestingAll(true);
+    try {
+      const run = await api.testAllModelsAcrossAccounts();
+      if (!run.ok) throw new Error(run.error || 'The full model check could not start.');
+      const refreshed = await api.getModels();
+      const loadedModels = refreshed.data.models || [];
+      setModels(loadedModels);
+      setResults(Object.fromEntries(
+        loadedModels
+          .filter((model) => model.availability)
+          .map((model) => [model.id, model.availability!]),
+      ));
+      window.alert(`Checked ${run.models || 0} models across ${run.accounts || 0} accounts.`);
+    } catch (err: any) {
+      window.alert(err?.message || 'The full model check failed.');
+    } finally {
+      setTestingAll(false);
     }
   };
 
@@ -107,12 +159,20 @@ export const ModelsPage: React.FC<ModelsPageProps> = ({
             Available Models
           </h2>
           <p className="text-sm text-[#706B65] mt-1 max-w-xl">
-            Real models served through your account pool. Run a live test call to verify a model
-            works before pointing <code className="bg-[#F2ECE4] px-1 rounded">agy</code>, Claude Code or Codex at it.
+            Gateway-listed models are checked across your connected accounts daily. A model is working if any account succeeds; temporary errors stay unavailable, while confirmed removed models are marked expired.
           </p>
         </div>
 
         <div className="flex items-center gap-2.5">
+          <button
+            type="button"
+            onClick={() => void handleTestAll()}
+            disabled={testingAll || loading}
+            className="inline-flex items-center gap-2 rounded-full border border-[#EAE5DE] bg-white px-3 py-1.5 text-[11px] font-medium text-[#504C46] hover:bg-[#FAF7F2] disabled:cursor-wait disabled:opacity-60"
+          >
+            {testingAll ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Zap className="h-3.5 w-3.5" />}
+            {testingAll ? 'Testing all accounts…' : 'Test all accounts'}
+          </button>
           {/* Source badge */}
           <span
             className={`text-[11px] font-medium px-2.5 py-1 rounded-full border ${
@@ -226,15 +286,81 @@ export const ModelsPage: React.FC<ModelsPageProps> = ({
                   </div>
 
                   {/* Live dot */}
-                  <div className="flex items-center gap-1.5 shrink-0" title={m.live ? 'Listed by the live gateway' : 'From catalog'}>
+                  <div className="flex items-center gap-1.5 shrink-0" title={m.live ? 'The gateway advertises this model ID; run Test call to confirm an account can serve it.' : 'From the known model catalog; run Test call to confirm availability.'}>
                     <span
                       className={`w-2 h-2 rounded-full ${
                         m.live ? 'bg-emerald-500' : 'bg-stone-300'
                       }`}
                     />
-                    <span className="text-[10px] text-[#9E988F]">{m.live ? 'live' : 'catalog'}</span>
+                    <span className="text-[10px] text-[#9E988F]">{m.live ? 'listed' : 'catalog'}</span>
                   </div>
                 </div>
+
+                {m.availability && (
+                  <span
+                    title={`Last tested ${new Date(m.availability.checkedAt).toLocaleString()}`}
+                    className={`self-start rounded-full border px-2 py-0.5 text-[10px] font-semibold ${
+                      m.availability.ok
+                        ? 'border-[#D3E4DB] bg-[#EEF5F1] text-[#4E7B62]'
+                        : 'border-red-200 bg-red-50 text-red-700'
+                    }`}
+                  >
+                    {m.availability.ok ? 'Working' : availabilityLabel(m.availability)}
+                  </span>
+                )}
+                {m.availability?.checkedAccounts !== undefined && (
+                  <span className="-mt-2 text-[10px] text-[#9E988F]">
+                    Checked {m.availability.workingAccounts || 0}/{m.availability.checkedAccounts} accounts
+                  </span>
+                )}
+
+                {m.availabilityHistory && (
+                  <div className="w-full rounded-xl border border-[#EEEAE4] bg-[#FCFBF9] px-3 py-2.5 space-y-2">
+                    <div className="flex items-center justify-between gap-2 text-[10px]">
+                      <span className="font-medium text-[#504C46]">
+                        Availability over the last 3 days
+                      </span>
+                      <span className={m.availabilityHistory.availabilityPercent === null ? 'text-[#9E988F]' : 'font-semibold text-[#087F5B]'}>
+                        {m.availabilityHistory.availabilityPercent === null
+                          ? 'No request data'
+                          : `Availability ${m.availabilityHistory.availabilityPercent.toFixed(2)}%`}
+                      </span>
+                    </div>
+                    <div
+                      role="img"
+                      aria-label={`${m.availabilityHistory.availabilityPercent === null ? 'No request data' : `${m.availabilityHistory.availabilityPercent.toFixed(2)} percent availability`} over the last 3 days`}
+                      className="flex h-5 gap-[2px]"
+                    >
+                      {m.availabilityHistory.buckets.map((bucket, index) => {
+                        const bucketStart = new Date(
+                          Date.parse(m.availabilityHistory!.windowStart) + index * m.availabilityHistory!.bucketMs,
+                        );
+                        const color = bucket.state === 'ok'
+                          ? 'bg-emerald-500'
+                          : bucket.state === 'partial'
+                          ? 'bg-amber-400'
+                          : bucket.state === 'error'
+                          ? 'bg-rose-500'
+                          : 'bg-[#DDD9D3]';
+                        const detail = bucket.requests === 0
+                          ? 'No requests observed'
+                          : `${bucket.requests} request${bucket.requests === 1 ? '' : 's'} · ${bucket.successes} successful · ${bucket.failures} failed`;
+                        return (
+                          <span
+                            key={index}
+                            title={`${bucketStart.toLocaleString()}: ${detail}`}
+                            className={`min-w-0 flex-1 rounded-[1px] ${color}`}
+                          />
+                        );
+                      })}
+                    </div>
+                    <div className="flex items-center justify-between gap-2 text-[9px] text-[#9E988F] font-mono-code">
+                      <span>{formatHistoryTime(m.availabilityHistory.windowStart)}</span>
+                      <span>Actual model requests · gray means no request</span>
+                      <span>Now</span>
+                    </div>
+                  </div>
+                )}
 
                 {/* Specs */}
                 <div className="flex items-center gap-4 text-[11px] text-[#706B65]">

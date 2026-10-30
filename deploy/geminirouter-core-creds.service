@@ -1,0 +1,19 @@
+[Unit]
+Description=geminirouter core OAuth credential drift check
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=geminirouter
+Group=geminirouter
+WorkingDirectory=/opt/geminirouter/server
+Environment=DATA_DIR=/opt/geminirouter/server/.data
+Environment=CORE_MAIN_PATH=/opt/geminirouter/core/dist/core/main.cjs
+ExecStart=/usr/bin/node /opt/geminirouter/scripts/check-core-credentials.mjs --json
+# Exit code 2 means upstream credentials changed: keep the run visible as failed
+# so `systemctl --failed` and monitoring surface it.
+SuccessExitStatus=0
+
+[Install]
+WantedBy=multi-user.target

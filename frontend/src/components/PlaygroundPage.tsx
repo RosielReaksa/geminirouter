@@ -66,7 +66,7 @@ const ResultCard: React.FC<{
   </section>
 );
 
-export const PlaygroundPage: React.FC = () => {
+export const PlaygroundPage: React.FC<{ onReady: () => void }> = ({ onReady }) => {
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [modelsLoading, setModelsLoading] = useState(true);
   const [model, setModel] = useState('');
@@ -84,7 +84,7 @@ export const PlaygroundPage: React.FC = () => {
     let active = true;
     api.getModels().then(({ data }) => {
       if (!active) return;
-      const available = data.models || [];
+      const available = (data.models || []).filter((item) => item.availability?.ok !== false);
       setModels(available);
       const first = available.find((item) => item.id.includes('gemini')) || available[0];
       const second = available.find((item) => item.id !== first?.id);
@@ -93,7 +93,10 @@ export const PlaygroundPage: React.FC = () => {
     }).catch(() => {
       if (active) setModels([]);
     }).finally(() => {
-      if (active) setModelsLoading(false);
+      if (active) {
+        setModelsLoading(false);
+        onReady();
+      }
     });
     return () => { active = false; };
   }, []);

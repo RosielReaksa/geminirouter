@@ -8,7 +8,7 @@ The bridge's job is: expose the core's scheduling knobs (`/api/config`), report 
 
 ## How the core rotates accounts (verified in source)
 
-Core repo: `github.com/Draculabo/AntigravityManager` (local clone: `D:/projectradom/AntigravityManager`).
+Core repo: `github.com/Draculabo/AntigravityManager`. The core is an external dependency and is not bundled with this repository; the bridge locates it via `CORE_MAIN_PATH` (or `CORE_HOME`).
 
 | Behavior | Where it lives |
 |---|---|
@@ -99,7 +99,7 @@ The core patch backing this is `src/modules/proxy-gateway/server/common/pinned-a
 
 Verified by: `src/tests/unit/pinned-account-selection.test.ts` (8 tests) plus the 12 pre-existing policy tests (no regression).
 
-**Activation note:** the patch lives in the patched core source (`dist/core/main.cjs` is rebuilt). An installed Antigravity Manager desktop app runs its own unpatched build — to activate pinning, run the standalone core from the patched clone instead of the installed app.
+**Activation note:** the pinning support must be present in the core build you deploy (`CORE_MAIN_PATH`). An unpatched Antigravity Manager desktop build silently ignores the pin, so if single-account tests appear to fail over, verify you are running a core build that includes `pinned-account-context.ts`.
 
 ### Why not pin every request?
 
