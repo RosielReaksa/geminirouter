@@ -4,6 +4,7 @@ import fastifyCors from '@fastify/cors';
 import fastifyHttpProxy from '@fastify/http-proxy';
 import path from 'node:path';
 import fs from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import axios from 'axios';
 import dotenv from 'dotenv';
 
@@ -832,6 +833,91 @@ export async function createServer(): Promise<{
   // 2f. GET /api/accounts/test-results — get last test results
   app.get('/api/accounts/test-results', async () => {
     return accountTester.getAllLastResults();
+  });
+
+  // 2g. POST /api/accounts/import — import an Antigravity account export file.
+  // The core's RPC reads from a path on the core machine, so the JSON is staged
+  // in .data/imports (same host/user) and removed immediately afterwards.
+  const ACCOUNT_IMPORT_MAX_BYTES = 5 * 1024 * 1024;
+  const IMPORT_STRATEGIES = new Set(['merge', 'overwrite', 'skip-existing']);
+  app.post<{
+    Body?: { content?: string; strategy?: 'merge' | 'overwrite' | 'skip-existing' };
+  }>('/api/accounts/import', async (request, reply) => {
+    const { content, strategy } = request.body || {};
+    if (typeof content !== 'string' || content.trim() === '') {
+      return reply.code(400).send({ success: false, error: 'content is required' });
+    }
+    if (Buffer.byteLength(content, 'utf8') > ACCOUNT_IMPORT_MAX_BYTES) {
+      return reply.code(413).send({ success: false, error: 'Import file is larger than 5 MB' });
+    }
+    const importStrategy = strategy ?? 'merge';
+    if (!IMPORT_STRATEGIES.has(importStrategy)) {
+      return reply.code(400).send({ success: false, error: 'Invalid import strategy' });
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(content);
+    } catch {
+      return reply.code(400).send({ success: false, error: 'Import file is not valid JSON' });
+    }
+    const candidate = parsed as {
+      version?: unknown;
+      exportedAt?: unknown;
+      accounts?: unknown;
+    } | null;
+    if (
+      !candidate ||
+      typeof candidate !== 'object' ||
+      candidate.version !== '1.0' ||
+      typeof candidate.exportedAt !== 'number' ||
+      !Array.isArray(candidate.accounts)
+    ) {
+      return reply.code(400).send({
+        success: false,
+        error:
+          'Not an Antigravity account export: expected version "1.0", a numeric exportedAt and an accounts array.',
+      });
+    }
+
+    if (!(await coreClient.isCoreAlive())) {
+      return reply.code(503).send({
+        success: false,
+        error: 'Core is offline',
+        message: 'Account import requires the AntigravityManager core.',
+      });
+    }
+
+    const importsDir = path.join(dataDirPath(), 'imports');
+    const importFile = path.join(importsDir, `import-${Date.now()}-${randomUUID()}.json`);
+    try {
+      fs.mkdirSync(importsDir, { recursive: true, mode: 0o700 });
+      fs.writeFileSync(importFile, content, { encoding: 'utf8', mode: 0o600 });
+      const result = await coreClient.callRpc('accountFileImport', {
+        filePath: importFile,
+        strategy: importStrategy,
+      });
+      if (!result) {
+        return reply.code(502).send({
+          success: false,
+          error: 'Core rejected the import',
+          message: 'Check the core logs for the exact reason.',
+        });
+      }
+      return { success: true, strategy: importStrategy, result };
+    } catch (error: any) {
+      return reply.code(500).send({
+        success: false,
+        error: 'Import failed',
+        message: error?.message || String(error),
+      });
+    } finally {
+      try {
+        fs.unlinkSync(importFile);
+      } catch {
+        /* best effort */
+      }
+    }
   });
 
   // 3. POST /api/accounts/refresh — test all accounts and refresh quotas from core

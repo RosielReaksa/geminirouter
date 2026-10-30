@@ -430,6 +430,24 @@ export class ApiClient {
     return updated;
   }
 
+  async importAccounts(
+    content: string,
+    strategy: 'merge' | 'overwrite' | 'skip-existing' = 'merge',
+  ): Promise<{ success: boolean; result?: unknown; error?: string; message?: string }> {
+    const res = await fetch('/api/accounts/import', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...authApi.headers(),
+      },
+      body: JSON.stringify({ content, strategy }),
+    });
+    if (res.status === 401) {
+      window.dispatchEvent(new CustomEvent('geminirouter:unauthorized'));
+    }
+    return res.json().catch(() => ({ success: false, error: 'Invalid response from server' }));
+  }
+
   // Helper: Set default account
   async setDefaultAccount(accountId: string): Promise<GoogleAccount[]> {
     const current = getStored<GoogleAccount[]>(

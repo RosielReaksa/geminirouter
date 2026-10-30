@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import {
   Users,
   Plus,
@@ -13,6 +13,7 @@ import {
   AlertTriangle,
   ExternalLink,
   Zap,
+  Upload,
 } from 'lucide-react';
 import { GoogleAccount } from '../types';
 import { api } from '../services/api';
@@ -46,6 +47,39 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
   const [openDropdownId, setOpenDropdownId] = useState<string | null>(null);
   const [validatingAccountId, setValidatingAccountId] = useState<string | null>(null);
   const [testingAccountId, setTestingAccountId] = useState<string | null>(null);
+  const [isImporting, setIsImporting] = useState(false);
+  const importInputRef = useRef<HTMLInputElement | null>(null);
+
+  const handleImportFile = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    if (file.size > 5 * 1024 * 1024) {
+      onShowNotification?.('Import file is larger than 5 MB.');
+      return;
+    }
+    setIsImporting(true);
+    try {
+      const content = await file.text();
+      const res = await api.importAccounts(content, 'merge');
+      if (!res.success) {
+        onShowNotification?.(`Import failed: ${res.message || res.error || 'unknown error'}`);
+        return;
+      }
+      const result = res.result as
+        | { imported?: number; updated?: number; skipped?: number; failed?: number }
+        | undefined;
+      onShowNotification?.(
+        `Import complete: ${result?.imported ?? 0} added, ${result?.updated ?? 0} updated, ${result?.skipped ?? 0} skipped, ${result?.failed ?? 0} failed.`,
+      );
+      const { data } = await api.getAccounts();
+      onUpdateAccounts?.(data);
+    } catch (error: any) {
+      onShowNotification?.(`Import failed: ${error?.message || String(error)}`);
+    } finally {
+      setIsImporting(false);
+    }
+  };
 
   const handleTestAccount = async (accountId: string) => {
     setTestingAccountId(accountId);
@@ -206,7 +240,7 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
           </p>
         </div>
 
-        <div className="flex items-center gap-2.5">
+        <div className="flex items-center gap-2.5 flex-wrap">
           <button
             onClick={onRefreshQuotas}
             disabled={isRefreshing}
@@ -215,6 +249,23 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
             <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin' : ''}`} />
             <span>{isRefreshing ? 'Testing & Refreshing...' : 'Refresh Quotas & Test All'}</span>
           </button>
+
+          <button
+            onClick={() => importInputRef.current?.click()}
+            disabled={isImporting}
+            title="Import an account export file from the Antigravity desktop app"
+            className="flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl border border-[#EAE5DE] bg-white hover:bg-[#FAF7F2] text-xs font-medium text-[#504C46] transition-colors shadow-soft disabled:opacity-50"
+          >
+            <Upload className="w-3.5 h-3.5" />
+            <span>{isImporting ? 'Importing...' : 'Import accounts file'}</span>
+          </button>
+          <input
+            ref={importInputRef}
+            type="file"
+            accept="application/json,.json"
+            onChange={handleImportFile}
+            className="hidden"
+          />
 
           <button
             onClick={onOpenOAuthModal}
@@ -326,6 +377,12 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
                         <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-300 flex items-center gap-1 animate-pulse">
                           <AlertTriangle className="w-3 h-3 text-amber-600" />
                           <span>Verification Required</span>
+                        </span>
+                      )}
+                      {acc.refreshBlocked && (
+                        <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-rose-50 text-rose-700 border border-rose-300 flex items-center gap-1">
+                          <AlertTriangle className="w-3 h-3 text-rose-600" />
+                          <span>Reauth Required</span>
                         </span>
                       )}
                     </div>
@@ -459,6 +516,28 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
                   </button>
                 </div>
               </div>
+
+              {/* OAuth refresh blocked: the stored token can no longer be renewed */}
+              {acc.refreshBlocked && (
+                <div className="bg-rose-50/90 border border-rose-300 rounded-xl p-3 mb-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-rose-900 shadow-sm animate-in fade-in">
+                  <div className="flex items-center gap-2.5">
+                    <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+                    <span className="font-medium">
+                      Google rejected this account's token refresh, so it cannot serve traffic. Reconnect it to issue
+                      new credentials — existing data is kept and nothing is deleted.
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      onClick={onOpenOAuthModal}
+                      className="px-3.5 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-semibold transition-colors flex items-center gap-1.5 shadow-sm"
+                    >
+                      <Zap className="w-3.5 h-3.5" />
+                      <span>Reconnect account</span>
+                    </button>
+                  </div>
+                </div>
+              )}
 
               {/* Google Security Checkpoint Alert Bar */}
               {(acc.hasValidationLink || acc.lastTestResult?.requiresValidation) && !acc.lastTestResult?.ok && (

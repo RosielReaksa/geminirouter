@@ -199,6 +199,17 @@ nginx -t && systemctl reload nginx
    - You can connect multiple Google accounts. Each account adds independent quota capacity to your cluster.
 4. The system will continuously monitor quotas and automatically route incoming prompts across active accounts with minimal concurrency and zero rate-limit collisions.
 
+### Importing accounts from the Antigravity app
+
+If you already use the official Antigravity desktop app, export its accounts and use
+**Import accounts file** on the Accounts page. The bridge stages the file and calls the
+core's `accountFileImport` (strategies: `merge`, `overwrite`, `skip-existing`); tokens that
+still refresh are kept, and nothing is deleted.
+
+Accounts whose OAuth refresh is blocked show a **Reauth Required** badge and a
+**Reconnect account** action. Reconnecting keeps the account row and quotas — only the
+credentials are renewed.
+
 ### Hosted sign-in and the `aicode` scope
 
 Antigravity accounts require the private `https://www.googleapis.com/auth/aicode` scope, which only

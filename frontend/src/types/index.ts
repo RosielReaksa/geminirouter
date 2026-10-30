@@ -76,6 +76,8 @@ export interface GoogleAccount {
   totalRequests24h: number;
   hasValidationLink?: boolean;
   statusReason?: string;
+  coreStatus?: string;
+  refreshBlocked?: boolean;
   lastTestResult?: AccountTestResult;
 }
 
