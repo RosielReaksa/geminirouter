@@ -734,6 +734,31 @@ export async function createServer(): Promise<{
     };
   });
 
+  // 1f. Desktop helper binary. Served only to an authenticated admin session:
+  // it is an operator tool, not a public download, so it is never exposed by
+  // the static frontend and needs no code-signing certificate.
+  const HELPER_BINARY_PATH =
+    process.env.HELPER_BINARY_PATH ||
+    path.resolve(process.cwd(), '../helper/framecall-helper-windows-amd64.exe');
+
+  app.get('/api/helper/download', async (_request, reply) => {
+    try {
+      if (!fs.existsSync(HELPER_BINARY_PATH)) {
+        return reply.code(404).send({
+          error: 'Helper binary is not installed on this server',
+          message: `Build it with helper/build.ps1 and set HELPER_BINARY_PATH (looked at ${HELPER_BINARY_PATH}).`,
+        });
+      }
+      const stat = fs.statSync(HELPER_BINARY_PATH);
+      reply.header('Content-Type', 'application/octet-stream');
+      reply.header('Content-Disposition', 'attachment; filename="FramecallHelper.exe"');
+      reply.header('Content-Length', String(stat.size));
+      return reply.send(fs.createReadStream(HELPER_BINARY_PATH));
+    } catch (error: any) {
+      return reply.code(500).send({ error: 'Could not read the helper binary', message: error?.message });
+    }
+  });
+
   // 1g. Desktop helper pairing. The code is minted by the authenticated
   // dashboard and exchanged for a scoped token that only reaches /api/accounts/import.
   app.post('/api/device/pair-code', async () => deviceTokens.createPairingCode());
@@ -1547,7 +1572,11 @@ export async function createServer(): Promise<{
   if (hasFrontendDist) {
     app.setNotFoundHandler(async (request, reply) => {
       const url = request.raw.url || '';
-      if (url.startsWith('/api') || url.startsWith('/assets')) {
+      const pathname = url.split('?')[0];
+      // Never answer a missing file with the SPA shell: /FramecallHelper.exe
+      // must 404, not return HTML (which looks like a 200 download).
+      const looksLikeFile = /\.[a-z0-9]{2,8}$/i.test(pathname);
+      if (url.startsWith('/api') || url.startsWith('/assets') || looksLikeFile) {
         return reply.code(404).send({ error: 'Endpoint or asset not found' });
       }
       return reply.sendFile('index.html');

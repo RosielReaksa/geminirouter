@@ -366,14 +366,8 @@ export const OAuthModal: React.FC<OAuthModalProps> = ({
 
           {isHostedWebsite && (
             <p className="text-[10px] text-[#9E988F] leading-relaxed">
-              Prefer not to copy the URL? Run the
-              <a
-                href="/FramecallHelper.exe"
-                download
-                className="mx-1 font-semibold text-[#C25938] hover:text-[#9A3C20]"
-              >
-                Framecall Helper
-              </a>
+              Prefer not to copy the URL? Get the Framecall Helper from
+              <strong className="text-[#504C46]"> Accounts → Pair desktop helper </strong>
               and keep it open during sign-in — it relays the callback automatically.
             </p>
           )}

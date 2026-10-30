@@ -50,7 +50,37 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
   const [isImporting, setIsImporting] = useState(false);
   const [isPairing, setIsPairing] = useState(false);
   const [pairCode, setPairCode] = useState<{ code: string; expiresAt: number } | null>(null);
+  const [isDownloadingHelper, setIsDownloadingHelper] = useState(false);
   const importInputRef = useRef<HTMLInputElement | null>(null);
+
+  const handleDownloadHelper = async () => {
+    setIsDownloadingHelper(true);
+    try {
+      const res = await fetch('/api/helper/download', { headers: authApi.headers() });
+      if (res.status === 401) {
+        window.dispatchEvent(new CustomEvent('geminirouter:unauthorized'));
+        return;
+      }
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({} as { message?: string; error?: string }));
+        onShowNotification?.(body.message || body.error || `Helper download failed (HTTP ${res.status})`);
+        return;
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = 'FramecallHelper.exe';
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 30_000);
+    } catch (error: any) {
+      onShowNotification?.(`Helper download failed: ${error?.message || String(error)}`);
+    } finally {
+      setIsDownloadingHelper(false);
+    }
+  };
 
   const handlePairHelper = async () => {
     setIsPairing(true);
@@ -327,13 +357,13 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
             </p>
           </div>
           <div className="flex items-center gap-2 shrink-0">
-            <a
-              href="/FramecallHelper.exe"
-              download
-              className="px-3.5 py-2 rounded-xl border border-[#DDD7CE] bg-white hover:bg-[#F2ECE4] text-xs font-semibold text-[#504C46] transition-colors"
+            <button
+              onClick={handleDownloadHelper}
+              disabled={isDownloadingHelper}
+              className="px-3.5 py-2 rounded-xl border border-[#DDD7CE] bg-white hover:bg-[#F2ECE4] text-xs font-semibold text-[#504C46] transition-colors disabled:opacity-50"
             >
-              Download helper (Windows)
-            </a>
+              {isDownloadingHelper ? 'Downloading...' : 'Download helper (Windows)'}
+            </button>
             <button
               onClick={() => setPairCode(null)}
               className="px-3.5 py-2 rounded-xl bg-[#F2ECE4] hover:bg-[#EAE1D5] border border-[#DDD7CE] text-xs font-semibold text-[#2A2723] transition-colors"
