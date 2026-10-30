@@ -11,6 +11,9 @@ WorkingDirectory=/opt/geminirouter/server
 Environment=DATA_DIR=/opt/geminirouter/server/.data
 Environment=CORE_MAIN_PATH=/opt/geminirouter/core/dist/core/main.cjs
 ExecStart=/usr/bin/node /opt/geminirouter/scripts/check-core-credentials.mjs --json
+# Classify the deployed client (invalid_grant = accepted, invalid_client = blocked).
+# Prefixed with '-' so a blocked client does not mask the drift check result.
+ExecStart=-/usr/bin/node /opt/geminirouter/scripts/probe-core-client.mjs --json
 # Exit code 2 means upstream credentials changed: keep the run visible as failed
 # so `systemctl --failed` and monitoring surface it.
 SuccessExitStatus=0

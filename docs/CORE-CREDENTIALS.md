@@ -28,13 +28,33 @@ but they only help for clients that are already allowed those scopes. A
 self-registered web client is not, so the built-in Antigravity client is the
 only working option.
 
-## What breaks, and what survives
+## Failure modes: what we can and cannot fix
 
-| Event | New sign-ins | Existing accounts |
+| Mode | Symptom | Fixable by us? |
 |---|---|---|
-| Secret rotated, same client ID | fail until core updated | keep working (refresh tokens are per user) |
-| Client revoked / app blocked | fail | may fail once refresh is attempted |
-| Rate limited / abuse block | intermittent | intermittent |
+| **Secret rotated**, same client ID | new sign-ins fail; old accounts keep refreshing | ✅ yes — rebuild from upstream |
+| **Client revoked / app blocked** | `invalid_client`; nobody can sign in, and refresh stops | ❌ no — only upstream can publish a new client |
+| **Account flagged** (per user) | one account needs reauth, others fine | ✅ yes — reconnect that account |
+| **IP / rate limited** | intermittent 429s or blocked sign-ins from one server | ✅ partly — back off, change IP, per-account proxy |
+| **`aicode` scope revoked** | `invalid_scope` on the consent screen | ❌ no — same as blocked |
+
+The important distinction: **rotation is recoverable, revocation is not.** Because
+we cannot register our own client for the private `aicode` scope, a blocked
+client can only be fixed by the upstream project shipping a new one (or Google
+unblocking it). Every Antigravity user is affected at the same time, which is
+why upstream usually resolves it quickly.
+
+## Can we tell "blocked" apart from "rotated"?
+
+Yes. `scripts/probe-core-client.mjs` sends the deployed client credentials to
+Google's token endpoint with a deliberately invalid refresh token. Google's
+error code classifies the client without touching real tokens:
+
+| Google response | Meaning |
+|---|---|
+| `400 invalid_grant` | client is **accepted** (the dummy token was rejected, as expected) |
+| `401 invalid_client` | client is **revoked or blocked** |
+| `400 unauthorized_client` | client is not allowed the refresh grant |
 
 ## Detection
 
@@ -49,9 +69,23 @@ exposes as `coreCredentials`:
 
 Exit codes: `0` unchanged, `2` drift, `3` check failed.
 
+`scripts/probe-core-client.mjs` writes `.data/core-client-health.json` with
+`{ state: "ok" | "blocked" | "unknown", errorCode, httpStatus }`. `/api/status`
+merges it into `coreCredentials.clientHealth`, and the timer runs it right after
+the drift check. Exit codes: `0` accepted, `2` blocked, `3` unknown.
+
 `/api/status` also reports `accountsNeedingReauth`, the number of accounts whose
 OAuth refresh is blocked or expired. A sudden jump is the first symptom of a
 revoked client.
+
+Run either check manually:
+
+```bash
+sudo systemctl start geminirouter-core-creds
+journalctl -u geminirouter-core-creds -n 30 --no-pager
+# or directly:
+sudo -u geminirouter node /opt/geminirouter/scripts/probe-core-client.mjs
+```
 
 ## Response runbook
 
@@ -85,6 +119,37 @@ revoked client.
    ```bash
    sudo ./deploy/update-core.sh --rollback
    ```
+
+## If the client itself is blocked
+
+This is the one case the update script cannot fix by itself, because the
+credentials are not the problem — Google refuses the client.
+
+1. **Confirm it is the client, not your accounts.**
+   ```bash
+   sudo -u geminirouter node /opt/geminirouter/scripts/probe-core-client.mjs
+   ```
+   `state: blocked` and `errorCode: invalid_client` confirm it.
+
+2. **Check upstream for a new client.** Watch the same file the drift check uses:
+   `OAuthClientRegistryService.ts`. If upstream ships a new `CLIENT_ID`, that is
+   the fix — rebuild and install with `deploy/update-core.sh`.
+
+3. **If upstream has nothing yet**, there is no local workaround: any client we
+   register is refused the `aicode` scope. Options while waiting:
+   - Keep serving the accounts that still refresh (they may keep working).
+   - Add accounts through **Import accounts file** from a still-working machine.
+   - Reduce load (lower concurrency, stop background model tests) in case the
+     block is actually an abuse/rate decision.
+
+4. **If it is an IP-level block** (the client works elsewhere), change the
+   server's egress IP, or route per-account traffic through proxies
+   (`account.proxy_url` is supported by the core).
+
+5. **If you need independence from this client entirely**, that requires an
+   OAuth client with access to the private `aicode` scope, which Google does not
+   grant to third parties. Practical alternatives are importing tokens from the
+   official Antigravity app, or switching the upstream provider.
 
 ## Backups
 

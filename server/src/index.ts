@@ -52,14 +52,29 @@ function dataDirPath(): string {
   return process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.resolve(process.cwd(), '.data');
 }
 
-function readCoreCredentialState(): CoreCredentialState | null {
+interface CoreClientHealth {
+  checkedAt?: string;
+  state?: 'ok' | 'blocked' | 'unknown';
+  detail?: string;
+  httpStatus?: number;
+  errorCode?: string;
+}
+
+function readJsonState<T>(fileName: string): T | null {
   try {
-    const file = path.join(dataDirPath(), 'core-credentials.json');
+    const file = path.join(dataDirPath(), fileName);
     if (!fs.existsSync(file)) return null;
-    return JSON.parse(fs.readFileSync(file, 'utf-8')) as CoreCredentialState;
+    return JSON.parse(fs.readFileSync(file, 'utf-8')) as T;
   } catch {
     return null;
   }
+}
+
+function readCoreCredentialState(): (CoreCredentialState & { clientHealth?: CoreClientHealth }) | null {
+  const credentials = readJsonState<CoreCredentialState>('core-credentials.json');
+  const clientHealth = readJsonState<CoreClientHealth>('core-client-health.json');
+  if (!credentials && !clientHealth) return null;
+  return { ...(credentials ?? {}), ...(clientHealth ? { clientHealth } : {}) };
 }
 
 export async function createServer(): Promise<{
