@@ -12,6 +12,7 @@ import { CoreClient } from './coreClient.js';
 import { CoreProcessManager } from './coreProcess.js';
 import { LocalStateStore, type GoogleAccount, type TrafficRecord } from './store.js';
 import { createAuthMiddleware, SessionStore, safeEqual } from './auth.js';
+import { DeviceTokenStore } from './deviceAuth.js';
 import { derivePoolState, bridgeToCoreProxy, coreProxyToBridge } from './pool-state.js';
 import { readCoreProxyConfig, applyCoreProxyConfig } from './coreConfig.js';
 import { ConcurrencyLeaseManager } from './leaseManager.js';
@@ -121,9 +122,20 @@ export async function createServer(): Promise<{
     credentials: true,
   });
 
-  // Admin authentication hook
+  // Admin authentication hook. Paired desktop helpers may only reach the
+  // import endpoint with their scoped token.
   const sessions = new SessionStore();
-  app.addHook('onRequest', createAuthMiddleware(ADMIN_PASSWORD, sessions));
+  const deviceTokens = new DeviceTokenStore(dataDirPath());
+  const DEVICE_ROUTES = new Set(['/api/accounts/import']);
+  app.addHook(
+    'onRequest',
+    createAuthMiddleware(
+      ADMIN_PASSWORD,
+      sessions,
+      { verify: (token: string) => deviceTokens.verify(token) },
+      DEVICE_ROUTES,
+    ),
+  );
 
   // Determine frontend build directory (check relative to __dirname and cwd)
   const candidateFrontendDirs = [
@@ -720,6 +732,36 @@ export async function createServer(): Promise<{
         quotaWarningThresholdPercent: store.getConfig().quotaWarningThresholdPercent,
       },
     };
+  });
+
+  // 1g. Desktop helper pairing. The code is minted by the authenticated
+  // dashboard and exchanged for a scoped token that only reaches /api/accounts/import.
+  app.post('/api/device/pair-code', async () => deviceTokens.createPairingCode());
+
+  app.post<{ Body?: { code?: string; label?: string } }>('/api/device/pair', async (request, reply) => {
+    const code = (request.body?.code || '').trim();
+    if (!/^\d{6}$/.test(code)) {
+      return reply.code(400).send({ error: 'A 6-digit pairing code is required' });
+    }
+    const paired = deviceTokens.pair(code, request.body?.label || 'Desktop helper');
+    if (!paired) {
+      return reply.code(401).send({ error: 'Invalid or expired pairing code' });
+    }
+    return {
+      token: paired.token,
+      device: {
+        id: paired.device.id,
+        label: paired.device.label,
+        createdAt: paired.device.createdAt,
+      },
+    };
+  });
+
+  app.get('/api/devices', async () => ({ devices: deviceTokens.list() }));
+
+  app.delete<{ Params: { id: string } }>('/api/devices/:id', async (request, reply) => {
+    const removed = deviceTokens.revoke(request.params.id);
+    return reply.code(removed ? 200 : 404).send({ success: removed });
   });
 
   // 2. GET /api/accounts

@@ -30,6 +30,9 @@ core-profile/
 core/
 AntigravityManager/
 
+# Go helper build outputs (the shipped Windows binary is in frontend/public)
+helper/dist/
+
 # Google OAuth client secrets
 client_secret*.json
 *.secret.json

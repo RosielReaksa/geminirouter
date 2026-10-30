@@ -48,7 +48,26 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
   const [validatingAccountId, setValidatingAccountId] = useState<string | null>(null);
   const [testingAccountId, setTestingAccountId] = useState<string | null>(null);
   const [isImporting, setIsImporting] = useState(false);
+  const [isPairing, setIsPairing] = useState(false);
+  const [pairCode, setPairCode] = useState<{ code: string; expiresAt: number } | null>(null);
   const importInputRef = useRef<HTMLInputElement | null>(null);
+
+  const handlePairHelper = async () => {
+    setIsPairing(true);
+    try {
+      const data = await api.createPairCode();
+      if (!data.code) {
+        onShowNotification?.(`Could not create a pairing code: ${data.error || 'unknown error'}`);
+        return;
+      }
+      setPairCode({ code: data.code, expiresAt: data.expiresAt });
+      navigator.clipboard?.writeText(data.code).catch(() => undefined);
+    } catch (error: any) {
+      onShowNotification?.(`Could not create a pairing code: ${error?.message || String(error)}`);
+    } finally {
+      setIsPairing(false);
+    }
+  };
 
   const handleImportFile = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -259,6 +278,16 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
             <Upload className="w-3.5 h-3.5" />
             <span>{isImporting ? 'Importing...' : 'Import accounts file'}</span>
           </button>
+
+          <button
+            onClick={handlePairHelper}
+            disabled={isPairing}
+            title="Pair the desktop helper so it can relay sign-ins and import accounts"
+            className="flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl border border-[#EAE5DE] bg-white hover:bg-[#FAF7F2] text-xs font-medium text-[#504C46] transition-colors shadow-soft disabled:opacity-50"
+          >
+            <Laptop className="w-3.5 h-3.5" />
+            <span>{isPairing ? 'Creating code...' : 'Pair desktop helper'}</span>
+          </button>
           <input
             ref={importInputRef}
             type="file"
@@ -276,6 +305,44 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
           </button>
         </div>
       </div>
+
+      {pairCode && (
+        <div className="bg-white rounded-2xl border border-[#EAE5DE] p-5 shadow-soft flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div>
+            <div className="text-[11px] uppercase tracking-wider text-[#C25938] font-semibold">
+              Desktop helper pairing
+            </div>
+            <div className="flex items-center gap-3 mt-2">
+              <span className="font-mono text-3xl tracking-[0.35em] text-[#2A2723]">{pairCode.code}</span>
+              <button
+                onClick={() => navigator.clipboard?.writeText(pairCode.code).catch(() => undefined)}
+                className="px-2.5 py-1.5 rounded-lg border border-[#EAE5DE] bg-white hover:bg-[#F2ECE4] text-[11px] font-medium text-[#504C46]"
+              >
+                Copy
+              </button>
+            </div>
+            <p className="text-xs text-[#706B65] mt-2 max-w-xl">
+              Open the helper, enter this code, and it can relay Google sign-ins and import accounts from
+              this computer. The code is single-use and expires in 5 minutes.
+            </p>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <a
+              href="/FramecallHelper.exe"
+              download
+              className="px-3.5 py-2 rounded-xl border border-[#DDD7CE] bg-white hover:bg-[#F2ECE4] text-xs font-semibold text-[#504C46] transition-colors"
+            >
+              Download helper (Windows)
+            </a>
+            <button
+              onClick={() => setPairCode(null)}
+              className="px-3.5 py-2 rounded-xl bg-[#F2ECE4] hover:bg-[#EAE1D5] border border-[#DDD7CE] text-xs font-semibold text-[#2A2723] transition-colors"
+            >
+              Done
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Account Cards or Clean Empty State */}
       {accounts.length === 0 ? (

@@ -366,15 +366,15 @@ export const OAuthModal: React.FC<OAuthModalProps> = ({
 
           {isHostedWebsite && (
             <p className="text-[10px] text-[#9E988F] leading-relaxed">
-              Prefer not to copy the URL? You can
+              Prefer not to copy the URL? Run the
               <a
-                href="/FramecallSignInHelper.zip"
+                href="/FramecallHelper.exe"
                 download
                 className="mx-1 font-semibold text-[#C25938] hover:text-[#9A3C20]"
               >
-                download the Windows helper
+                Framecall Helper
               </a>
-              and keep its window open during sign-in.
+              and keep it open during sign-in — it relays the callback automatically.
             </p>
           )}
         </div>

@@ -430,6 +430,22 @@ export class ApiClient {
     return updated;
   }
 
+  async createPairCode(): Promise<{ code: string; expiresAt: number; error?: string }> {
+    const res = await fetch('/api/device/pair-code', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...authApi.headers(),
+      },
+      body: '{}',
+    });
+    if (res.status === 401) {
+      window.dispatchEvent(new CustomEvent('geminirouter:unauthorized'));
+      return { code: '', expiresAt: 0, error: 'Unauthorized' };
+    }
+    return res.json().catch(() => ({ code: '', expiresAt: 0, error: 'Invalid response' }));
+  }
+
   async importAccounts(
     content: string,
     strategy: 'merge' | 'overwrite' | 'skip-existing' = 'merge',

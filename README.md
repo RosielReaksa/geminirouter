@@ -199,6 +199,25 @@ nginx -t && systemctl reload nginx
    - You can connect multiple Google accounts. Each account adds independent quota capacity to your cluster.
 4. The system will continuously monitor quotas and automatically route incoming prompts across active accounts with minimal concurrency and zero rate-limit collisions.
 
+### Framecall Helper (desktop)
+
+A single static Go binary (`helper/`) that pairs with the deployment and can:
+
+- **relay** the Antigravity loopback redirect (`127.0.0.1:41209`) to the dashboard,
+  so sign-in finishes without copying URLs;
+- **import** an Antigravity account export file.
+
+Pairing is code-based: the dashboard mints a one-time 6-digit code, the helper exchanges it
+for a bearer token that is scoped to `/api/accounts/import` only. Tokens are stored hashed,
+and can be revoked from the dashboard.
+
+```bash
+cd helper && ./build.ps1          # builds windows/macos/linux binaries into helper/dist
+./framecall-helper.exe            # opens the local helper page and starts the relay
+./framecall-helper.exe --pair 123456
+./framecall-helper.exe --import accounts.json
+```
+
 ### Importing accounts from the Antigravity app
 
 If you already use the official Antigravity desktop app, export its accounts and use
