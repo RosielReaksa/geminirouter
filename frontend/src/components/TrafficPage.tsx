@@ -247,10 +247,20 @@ export const TrafficPage: React.FC<TrafficPageProps> = ({ traffic, onReady }) =>
                         </div>
                       </td>
                       <td className="py-3.5 px-4 whitespace-nowrap">
-                        {t.status === 200 ? (
+                        {t.outcome === 'in_progress' ? (
+                          <span className="inline-flex items-center gap-1 font-mono-code text-[11px] text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full border border-amber-200">
+                            <Loader2 className="w-3 h-3 animate-spin" />
+                            In progress
+                          </span>
+                        ) : t.status === 200 ? (
                           <span className="inline-flex items-center gap-1 font-mono-code text-[11px] text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
                             <CheckCircle2 className="w-3 h-3" />
                             200 OK
+                          </span>
+                        ) : t.status === 0 ? (
+                          <span className="inline-flex items-center gap-1 font-mono-code text-[11px] text-stone-600 bg-stone-100 px-2 py-0.5 rounded-full border border-stone-200">
+                            <XCircle className="w-3 h-3" />
+                            Aborted
                           </span>
                         ) : (
                           <span className="inline-flex items-center gap-1 font-mono-code text-[11px] text-red-700 bg-red-50 px-2 py-0.5 rounded-full border border-red-200">

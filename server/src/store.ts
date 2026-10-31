@@ -73,6 +73,8 @@ export interface TrafficRecord {
   completionTokens: number;
   totalTokens: number;
   cachedTokens?: number;
+  /** Core audit outcome: completed | in_progress | auth_failed | internal_error. */
+  outcome?: string;
 }
 
 export interface ModelAvailabilityResult {

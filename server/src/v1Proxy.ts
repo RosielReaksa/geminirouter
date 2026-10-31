@@ -154,6 +154,11 @@ export async function handleV1ProxyRequest(
         delete forwardHeaders['x-account-email'];
         delete forwardHeaders['x-single-account'];
 
+        const upstreamTimeoutMs = Number.parseInt(
+          process.env.PROXY_RESPONSE_TIMEOUT_MS || '900000',
+          10
+        );
+
         const upstreamReq = http.request(
           {
             hostname: '127.0.0.1',
@@ -256,6 +261,15 @@ export async function handleV1ProxyRequest(
             });
           }
         );
+
+        // Idle-socket guard: a hung upstream (no bytes moving) is aborted after
+        // PROXY_RESPONSE_TIMEOUT_MS (default 15 min). Long generations keep
+        // resetting this because data keeps flowing.
+        if (Number.isFinite(upstreamTimeoutMs) && upstreamTimeoutMs > 0) {
+          upstreamReq.setTimeout(upstreamTimeoutMs, () => {
+            upstreamReq.destroy(new Error(`upstream idle for ${upstreamTimeoutMs}ms`));
+          });
+        }
 
         upstreamReq.on('error', (err) => {
           safeRelease();

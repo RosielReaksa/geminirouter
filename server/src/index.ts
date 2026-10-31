@@ -496,6 +496,7 @@ export async function createServer(): Promise<{
         backingAccountEmail:
           emailsByAccountId.get(item.attributedAccountId) || item.attributedAccountId || 'unknown',
         status: item.status ?? 0,
+        outcome: item.outcome ?? undefined,
         latencyMs: item.durationMs ?? 0,
         promptTokens,
         completionTokens,

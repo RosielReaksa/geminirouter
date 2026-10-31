@@ -26,9 +26,12 @@ export interface CoreHandshakeResponse {
 
 export class CoreClient {
   private endpoint: string;
+  private timeoutMs: number;
 
   constructor(endpoint?: string) {
     this.endpoint = endpoint || getLocalCoreEndpoint();
+    const configured = Number.parseInt(process.env.CORE_RPC_TIMEOUT_MS || '', 10);
+    this.timeoutMs = Number.isFinite(configured) && configured > 0 ? configured : 8000;
   }
 
   getEndpoint(): string {
@@ -45,7 +48,7 @@ export class CoreClient {
       socketPath,
       baseURL: 'http://localhost',
       httpAgent: false,
-      timeout: 4000,
+      timeout: this.timeoutMs,
       maxRedirects: 0,
       proxy: false,
       ...config,

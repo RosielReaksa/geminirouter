@@ -172,6 +172,8 @@ export interface TrafficRecord {
   completionTokens: number;
   totalTokens: number;
   cachedTokens?: number;
+  /** completed | in_progress | auth_failed | internal_error */
+  outcome?: string;
 }
 
 export interface GatewayConfig {
