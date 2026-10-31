@@ -94,6 +94,10 @@ export async function createServer(): Promise<{
 
   const coreClient = new CoreClient();
   let hostedOAuthSession: { sessionId: string; state: string; expiresAt: number } | null = null;
+  // The core's /v1/oauth/complete answers ok as soon as it receives the code;
+  // the token exchange is asynchronous. Track the account set at start so a
+  // completion can be confirmed by an account that actually appeared.
+  const oauthBaselines = new Map<string, { emails: Set<string>; expiresAt: number }>();
   const processManager = new CoreProcessManager();
   const store = new LocalStateStore();
   const initialCfg = store.getConfig();
@@ -330,6 +334,35 @@ export async function createServer(): Promise<{
    * Shared by /api/status and /api/accounts so both always agree.
    * Returns null when the core is unreachable or returns nothing usable.
    */
+  const snapshotAccountEmails = async (): Promise<Set<string>> => {
+    const current = (await loadCoreAccounts()) ?? store.getAccounts();
+    return new Set(current.map((account) => account.email.toLowerCase()));
+  };
+
+  const rememberOAuthBaseline = async (sessionId: string): Promise<void> => {
+    const now = Date.now();
+    for (const [key, value] of oauthBaselines) {
+      if (value.expiresAt <= now) oauthBaselines.delete(key);
+    }
+    oauthBaselines.set(sessionId, {
+      emails: await snapshotAccountEmails(),
+      expiresAt: now + 10 * 60 * 1000,
+    });
+  };
+
+  /** Polls the pool until an account that was absent at start appears. */
+  const waitForNewAccount = async (sessionId: string, timeoutMs = 15_000): Promise<string | null> => {
+    const baseline = oauthBaselines.get(sessionId)?.emails;
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const current = (await loadCoreAccounts()) ?? store.getAccounts();
+      const fresh = current.find((account) => !baseline || !baseline.has(account.email.toLowerCase()));
+      if (fresh) return fresh.email;
+      await new Promise((resolve) => setTimeout(resolve, 700));
+    }
+    return null;
+  };
+
   const loadCoreAccounts = async (): Promise<GoogleAccount[] | null> => {
     if (!(await coreClient.isCoreAlive())) return null;
     try {
@@ -1073,6 +1106,8 @@ export async function createServer(): Promise<{
       });
     }
 
+    await rememberOAuthBaseline(coreOAuth.sessionId);
+
     if (redirectUri) {
       const state = new URL(coreOAuth.authorizationUrl).searchParams.get('state');
       if (!state) {
@@ -1126,14 +1161,28 @@ export async function createServer(): Promise<{
       const accepted = await coreClient.completeOAuth(pending.sessionId, code);
       if (!accepted) {
         hostedOAuthSession = null;
+        oauthBaselines.delete(pending.sessionId);
         return reply.code(400).type('text/html; charset=utf-8').send(
           '<!doctype html><html><body><h1>Sign-in could not be completed</h1><p>Return to geminirouter and start a new Google sign-in.</p></body></html>',
         );
       }
 
+      // "accepted" only means the core received the code. Confirm an account
+      // actually appeared, otherwise the code was invalid or expired.
+      const email = await waitForNewAccount(pending.sessionId);
       hostedOAuthSession = null;
+      oauthBaselines.delete(pending.sessionId);
+      if (!email) {
+        return reply.code(400).type('text/html; charset=utf-8').send(
+          '<!doctype html><html><body><h1>Google sign-in did not complete</h1><p>No account was added. The authorization code may be invalid or expired — return to geminirouter and start again.</p></body></html>',
+        );
+      }
+
       return reply.type('text/html; charset=utf-8').send(
-        '<!doctype html><html><body><h1>Google sign-in complete</h1><p>Return to the geminirouter tab. Your account will appear shortly.</p><script>setTimeout(()=>window.close(),1200)</script></body></html>',
+        `<!doctype html><html><body><h1>Google sign-in complete</h1><p>${email
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')} is now connected.</p><script>setTimeout(()=>window.close(),1200)</script></body></html>`,
       );
     },
   );
@@ -1169,7 +1218,20 @@ export async function createServer(): Promise<{
         });
       }
 
-      return { success: true };
+      // The core acknowledges the code before exchanging it, so wait for the
+      // account to actually appear instead of reporting a false success.
+      const email = await waitForNewAccount(sessionId);
+      oauthBaselines.delete(sessionId);
+      if (!email) {
+        return reply.code(400).send({
+          success: false,
+          error: 'The authorization code was not accepted',
+          message:
+            'Google did not issue a token for this code. It may be expired or copied incorrectly — start the sign-in again and paste the whole callback URL.',
+        });
+      }
+
+      return { success: true, email };
     },
   );
 

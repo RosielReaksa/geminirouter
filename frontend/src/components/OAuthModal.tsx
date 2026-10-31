@@ -186,10 +186,15 @@ export const OAuthModal: React.FC<OAuthModalProps> = ({
         return;
       }
 
-      setSuccessMsg('Account successfully verified and added!');
-      // Fetch fresh accounts to update parent
+      setSuccessMsg(data.email ? `Account ${data.email} connected!` : 'Account successfully verified and added!');
+      // Fetch fresh accounts and prefer the one the server confirmed.
       const { data: accounts } = await api.getAccounts();
-      if (accounts.length > 0) {
+      const confirmed = data.email
+        ? accounts.find((account) => account.email.toLowerCase() === String(data.email).toLowerCase())
+        : undefined;
+      if (confirmed) {
+        onAccountAdded(confirmed);
+      } else if (accounts.length > 0) {
         onAccountAdded(accounts[0]);
       }
       setTimeout(() => {
