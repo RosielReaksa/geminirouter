@@ -375,7 +375,9 @@ To ensure your private router remains exclusively yours:
 | Update the external core | `sudo ./deploy/update-core.sh --bundle <main.cjs>` (auto-rollback) |
 
 The core's OAuth client credentials are public upstream, so they can be rotated by Google.
-See [docs/CORE-CREDENTIALS.md](./docs/CORE-CREDENTIALS.md) for detection and the update runbook.
+See [docs/CORE-CREDENTIALS.md](./docs/CORE-CREDENTIALS.md) for detection and the update runbook, and
+[docs/CLIENT-BLOCKED-RECOVERY.md](./docs/CLIENT-BLOCKED-RECOVERY.md) for what to do when Google blocks
+new authorizations, revokes the client, or rate-limits your server.
 
 ---
 

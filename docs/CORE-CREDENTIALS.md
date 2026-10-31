@@ -1,5 +1,9 @@
 # Core OAuth credential lifecycle
 
+> Step-by-step recovery for each failure (blocked sign-ins, revoked client,
+> IP/account limits) lives in
+> [CLIENT-BLOCKED-RECOVERY.md](./CLIENT-BLOCKED-RECOVERY.md).
+
 Antigravity sign-in uses the OAuth client that ships inside the open-source
 AntigravityManager core. Its `client_id` and `client_secret` are **publicly
 committed** in the upstream repository and embedded in the built
@@ -123,33 +127,15 @@ sudo -u geminirouter node /opt/geminirouter/scripts/probe-core-client.mjs
 ## If the client itself is blocked
 
 This is the one case the update script cannot fix by itself, because the
-credentials are not the problem — Google refuses the client.
+credentials are not the problem - Google refuses the client.
 
-1. **Confirm it is the client, not your accounts.**
-   ```bash
-   sudo -u geminirouter node /opt/geminirouter/scripts/probe-core-client.mjs
-   ```
-   `state: blocked` and `errorCode: invalid_client` confirm it.
+Short version: run the probe, check upstream for a new `CLIENT_ID`, rebuild with
+`update-core.sh` if there is one, and expect accounts to re-authorize because
+refresh tokens are bound to the client ID.
 
-2. **Check upstream for a new client.** Watch the same file the drift check uses:
-   `OAuthClientRegistryService.ts`. If upstream ships a new `CLIENT_ID`, that is
-   the fix — rebuild and install with `deploy/update-core.sh`.
-
-3. **If upstream has nothing yet**, there is no local workaround: any client we
-   register is refused the `aicode` scope. Options while waiting:
-   - Keep serving the accounts that still refresh (they may keep working).
-   - Add accounts through **Import accounts file** from a still-working machine.
-   - Reduce load (lower concurrency, stop background model tests) in case the
-     block is actually an abuse/rate decision.
-
-4. **If it is an IP-level block** (the client works elsewhere), change the
-   server's egress IP, or route per-account traffic through proxies
-   (`account.proxy_url` is supported by the core).
-
-5. **If you need independence from this client entirely**, that requires an
-   OAuth client with access to the private `aicode` scope, which Google does not
-   grant to third parties. Practical alternatives are importing tokens from the
-   official Antigravity app, or switching the upstream provider.
+The full decision tree - blocked sign-ins vs revoked client vs IP/account
+limits, including credential injection without a rebuild - is in
+**[CLIENT-BLOCKED-RECOVERY.md](./CLIENT-BLOCKED-RECOVERY.md)**.
 
 ## Backups
 
