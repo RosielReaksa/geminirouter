@@ -142,6 +142,20 @@ export interface GatewayStatus {
   };
   version: string;
   healthy: boolean;
+  accountsNeedingReauth?: number;
+  coreCredentials?: {
+    checkedAt?: string;
+    drift?: boolean;
+    deployed?: { clientId?: string; fingerprint?: string };
+    upstream?: { clientId?: string; fingerprint?: string };
+    clientHealth?: {
+      checkedAt?: string;
+      state?: 'ok' | 'blocked' | 'unknown';
+      detail?: string;
+      httpStatus?: number;
+      errorCode?: string;
+    };
+  } | null;
 }
 
 export interface TrafficRecord {

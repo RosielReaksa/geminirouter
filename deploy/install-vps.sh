@@ -230,16 +230,16 @@ chmod 600 "$INSTALL_DIR/.env"
 
 echo -e "${CYAN}[6/7] Configuring systemd services...${NC}"
 cp "$SCRIPT_DIR/geminirouter-core.service" /etc/systemd/system/geminirouter-core.service
-cp "$SCRIPT_DIR/geminirouter.service" /etc/systemd/system/geminirouter.service
+cp "$SCRIPT_DIR/geminirouter-bridge.service" /etc/systemd/system/geminirouter-bridge.service
 cp "$SCRIPT_DIR/geminirouter-core-creds.service" /etc/systemd/system/geminirouter-core-creds.service
 cp "$SCRIPT_DIR/geminirouter-core-creds.timer" /etc/systemd/system/geminirouter-core-creds.timer
 
 systemctl daemon-reload
 systemctl enable geminirouter-core.service
-systemctl enable geminirouter.service
+systemctl enable geminirouter-bridge.service
 systemctl enable --now geminirouter-core-creds.timer
 systemctl restart geminirouter-core.service || true
-systemctl restart geminirouter.service || true
+systemctl restart geminirouter-bridge.service || true
 systemctl restart caddy
 
 echo -e "${CYAN}[7/7] Verifying services status...${NC}"
@@ -281,9 +281,9 @@ echo -e "     client = OpenAI(base_url=\"https://${USER_DOMAIN}/v1\", api_key=\"
 echo ""
 echo -e "${BOLD}4. Management Commands:${NC}"
 echo -e "   Check Core Status:      ${CYAN}systemctl status geminirouter-core${NC}"
-echo -e "   Check Web Status:       ${CYAN}systemctl status geminirouter${NC}"
+echo -e "   Check Web Status:       ${CYAN}systemctl status geminirouter-bridge${NC}"
 echo -e "   View Live Logs:         ${CYAN}journalctl -u geminirouter-core -u geminirouter -f${NC}"
-echo -e "   Restart Services:       ${CYAN}systemctl restart geminirouter-core geminirouter${NC}"
+echo -e "   Restart Services:       ${CYAN}systemctl restart geminirouter-core geminirouter-bridge${NC}"
 echo -e "   (Optional PM2 control): ${CYAN}cd /opt/geminirouter && pm2 start ecosystem.config.js${NC}"
 echo ""
 echo -e "${GREEN}Configuration saved to: /opt/geminirouter/.env${NC}"

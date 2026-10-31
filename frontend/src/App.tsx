@@ -268,6 +268,7 @@ export const DashboardApp: React.FC = () => {
               onUpdateAccounts={setAccounts}
               onShowNotification={showNotification}
               isRefreshing={isRefreshing}
+              oauthBlocked={status?.coreCredentials?.clientHealth?.state === 'blocked'}
             />
           )}
 

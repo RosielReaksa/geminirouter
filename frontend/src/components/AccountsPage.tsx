@@ -30,6 +30,8 @@ interface AccountsPageProps {
   onUpdateAccounts?: (accounts: GoogleAccount[]) => void;
   onShowNotification?: (msg: string) => void;
   isRefreshing: boolean;
+  /** True when Google refuses the Antigravity OAuth client (invalid_client). */
+  oauthBlocked?: boolean;
 }
 
 export const AccountsPage: React.FC<AccountsPageProps> = ({
@@ -43,6 +45,7 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
   onUpdateAccounts,
   onShowNotification,
   isRefreshing,
+  oauthBlocked = false,
 }) => {
   const [openDropdownId, setOpenDropdownId] = useState<string | null>(null);
   const [validatingAccountId, setValidatingAccountId] = useState<string | null>(null);
@@ -273,6 +276,29 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
 
   return (
     <div className="space-y-8 animate-in fade-in duration-200">
+      {oauthBlocked && (
+        <div className="bg-rose-50/90 border border-rose-300 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-sm text-rose-900 shadow-sm">
+          <div className="flex items-start gap-3">
+            <AlertTriangle className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
+            <div>
+              <div className="font-semibold">Google is blocking Antigravity sign-in</div>
+              <p className="text-xs leading-relaxed mt-1 text-rose-800">
+                The Antigravity OAuth client was rejected (<span className="font-mono-code">invalid_client</span>),
+                so new accounts cannot be added until this is resolved upstream. Existing accounts keep working.
+                In the meantime, import an export from a machine where Antigravity is still signed in.
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={() => importInputRef.current?.click()}
+            disabled={isImporting}
+            className="shrink-0 px-3.5 py-2 rounded-xl bg-white hover:bg-rose-100 border border-rose-300 font-semibold text-rose-800 text-xs transition-colors disabled:opacity-50"
+          >
+            {isImporting ? 'Importing...' : 'Import accounts file'}
+          </button>
+        </div>
+      )}
+
       {/* Title & Actions Bar */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
@@ -328,10 +354,16 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
 
           <button
             onClick={onOpenOAuthModal}
-            className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-[#C25938] hover:bg-[#B24E2E] text-white text-xs font-medium transition-all shadow-soft"
+            disabled={oauthBlocked}
+            title={
+              oauthBlocked
+                ? 'Google is rejecting the Antigravity OAuth client. Use "Import accounts file" instead.'
+                : 'Sign in with a Google account that has Antigravity access'
+            }
+            className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-[#C25938] hover:bg-[#B24E2E] text-white text-xs font-medium transition-all shadow-soft disabled:opacity-40 disabled:cursor-not-allowed"
           >
             <Plus className="w-4 h-4" />
-            <span>Add Google Account</span>
+            <span>{oauthBlocked ? 'Sign-in blocked' : 'Add Google Account'}</span>
           </button>
         </div>
       </div>
@@ -384,14 +416,25 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
             No Google Accounts Connected
           </h3>
           <p className="text-sm text-[#706B65] mt-1.5 max-w-md mx-auto leading-relaxed">
-            Your pool is clean and empty. Click <strong>Add Google Account</strong> to sign in and begin pooling quotas.
+            {oauthBlocked ? (
+              <>
+                Sign-in is currently blocked upstream. Import an account export from a machine where
+                Antigravity is still signed in.
+              </>
+            ) : (
+              <>
+                Your pool is clean and empty. Click <strong>Add Google Account</strong> to sign in and begin
+                pooling quotas.
+              </>
+            )}
           </p>
           <button
-            onClick={onOpenOAuthModal}
-            className="mt-5 inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-[#C25938] hover:bg-[#B24E2E] text-white text-xs font-semibold transition-all shadow-soft"
+            onClick={oauthBlocked ? () => importInputRef.current?.click() : onOpenOAuthModal}
+            disabled={isImporting}
+            className="mt-5 inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-[#C25938] hover:bg-[#B24E2E] text-white text-xs font-semibold transition-all shadow-soft disabled:opacity-50"
           >
-            <Plus className="w-4 h-4" />
-            <span>Add Google Account</span>
+            {oauthBlocked ? <Upload className="w-4 h-4" /> : <Plus className="w-4 h-4" />}
+            <span>{oauthBlocked ? (isImporting ? 'Importing...' : 'Import accounts file') : 'Add Google Account'}</span>
           </button>
         </div>
       ) : (

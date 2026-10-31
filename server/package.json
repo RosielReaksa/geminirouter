@@ -10,7 +10,7 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "test": "pnpm run build && tsx --test test/pool-state.test.ts test/bridge-proxy.test.ts test/concurrency-leases.test.ts test/account-tester-status.test.ts test/v1-integration.test.ts"
+    "test": "pnpm run build && tsx --test test/pool-state.test.ts test/bridge-proxy.test.ts test/concurrency-leases.test.ts test/account-tester-status.test.ts test/device-auth.test.ts test/account-import.test.ts test/v1-integration.test.ts"
   },
   "dependencies": {
     "fastify": "^5.2.1",

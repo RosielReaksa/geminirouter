@@ -90,7 +90,7 @@ The script will interactively:
 3. Automatically install Node.js 24 LTS, pnpm, and Caddy.
 4. Set up `/opt/geminirouter` with a dedicated system user.
 5. Generate a secure Master API Key (`sk-live-...`).
-6. Configure and start systemd background services (`geminirouter-core.service` and `geminirouter.service`).
+6. Configure and start systemd background services (`geminirouter-core.service` and `geminirouter-bridge.service`).
 7. Obtain a Let's Encrypt SSL certificate automatically.
 
 Once finished, the script displays your complete connection details and configuration snippets.
@@ -138,17 +138,17 @@ nano /opt/geminirouter/.env
 Install the provided systemd service units:
 ```bash
 cp deploy/geminirouter-core.service /etc/systemd/system/
-cp deploy/geminirouter.service /etc/systemd/system/
+cp deploy/geminirouter-bridge.service /etc/systemd/system/
 
 systemctl daemon-reload
 systemctl enable --now geminirouter-core.service
-systemctl enable --now geminirouter.service
+systemctl enable --now geminirouter-bridge.service
 ```
 
 Check status:
 ```bash
 systemctl status geminirouter-core
-systemctl status geminirouter
+systemctl status geminirouter-bridge
 ```
 
 ### Alternative: Run via PM2
@@ -367,9 +367,9 @@ To ensure your private router remains exclusively yours:
 |---|---|
 | View Core Logs | `journalctl -u geminirouter-core -f` |
 | View Web Dashboard Logs | `journalctl -u geminirouter -f` |
-| Restart All Services | `systemctl restart geminirouter-core geminirouter caddy` |
-| Stop All Services | `systemctl stop geminirouter-core geminirouter` |
-| Check Memory & PID | `systemctl status geminirouter-core geminirouter` |
+| Restart All Services | `systemctl restart geminirouter-core geminirouter-bridge caddy` |
+| Stop All Services | `systemctl stop geminirouter-core geminirouter-bridge` |
+| Check Memory & PID | `systemctl status geminirouter-core geminirouter-bridge` |
 | (Optional) PM2 Status | `pm2 status` |
 | Check core OAuth credential drift | `systemctl start geminirouter-core-creds && journalctl -u geminirouter-core-creds -n 20` |
 | Update the external core | `sudo ./deploy/update-core.sh --bundle <main.cjs>` (auto-rollback) |
