@@ -322,10 +322,11 @@ export async function createServer(): Promise<{
       });
       const ids: string[] = (res.data?.data || []).map((m: any) => m.id).filter(Boolean);
       if (ids.length > 0) {
+        const websiteIds = includeWebsiteModelAliases(ids);
         return {
           source: 'gateway',
           online: true,
-          models: ids.map((id) => {
+          models: websiteIds.map((id) => {
             const meta = MODEL_CATALOG.find((c) => c.id === id);
             const isClaude = id.includes('claude');
             const isGpt = id.includes('gpt') || id.includes('oss');
@@ -1461,6 +1462,7 @@ export async function createServer(): Promise<{
     { id: 'gemini-3-flash', name: 'Gemini 3 Flash', provider: 'Google Gemini', family: 'gemini', contextLength: 1048576, maxOutputTokens: 65535 },
     { id: 'gemini-3.1-pro', name: 'Gemini 3.1 Pro', provider: 'Google Gemini', family: 'gemini', contextLength: 1048576, maxOutputTokens: 65535 },
     { id: 'gemini-3-pro-image', name: 'Gemini 3 Pro Image', provider: 'Google Gemini', family: 'gemini-image', contextLength: 1048576, maxOutputTokens: 65535 },
+    { id: 'gemini-3.8-flash-high', name: 'Gemini 3.8 Flash High', provider: 'Google Gemini', family: 'gemini', contextLength: 1048576, maxOutputTokens: 65535 },
     { id: 'claude-sonnet-4-5', name: 'Claude 4.5 Sonnet', provider: 'Anthropic Claude', family: 'claude', contextLength: 200000, maxOutputTokens: 65535 },
     { id: 'claude-sonnet-4-5-thinking', name: 'Claude 4.5 Sonnet (Thinking)', provider: 'Anthropic Claude', family: 'claude', contextLength: 200000, maxOutputTokens: 65535 },
     { id: 'claude-sonnet-4-6', name: 'Claude 4.6 Sonnet', provider: 'Anthropic Claude', family: 'claude', contextLength: 200000, maxOutputTokens: 65535 },
@@ -1469,6 +1471,16 @@ export async function createServer(): Promise<{
     { id: 'claude-opus-4-6', name: 'Claude 4.6 Opus', provider: 'Anthropic Claude', family: 'claude', contextLength: 200000, maxOutputTokens: 65535 },
     { id: 'gpt-oss-120b', name: 'GPT OSS 120B', provider: 'OpenAI-compatible', family: 'gpt-oss', contextLength: 131072, maxOutputTokens: 65535 },
   ];
+
+  // The current gateway model list may omit aliases that still accept real
+  // completion requests. Expose only aliases verified against the live API.
+  const WEBSITE_MODEL_ALIASES = new Set(['gemini-3.8-flash-high']);
+  function includeWebsiteModelAliases(gatewayIds: string[]): string[] {
+    const verifiedIds = MODEL_CATALOG
+      .filter((model) => WEBSITE_MODEL_ALIASES.has(model.id))
+      .map((model) => model.id);
+    return [...new Set([...gatewayIds, ...verifiedIds])];
+  }
 
   app.get('/api/models', async () => {
     const { port: gatewayPort, apiKey, source: keySource } = resolveGateway();
@@ -1484,7 +1496,8 @@ export async function createServer(): Promise<{
       });
       const liveIds: Array<string> = (res.data?.data || []).map((m: any) => m.id).filter(Boolean);
       if (liveIds.length > 0) {
-        const models = liveIds.map((id) => {
+        const websiteIds = includeWebsiteModelAliases(liveIds);
+        const models = websiteIds.map((id) => {
           const meta = MODEL_CATALOG.find((c) => c.id === id);
           const isClaude = id.includes('claude');
           const isGpt = id.includes('gpt') || id.includes('oss');
@@ -1495,7 +1508,7 @@ export async function createServer(): Promise<{
             family: meta?.family || (isClaude ? 'claude' : isGpt ? 'gpt-oss' : 'gemini'),
             contextLength: meta?.contextLength || (isClaude ? 200000 : 1048576),
             maxOutputTokens: meta?.maxOutputTokens || 65535,
-            live: true,
+            live: liveIds.includes(id),
             availability: store.getModelTest(id),
             availabilityHistory: availabilityHistory[id] ?? emptyModelAvailabilityHistory(),
           };
