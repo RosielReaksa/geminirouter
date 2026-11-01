@@ -67,6 +67,7 @@ export const Reveal: React.FC<{
 };
 
 const NAV_LINKS = [
+  { to: '/how-it-works', label: 'How it works' },
   { to: '/models', label: 'Models' },
   { to: '/pricing', label: 'Pricing' },
   { to: '/docs', label: 'Docs' },
@@ -121,14 +122,14 @@ export const PublicNav: React.FC = () => {
         <div className="h-16 flex items-center justify-between">
           <Wordmark />
 
-          <nav className="hidden md:flex items-center gap-1">
+          <nav className="hidden lg:flex items-center gap-1">
             {NAV_LINKS.map((l) => {
               const active = pathname === l.to || pathname.startsWith(l.to + '/');
               return (
                 <Link
                   key={l.to}
                   to={l.to}
-                  className={`px-3.5 py-2 rounded-lg text-sm transition-colors ${
+                  className={`px-3.5 py-2 rounded-lg text-sm whitespace-nowrap transition-colors ${
                     active
                       ? 'text-[#191714] font-medium bg-[#EFEAE2]'
                       : 'text-[#4A453E] hover:text-[#191714] hover:bg-[#EFEAE2]/60'
@@ -140,7 +141,7 @@ export const PublicNav: React.FC = () => {
             })}
           </nav>
 
-          <div className="hidden md:flex items-center gap-2">
+          <div className="hidden lg:flex items-center gap-2">
             <Link
               to="/app"
               className="px-3.5 py-2 rounded-lg text-sm text-[#4A453E] hover:text-[#191714] hover:bg-[#EFEAE2]/60 transition-colors"
@@ -158,7 +159,7 @@ export const PublicNav: React.FC = () => {
 
           <button
             onClick={() => setOpen((v) => !v)}
-            className="md:hidden p-2 -mr-2 text-[#191714]"
+            className="lg:hidden p-2 -mr-2 text-[#191714]"
             aria-label={open ? 'Close menu' : 'Open menu'}
           >
             {open ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
@@ -167,7 +168,7 @@ export const PublicNav: React.FC = () => {
       </div>
 
       {open && (
-        <div className="md:hidden border-t border-[#E4DED4] bg-[#FBF9F5]">
+        <div className="lg:hidden border-t border-[#E4DED4] bg-[#FBF9F5]">
           <div className="px-5 py-3 space-y-1">
             {NAV_LINKS.map((l) => (
               <Link
@@ -178,6 +179,12 @@ export const PublicNav: React.FC = () => {
                 {l.label}
               </Link>
             ))}
+            <Link
+              to="/app"
+              className="block px-3 py-2.5 rounded-lg text-sm text-[#4A453E] hover:bg-[#EFEAE2]"
+            >
+              Sign in
+            </Link>
             <Link
               to="/app"
               className="block px-3 py-2.5 rounded-lg text-sm font-medium bg-[#191714] text-white text-center mt-2"
@@ -206,6 +213,11 @@ export const PublicFooter: React.FC = () => (
         <div>
           <div className="mkt-eyebrow mb-3">Product</div>
           <ul className="space-y-2.5 text-[13px]">
+            <li>
+              <Link to="/how-it-works" className="text-[#4A453E] hover:text-[#C25938] transition-colors">
+                How it works
+              </Link>
+            </li>
             <li>
               <Link to="/models" className="text-[#4A453E] hover:text-[#C25938] transition-colors">
                 Models

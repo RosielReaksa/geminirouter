@@ -5,6 +5,7 @@ import { LandingPage } from './components/marketing/LandingPage';
 import { ModelsPage } from './components/marketing/ModelsPage';
 import { PricingPage } from './components/marketing/PricingPage';
 import { DocsPage } from './components/marketing/DocsPage';
+import { HowItWorksPage } from './components/marketing/HowItWorksPage';
 import { LegalPage } from './components/marketing/LegalPage';
 import { LoginPage } from './components/marketing/LoginPage';
 import { NotFoundPage } from './components/marketing/NotFoundPage';
@@ -27,6 +28,7 @@ const PublicRoutes: React.FC<{ pathname: string }> = ({ pathname }) => {
   const page = (() => {
     if (pathname === '/' || pathname === '') return <LandingPage />;
     if (pathname === '/models') return <ModelsPage />;
+    if (pathname === '/how-it-works') return <HowItWorksPage />;
     if (pathname === '/pricing') return <PricingPage />;
     if (pathname === '/docs') return <DocsPage />;
     if (pathname === '/privacy') return <LegalPage kind="privacy" />;
