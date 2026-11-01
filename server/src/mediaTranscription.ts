@@ -1475,12 +1475,18 @@ async function transcribeChunkWithRetry(
 
       const data: any = await response.json().catch(() => null);
       const content = completionText(data);
-      if (!content) {
+      if (!content || isModelFailureText(content)) {
+        const failed = Boolean(content);
         lastError = new MediaError(
           502,
-          'empty_model_response',
-          `Chunk ${chunk.index + 1} returned an empty model response.`,
-          { chunkIndex: chunk.index },
+          failed ? 'model_failure_text' : 'empty_model_response',
+          failed
+            ? `Chunk ${chunk.index + 1} returned a model failure message instead of a transcript.`
+            : `Chunk ${chunk.index + 1} returned an empty model response.`,
+          {
+            chunkIndex: chunk.index,
+            ...(failed ? { model_text: content.slice(0, 1000) } : {}),
+          },
         );
         if (attempt < attempts - 1) {
           await sleepWithSignal(backoffMs(attempt), signal);
@@ -1615,6 +1621,24 @@ function buildResponse(input: {
       total_ms: timings.totalMs,
     },
   };
+}
+
+/**
+ * The core occasionally converts an upstream/tool failure into a normal 200
+ * completion whose content is a generic error sentence. Treat that as a failed
+ * chunk so the request is retried (or the caller gets a real error) instead of
+ * returning the failure text as a transcript.
+ */
+export function isModelFailureText(text: string): boolean {
+  const normalized = text.trim().toLowerCase();
+  if (!normalized) return false;
+  return (
+    normalized.includes('could not complete a tool call') ||
+    normalized.includes('please try again or adjust the requested tool') ||
+    normalized.includes('model did not return a response') ||
+    normalized.includes('model failed to return a response') ||
+    normalized.includes('no response from the model')
+  );
 }
 
 function completionText(data: any): string {

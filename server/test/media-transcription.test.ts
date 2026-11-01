@@ -17,6 +17,7 @@ import { spawnSync } from 'node:child_process';
 import type { GoogleAccount, LocalStateStore } from '../src/store.js';
 import {
   buildChunkPrompt,
+  isModelFailureText,
   languageLabel,
   splitStructuredOutput,
 } from '../src/mediaTranscription.js';
@@ -53,6 +54,7 @@ let store: LocalStateStore;
 let appInstance: Awaited<ReturnType<typeof createServer>>['app'];
 const modelRequests: ModelRequest[] = [];
 const modelAuthHeaders: Array<string | undefined> = [];
+let failNextModelRequest = false;
 
 const upstream = http.createServer((request, response) => {
   modelAuthHeaders.push(typeof request.headers.authorization === 'string' ? request.headers.authorization : undefined);
@@ -67,6 +69,30 @@ const upstream = http.createServer((request, response) => {
     }
     if (parsed) modelRequests.push(parsed);
     const index = modelRequests.length;
+
+    if (failNextModelRequest) {
+      failNextModelRequest = false;
+      response.writeHead(200, {
+        'Content-Type': 'application/json',
+        'x-antigravity-account-id': 'media-acc-1',
+      });
+      response.end(
+        JSON.stringify({
+          id: `cmpl-media-failure-${index}`,
+          model: parsed?.model || 'gemini-3.5-flash-lite',
+          choices: [
+            {
+              message: {
+                role: 'assistant',
+                content:
+                  'The model could not complete a tool call. Please try again or adjust the requested tool.',
+              },
+            },
+          ],
+        }),
+      );
+      return;
+    }
 
     response.writeHead(200, {
       'Content-Type': 'application/json',
@@ -157,6 +183,18 @@ after(async () => {
   } catch {
     /* best effort */
   }
+});
+
+test('detects model tool-call failure text so it can be retried', () => {
+  assert.equal(
+    isModelFailureText(
+      'The model could not complete a tool call. Please try again or adjust the requested tool.',
+    ),
+    true,
+  );
+  assert.equal(isModelFailureText('SILENCE'), false);
+  assert.equal(isModelFailureText('spoken line 1'), false);
+  assert.equal(isModelFailureText(''), false);
 });
 
 test('language names and ISO codes are normalized, unknown languages pass through', () => {
@@ -275,6 +313,36 @@ test(
       assert.equal(modelRequest.model, 'gemini-3.5-flash-lite');
       assert.equal(modelRequest.temperature, 0);
     }
+  },
+);
+
+test(
+  'retries when the model returns a tool-call failure string',
+  { skip: !hasFfmpeg },
+  async () => {
+    modelRequests.length = 0;
+    modelAuthHeaders.length = 0;
+    failNextModelRequest = true;
+
+    const form = new FormData();
+    form.append('file', new Blob([makeWav(1)], { type: 'audio/wav' }), 'retry.wav');
+    form.append('model', 'gemini-3.5-flash-lite');
+    form.append('task', 'transcribe');
+    form.append('prompt', 'Transcribe this clip.');
+
+    const response = await fetch(`http://127.0.0.1:${bridgePort}/v1/audio/transcriptions`, {
+      method: 'POST',
+      headers: authHeaders(),
+      body: form,
+    });
+
+    const rawBody = await response.text();
+    assert.equal(response.status, 200, rawBody);
+    const body: any = JSON.parse(rawBody);
+    assert.equal(modelRequests.length, 2, 'the failure text must trigger one retry');
+    assert.match(body.text, /spoken line 2/);
+    assert.doesNotMatch(body.text, /could not complete a tool call/);
+    failNextModelRequest = false;
   },
 );
 
