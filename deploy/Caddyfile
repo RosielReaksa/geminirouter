@@ -23,7 +23,31 @@
     }
 
     # =========================================================================
-    # 1. API Endpoints: /v1/* & /v1beta/*
+    # 1. Long media uploads: /v1/audio/* & /v1/media/*
+    # These must reach the bridge (port 3000), which streams the upload to disk,
+    # chunks it with FFmpeg and calls the core once per chunk. The core cannot
+    # accept a 1-2 hour recording in one request.
+    # =========================================================================
+    @media {
+        path /v1/audio/* /v1/media/*
+    }
+
+    handle @media {
+        reverse_proxy 127.0.0.1:3000 {
+            header_up Host {upstream_hostport}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+
+            transport http {
+                response_header_timeout 7200s
+                read_timeout 7200s
+            }
+        }
+    }
+
+    # =========================================================================
+    # 2. API Endpoints: /v1/* & /v1beta/*
     # Open for AI coding tools (Claude Code, Cursor, Codex, SDKs).
     # Protected by Bearer API Key checked against {$API_KEY} if basic header filter desired,
     # or passed through directly to geminirouter backend for validation & metering.
@@ -75,7 +99,7 @@
     }
 
     # =========================================================================
-    # 2. Web Management Dashboard & RPC API
+    # 3. Web Management Dashboard & RPC API
     # Protected by HTTP Basic Auth so only you can access the admin dashboard.
     # =========================================================================
     @dashboard {

@@ -11,7 +11,10 @@
 
 The API can also forward audio and video inputs to supported models. A separate
 dubbing website can send media to `/v1/chat/completions` and receive model text
-such as a transcript or translation. See the [audio/video API guide](docs/MEDIA_API.md)
+such as a transcript or translation. For long recordings, use
+`POST /v1/audio/transcriptions`: it streams a 1–2 hour upload, splits it into
+safe chunks, transcribes and translates in one call, and accepts any target
+language name or ISO code. See the [audio/video API guide](docs/MEDIA_API.md)
 for request examples, size limits, and current output limitations.
 
 ### Key Highlights
@@ -70,6 +73,11 @@ for request examples, size limits, and current output limitations.
 
 ---
 
+Long media uploads (`/v1/audio/*` and `/v1/media/*`) are routed to the bridge
+(port 3000) instead of the core. The bridge streams the upload to disk, chunks
+it with FFmpeg, and calls the core once per chunk so leases, quota checks, and
+account failover still apply.
+
 ## 🚀 Quick Start: VPS Automated Deployment
 
 For Ubuntu 22.04 / 24.04 or Debian 11 / 12 servers, an automated native installer is provided.
@@ -107,12 +115,15 @@ Once finished, the script displays your complete connection details and configur
 
 If you prefer to configure your server manually using Node.js, systemd, or PM2:
 
-### Step 1: Install Node.js 24 and pnpm
+### Step 1: Install Node.js 24, pnpm, and FFmpeg
 ```bash
 curl -fsSL https://deb.nodesource.com/setup_24.x | bash -
-apt-get install -y nodejs
+apt-get install -y nodejs ffmpeg
 corepack enable
 ```
+
+FFmpeg is required for the long-audio transcription endpoint
+(`/v1/audio/transcriptions`); the installer adds it automatically.
 
 ### Step 2: Prepare Application Directory
 ```bash
@@ -372,7 +383,7 @@ To ensure your private router remains exclusively yours:
 | Task | Command |
 |---|---|
 | View Core Logs | `journalctl -u geminirouter-core -f` |
-| View Web Dashboard Logs | `journalctl -u geminirouter -f` |
+| View Web Dashboard Logs | `journalctl -u geminirouter-bridge -f` |
 | Restart All Services | `systemctl restart geminirouter-core geminirouter-bridge caddy` |
 | Stop All Services | `systemctl stop geminirouter-core geminirouter-bridge` |
 | Check Memory & PID | `systemctl status geminirouter-core geminirouter-bridge` |

@@ -225,7 +225,9 @@ test('multipart audio requests keep their boundary and bytes when proxied', asyn
       `--${boundary}--\r\n`,
   );
 
-  const res = await request(BRIDGE_PORT, '/v1/audio/transcriptions', {
+  // Use a normal proxied path: this test is about byte-for-byte multipart
+  // passthrough, not the bridge-level media transcription route.
+  const res = await request(BRIDGE_PORT, '/v1/chat/completions', {
     method: 'POST',
     headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}` },
     body,

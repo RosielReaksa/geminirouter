@@ -71,7 +71,8 @@ apt-get install -y --no-install-recommends \
   debian-archive-keyring \
   apt-transport-https \
   openssl \
-  procps
+  procps \
+  ffmpeg
 
 echo -e "${CYAN}[2/7] Installing Node.js 24 (LTS) & pnpm...${NC}"
 if ! command -v node >/dev/null 2>&1 || [ "$(node -v | cut -d'.' -f1 | tr -d 'v')" -lt 22 ]; then
@@ -182,9 +183,49 @@ ${USER_DOMAIN} {
         -Server
     }
 
+    # Long media uploads go to the bridge, which chunks them before calling
+    # the core. The core cannot accept a 1-2 hour recording in one request.
+    @media {
+        path /v1/audio/* /v1/media/*
+    }
+
+    handle @media {
+        reverse_proxy 127.0.0.1:3000 {
+            header_up Host {upstream_hostport}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+
+            transport http {
+                response_header_timeout 7200s
+                read_timeout 7200s
+            }
+        }
+    }
+
+    # Gemini-native dubbing clients use /v1beta/models/... through the bridge
+    # so leases, quota checks and failover apply to them.
+    @v1beta {
+        path /v1beta/*
+    }
+
+    handle @v1beta {
+        reverse_proxy 127.0.0.1:3000 {
+            header_up Host {upstream_hostport}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+
+            transport http {
+                response_header_timeout 600s
+                read_timeout 600s
+            }
+        }
+    }
+
     # API endpoints (OpenAI / Anthropic compatible)
     @api {
-        path /v1/* /v1beta/*
+        path /v1/*
     }
 
     handle @api {
@@ -282,7 +323,7 @@ echo ""
 echo -e "${BOLD}4. Management Commands:${NC}"
 echo -e "   Check Core Status:      ${CYAN}systemctl status geminirouter-core${NC}"
 echo -e "   Check Web Status:       ${CYAN}systemctl status geminirouter-bridge${NC}"
-echo -e "   View Live Logs:         ${CYAN}journalctl -u geminirouter-core -u geminirouter -f${NC}"
+echo -e "   View Live Logs:         ${CYAN}journalctl -u geminirouter-core -u geminirouter-bridge -f${NC}"
 echo -e "   Restart Services:       ${CYAN}systemctl restart geminirouter-core geminirouter-bridge${NC}"
 echo -e "   (Optional PM2 control): ${CYAN}cd /opt/geminirouter && pm2 start ecosystem.config.js${NC}"
 echo ""

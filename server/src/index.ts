@@ -22,6 +22,11 @@ import { readCoreProxyConfig, applyCoreProxyConfig } from './coreConfig.js';
 import { ConcurrencyLeaseManager } from './leaseManager.js';
 import { handleV1ProxyRequest } from './v1Proxy.js';
 import { AccountTester, type AccountTestResult } from './accountTester.js';
+import {
+  readMediaConfig,
+  registerMediaBodyParsers,
+  registerMediaRoutes,
+} from './mediaTranscription.js';
 
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
@@ -149,14 +154,14 @@ export async function createServer(): Promise<{
     credentials: true,
   });
 
-  // The bridge does not inspect multipart API bodies. Preserve them as raw
-  // bytes so endpoints such as audio transcription and file uploads can be
-  // forwarded with their original boundary and Content-Type intact.
-  app.addContentTypeParser(
-    'multipart/form-data',
-    { parseAs: 'buffer', bodyLimit: V1_REQUEST_BODY_LIMIT_BYTES },
-    (_request, body, done) => done(null, body),
-  );
+  // Multipart API bodies are preserved byte-for-byte for /v1 passthrough.
+  // The media transcription routes are the only exception: they stream the
+  // upload to a temp file so a 1-2 hour recording never sits in memory.
+  const mediaConfig = readMediaConfig();
+  registerMediaBodyParsers(app, {
+    fallbackBodyLimitBytes: V1_REQUEST_BODY_LIMIT_BYTES,
+    config: mediaConfig,
+  });
 
   // Admin authentication hook. Paired desktop helpers may only reach the
   // import endpoint with their scoped token.
@@ -508,6 +513,39 @@ export async function createServer(): Promise<{
       return null;
     }
   };
+
+  // Long-audio transcription/translation. These routes live on the bridge,
+  // not the core, because a 1-2 hour recording must be split into <15 MiB
+  // chunks. Each chunk is sent back through the normal /v1 proxy so leases,
+  // quota checks and account failover still apply. Deployments must route
+  // /v1/audio/* to the bridge (port 3000) rather than the core (port 8045).
+  registerMediaRoutes(app, {
+    config: mediaConfig,
+    getApiKeys: () => [
+      process.env.GEMINIROUTER_API_KEY || '',
+      store.getConfig().masterApiKey || '',
+      process.env.GEMINIROUTER_GATEWAY_API_KEY || '',
+      resolveGateway().apiKey,
+    ],
+    getGatewayApiKeys: () => [
+      process.env.GEMINIROUTER_GATEWAY_API_KEY || '',
+      process.env.GEMINIROUTER_API_KEY || '',
+      store.getConfig().masterApiKey || '',
+      resolveGateway().apiKey,
+    ],
+    getInternalBaseUrl: () => {
+      const address = app.server.address();
+      if (address && typeof address === 'object' && 'port' in address && address.port) {
+        return `http://127.0.0.1:${address.port}`;
+      }
+      return `http://127.0.0.1:${PORT}`;
+    },
+    ensureAccounts: async () => {
+      if (!store.getAccounts().some((account) => account.status !== 'error')) {
+        await loadCoreAccounts();
+      }
+    },
+  });
 
   // The core leaves request_logs at outcome=in_progress when the calling
   // client disconnects mid-request. Those rows never receive a finish event,

@@ -191,6 +191,15 @@ export const DocsPage: React.FC = () => {
                 </code>{' '}
                 and verify it with the media type your app will send.
               </p>
+              <p className="text-[14px] leading-relaxed text-[#4A453E]">
+                For 1–2 hour recordings use{' '}
+                <code className="px-1.5 py-0.5 rounded bg-[#F0EBE3] text-[12.5px] font-mono-code text-[#A8462A]">
+                  POST /v1/audio/transcriptions
+                </code>
+                . It streams the upload, splits audio into safe chunks, and returns one combined
+                transcript/translation. Any target language name or ISO code works — Japanese,
+                Spanish, Thai, Khmer, Arabic, Portuguese, and so on.
+              </p>
               <Code
                 title="audio · server-side JavaScript"
                 code={`const audioBase64 = (await fs.readFile(audioPath)).toString("base64");
@@ -205,7 +214,7 @@ const response = await fetch("${origin}/v1/chat/completions", {
     model: process.env.GEMINIROUTER_MODEL,
     stream: false,
     messages: [{ role: "user", content: [
-      { type: "text", text: "Transcribe this dialogue and translate it to Khmer. Keep speakers separate." },
+      { type: "text", text: "Transcribe this dialogue and translate it to Japanese. Keep speakers separate." },
       { type: "input_audio", input_audio: { data: audioBase64, format: "wav" } },
     ] }],
   }),
@@ -213,6 +222,24 @@ const response = await fetch("${origin}/v1/chat/completions", {
 
 const result = await response.json();
 const translatedDialogue = result.choices?.[0]?.message?.content;`}
+              />
+              <Code
+                title="long audio · 1–2 hours"
+                code={`const form = new FormData();
+form.append("file", new Blob([await fs.readFile(audioPath)]), "episode.mp3");
+form.append("model", process.env.GEMINIROUTER_MODEL);
+form.append("task", "both");
+form.append("target_language", "ja"); // any language name or ISO code: es, th, km, ar, ...
+form.append("prompt", "Transcribe and translate. Keep speaker turns on separate lines.");
+
+const response = await fetch("${origin}/v1/audio/transcriptions", {
+  method: "POST",
+  headers: { Authorization: \`Bearer \${process.env.GEMINIROUTER_KEY}\` },
+  body: form,
+});
+
+const result = await response.json();
+console.log(result.transcript, result.translation);`}
               />
               <Code
                 title="video · server-side JavaScript"
@@ -239,8 +266,10 @@ const translatedDialogue = result.choices?.[0]?.message?.content;`}
               />
               <div className="rounded-xl border border-[#E4DED4] bg-[#FBF9F5] p-4 text-[12.5px] leading-relaxed text-[#7A736A] space-y-2">
                 <p>
-                  Audio input supports MP3, WAV, OGG, FLAC, AAC/M4A, and AIFF up to 15 MiB decoded.
-                  Keep inline video around 20 MiB or less. The full request limit is 64 MiB.
+                  Inline audio supports MP3, WAV, OGG, FLAC, AAC/M4A, and AIFF up to 15 MiB decoded.
+                  Longer files go through <code>/v1/audio/transcriptions</code>, which streams and
+                  chunks them automatically. Keep inline video around 20 MiB or less. The normal
+                  request limit is 64 MiB.
                 </p>
                 <p>
                   The model returns text such as a transcript or translation. Creating a finished
