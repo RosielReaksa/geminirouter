@@ -56,6 +56,14 @@
   font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 
+.dashboard-nav-scroll {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.dashboard-nav-scroll::-webkit-scrollbar {
+  display: none;
+}
+
 /* Warm illustrated splash used while the dashboard verifies and hydrates. */
 .loading-screen {
   position: fixed;

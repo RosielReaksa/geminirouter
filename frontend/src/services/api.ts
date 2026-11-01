@@ -57,17 +57,16 @@ function setStored<T>(key: string, value: T): void {
 export class ApiClient {
   private isOnlineCache: boolean | null = null;
 
-  private async fetchWithFallback<T>(
+  private async fetchJson<T>(
     endpoint: string,
     options: RequestInit | undefined,
-    mockFallbackFn: () => Promise<T> | T
-  ): Promise<{ data: T; isLiveApi: boolean }> {
-    try {
-      const controller = new AbortController();
-      // Allow up to 35 seconds for live LLM completions and Google quota probes
-      const timeoutId = setTimeout(() => controller.abort(), 35000);
+    timeoutMs = 35000,
+  ): Promise<{ response: Response; data: T | null }> {
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
 
-      const res = await fetch(endpoint, {
+    try {
+      const response = await fetch(endpoint, {
         ...options,
         signal: controller.signal,
         headers: {
@@ -76,12 +75,30 @@ export class ApiClient {
           ...(options?.headers || {}),
         },
       });
-      clearTimeout(timeoutId);
+      const data = await response.json().catch(() => null) as T | null;
+      return { response, data };
+    } catch (error) {
+      if (controller.signal.aborted) {
+        throw new Error(`The request timed out after ${Math.ceil(timeoutMs / 1000)} seconds.`);
+      }
+      throw error instanceof Error ? error : new Error('Could not reach the gateway.');
+    } finally {
+      window.clearTimeout(timeoutId);
+    }
+  }
+
+  private async fetchWithFallback<T>(
+    endpoint: string,
+    options: RequestInit | undefined,
+    mockFallbackFn: () => Promise<T> | T
+  ): Promise<{ data: T; isLiveApi: boolean }> {
+    try {
+      // Keep the deadline active through response-body parsing as well as headers.
+      const { response: res, data } = await this.fetchJson<T>(endpoint, options);
 
       if (res.ok) {
-        const json = await res.json();
         this.isOnlineCache = true;
-        return { data: json as T, isLiveApi: true };
+        return { data: data as T, isLiveApi: true };
       }
 
       // 401 means the session is missing or expired. Surface it so the app can
@@ -124,7 +141,7 @@ export class ApiClient {
       { method: 'GET' },
       () => this.cachedAccounts
     );
-    if (res.data && Array.isArray(res.data) && res.data.length > 0) {
+    if (Array.isArray(res.data)) {
       this.cachedAccounts = res.data;
     }
     return res;
@@ -137,7 +154,7 @@ export class ApiClient {
       { method: 'POST' },
       () => this.cachedAccounts
     );
-    if (res.data && Array.isArray(res.data) && res.data.length > 0) {
+    if (Array.isArray(res.data)) {
       this.cachedAccounts = res.data;
     }
     return res;
@@ -353,33 +370,39 @@ export class ApiClient {
 
   // Real test call through the gateway — never falls back to mock data
   async testModel(model: string): Promise<ModelTestResult> {
-    const res = await fetch('/api/models/test', {
+    const { response, data } = await this.fetchJson<ModelTestResult>('/api/models/test', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...authApi.headers(),
-      },
       body: JSON.stringify({ model }),
-    });
-    if (res.status === 401) {
+    }, 45000);
+    if (response.status === 401) {
       window.dispatchEvent(new CustomEvent('geminirouter:unauthorized'));
     }
-    return res.json();
+    if (response.ok && data) return data;
+    return {
+      ok: false,
+      model,
+      latencyMs: 0,
+      error: data?.error || `Model test failed (HTTP ${response.status}).`,
+    };
   }
 
   async testAllModelsAcrossAccounts(): Promise<{ ok: boolean; models?: number; accounts?: number; error?: string }> {
-    const res = await fetch('/api/models/test-all-accounts', {
+    // This endpoint checks every advertised model against every account serially.
+    const { response, data } = await this.fetchJson<{ ok: boolean; models?: number; accounts?: number; error?: string }>(
+      '/api/models/test-all-accounts',
+      {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...authApi.headers(),
+        body: JSON.stringify({}),
       },
-      body: JSON.stringify({}),
-    });
-    if (res.status === 401) {
+      // Up to 31 models × 6 accounts × 25-second probes can take over an hour.
+      2 * 60 * 60 * 1000,
+    );
+    if (response.status === 401) {
       window.dispatchEvent(new CustomEvent('geminirouter:unauthorized'));
     }
-    return res.json();
+    if (response.ok && data) return data;
+    if (data?.error) return { ok: false, error: data.error };
+    return { ok: false, error: `Full model check failed (HTTP ${response.status}).` };
   }
 
   async playgroundRequest(input: {
@@ -389,79 +412,79 @@ export class ApiClient {
     temperature: number;
     maxTokens: number;
   }): Promise<PlaygroundResult> {
-    const res = await fetch('/api/playground', {
+    const { response, data } = await this.fetchJson<PlaygroundResult & { error?: string }>('/api/playground', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...authApi.headers(),
-      },
       body: JSON.stringify(input),
-    });
-    const result = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      throw new Error(result.error || `Request failed with HTTP ${res.status}`);
+    }, 45000);
+    if (response.status === 401) {
+      window.dispatchEvent(new CustomEvent('geminirouter:unauthorized'));
     }
-    return result as PlaygroundResult;
+    if (!response.ok || !data) {
+      throw new Error(data?.error || `Request failed with HTTP ${response.status}`);
+    }
+    return data;
   }
 
   // Helper: Delete account
-  async deleteAccount(accountId: string): Promise<GoogleAccount[]> {    try {
-      const res = await fetch(`/api/accounts/${encodeURIComponent(accountId)}`, {
-        method: 'DELETE',
-        headers: authApi.headers(),
-      });
-      if (res.status === 401) {
-        window.dispatchEvent(new CustomEvent('geminirouter:unauthorized'));
-        return [];
-      }
-      if (res.ok) {
-        const { data } = await this.getAccounts();
-        return data;
-      }
-    } catch {
-      // fallback
+  async deleteAccount(accountId: string): Promise<GoogleAccount[]> {
+    const { response, data } = await this.fetchJson<{
+      success: boolean;
+      accounts?: GoogleAccount[];
+      error?: string;
+    }>(`/api/accounts/${encodeURIComponent(accountId)}`, { method: 'DELETE' });
+    if (response.status === 401) {
+      window.dispatchEvent(new CustomEvent('geminirouter:unauthorized'));
     }
-    const current = getStored<GoogleAccount[]>(
-      STORAGE_KEYS.ACCOUNTS,
-      INITIAL_MOCK_ACCOUNTS
-    );
-    const updated = current.filter((acc) => acc.id !== accountId);
-    setStored(STORAGE_KEYS.ACCOUNTS, updated);
+    if (!response.ok || !data?.success) {
+      throw new Error(data?.error || `Account removal failed (HTTP ${response.status}).`);
+    }
+
+    // The endpoint returns the updated real account list. Keep the cached list
+    // aligned so a subsequent offline fallback cannot resurrect the removed account.
+    const updated = Array.isArray(data.accounts)
+      ? data.accounts
+      : this.cachedAccounts.filter((account) => account.id !== accountId);
+    this.cachedAccounts = updated;
     return updated;
   }
 
   async createPairCode(): Promise<{ code: string; expiresAt: number; error?: string }> {
-    const res = await fetch('/api/device/pair-code', {
+    const { response, data } = await this.fetchJson<{ code: string; expiresAt: number; error?: string }>(
+      '/api/device/pair-code',
+      {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...authApi.headers(),
+        body: '{}',
       },
-      body: '{}',
-    });
-    if (res.status === 401) {
+    );
+    if (response.status === 401) {
       window.dispatchEvent(new CustomEvent('geminirouter:unauthorized'));
       return { code: '', expiresAt: 0, error: 'Unauthorized' };
     }
-    return res.json().catch(() => ({ code: '', expiresAt: 0, error: 'Invalid response' }));
+    if (!response.ok || !data) {
+      return { code: '', expiresAt: 0, error: data?.error || `Request failed (HTTP ${response.status})` };
+    }
+    return data;
   }
 
   async importAccounts(
     content: string,
     strategy: 'merge' | 'overwrite' | 'skip-existing' = 'merge',
   ): Promise<{ success: boolean; result?: unknown; error?: string; message?: string }> {
-    const res = await fetch('/api/accounts/import', {
+    const { response, data } = await this.fetchJson<{ success: boolean; result?: unknown; error?: string; message?: string }>(
+      '/api/accounts/import',
+      {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...authApi.headers(),
+        body: JSON.stringify({ content, strategy }),
       },
-      body: JSON.stringify({ content, strategy }),
-    });
-    if (res.status === 401) {
+      60000,
+    );
+    if (response.status === 401) {
       window.dispatchEvent(new CustomEvent('geminirouter:unauthorized'));
     }
-    return res.json().catch(() => ({ success: false, error: 'Invalid response from server' }));
+    if (!response.ok || !data) {
+      return { success: false, error: data?.error || `Import failed (HTTP ${response.status})` };
+    }
+    return data;
   }
 
   // Helper: Set default account

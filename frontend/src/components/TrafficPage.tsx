@@ -1,8 +1,9 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Activity,
   Search,
   CheckCircle2,
+  Clock3,
   XCircle,
   Loader2,
   X,
@@ -28,6 +29,16 @@ const formatRangeTime = (timestamp: number) => new Date(timestamp).toLocaleStrin
   month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
 });
 
+const PENDING_NOTICE_AFTER_MS = 2 * 60 * 1000;
+
+const formatElapsed = (elapsedMs: number): string => {
+  const elapsedSeconds = Math.max(0, Math.floor(elapsedMs / 1000));
+  if (elapsedSeconds < 60) return `${elapsedSeconds}s`;
+  const minutes = Math.floor(elapsedSeconds / 60);
+  const seconds = elapsedSeconds % 60;
+  return seconds === 0 ? `${minutes}m` : `${minutes}m ${seconds}s`;
+};
+
 interface TrafficPageProps {
   traffic: TrafficRecord[];
   onReady?: () => void;
@@ -40,34 +51,81 @@ export const TrafficPage: React.FC<TrafficPageProps> = ({ traffic, onReady }) =>
   const [rangeTraffic, setRangeTraffic] = useState<TrafficRecord[]>([]);
   const [rangeLoading, setRangeLoading] = useState(() => Boolean(readTrafficTimeRange()));
   const [rangeIsLive, setRangeIsLive] = useState(true);
+  const [clockNow, setClockNow] = useState(() => Date.now());
+  const onReadyRef = useRef(onReady);
+  const rangeFrom = timeRange?.from;
+  const rangeTo = timeRange?.to;
 
-  React.useEffect(() => {
-    if (!timeRange) {
-      setRangeTraffic([]);
-      setRangeLoading(false);
-      return;
-    }
+  useEffect(() => {
+    onReadyRef.current = onReady;
+  }, [onReady]);
+
+  useEffect(() => {
+    const interval = setInterval(() => setClockNow(Date.now()), 10_000);
+    return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    if (rangeFrom === undefined || rangeTo === undefined) return;
 
     let active = true;
-    setRangeLoading(true);
-    api.getTraffic(timeRange).then(({ data, isLiveApi }) => {
-      if (!active) return;
-      setRangeTraffic(data);
-      setRangeIsLive(isLiveApi);
-    }).catch(() => {
-      if (active) {
-        setRangeTraffic([]);
-        setRangeIsLive(false);
+    let loading = false;
+    let firstLoad = true;
+    let timer: number | null = null;
+    const scheduleNext = () => {
+      if (active && document.visibilityState === 'visible') {
+        timer = window.setTimeout(() => void loadRange(), 15000);
       }
-    }).finally(() => {
-      if (active) {
-        setRangeLoading(false);
-        onReady?.();
-      }
-    });
+    };
 
-    return () => { active = false; };
-  }, [timeRange?.from, timeRange?.to]);
+    const loadRange = async () => {
+      if (!active || loading) return;
+      if (document.visibilityState !== 'visible') return;
+
+      loading = true;
+      try {
+        const { data, isLiveApi } = await api.getTraffic({ from: rangeFrom, to: rangeTo });
+        if (active) {
+          setRangeTraffic(isLiveApi ? data : []);
+          setRangeIsLive(isLiveApi);
+        }
+      } catch {
+        if (active) {
+          setRangeIsLive(false);
+          if (firstLoad) setRangeTraffic([]);
+        }
+      } finally {
+        loading = false;
+        if (active) {
+          if (firstLoad) {
+            firstLoad = false;
+            setRangeLoading(false);
+            onReadyRef.current?.();
+          }
+          scheduleNext();
+        }
+      }
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState !== 'visible') {
+        if (timer !== null) window.clearTimeout(timer);
+        timer = null;
+        return;
+      }
+      if (timer !== null) window.clearTimeout(timer);
+      timer = null;
+      void loadRange();
+    };
+
+    void loadRange();
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      active = false;
+      if (timer !== null) window.clearTimeout(timer);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [rangeFrom, rangeTo]);
 
   const visibleTraffic = timeRange ? rangeTraffic : traffic;
   const filteredTraffic = visibleTraffic.filter((t) => {
@@ -88,8 +146,9 @@ export const TrafficPage: React.FC<TrafficPageProps> = ({ traffic, onReady }) =>
   const rangeErrorCount = rangeTraffic.filter((record) => record.status >= 400).length;
   const rangeModelCount = new Set(rangeTraffic.map((record) => record.modelRequested)).size;
   const rangeAccountCount = new Set(rangeTraffic.map((record) => record.backingAccountEmail)).size;
-  const rangeAverageLatency = rangeTraffic.length
-    ? Math.round(rangeTraffic.reduce((sum, record) => sum + record.latencyMs, 0) / rangeTraffic.length)
+  const completedRangeTraffic = rangeTraffic.filter((record) => record.outcome !== 'in_progress');
+  const rangeAverageLatency = completedRangeTraffic.length
+    ? Math.round(completedRangeTraffic.reduce((sum, record) => sum + record.latencyMs, 0) / completedRangeTraffic.length)
     : 0;
 
   return (
@@ -124,6 +183,8 @@ export const TrafficPage: React.FC<TrafficPageProps> = ({ traffic, onReady }) =>
               type="button"
               onClick={() => {
                 setTimeRange(null);
+                setRangeLoading(false);
+                setRangeTraffic([]);
                 navigate('/app/traffic', { replace: true });
               }}
               className="inline-flex items-center gap-1.5 rounded-lg border border-[#EAE5DE] px-3 py-1.5 text-xs font-medium text-[#706B65] hover:bg-[#FAF7F2] hover:text-[#2A2723]"
@@ -215,6 +276,12 @@ export const TrafficPage: React.FC<TrafficPageProps> = ({ traffic, onReady }) =>
               ) : (
                 filteredTraffic.map((t) => {
                   const date = new Date(t.timestamp);
+                  const isPending = t.outcome === 'in_progress';
+                  const requestStartedAt = Date.parse(t.timestamp);
+                  const elapsedMs = isPending && Number.isFinite(requestStartedAt)
+                    ? Math.max(0, clockNow - requestStartedAt)
+                    : 0;
+                  const hasPendingNotice = isPending && elapsedMs >= PENDING_NOTICE_AFTER_MS;
                   const timeFormatted = date.toLocaleTimeString([], {
                     hour: '2-digit',
                     minute: '2-digit',
@@ -247,11 +314,31 @@ export const TrafficPage: React.FC<TrafficPageProps> = ({ traffic, onReady }) =>
                         </div>
                       </td>
                       <td className="py-3.5 px-4 whitespace-nowrap">
-                        {t.outcome === 'in_progress' ? (
-                          <span className="inline-flex items-center gap-1 font-mono-code text-[11px] text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full border border-amber-200">
-                            <Loader2 className="w-3 h-3 animate-spin" />
-                            In progress
-                          </span>
+                        {isPending ? (
+                          <div className="max-w-[250px] whitespace-normal">
+                            <span
+                              title="The gateway has not saved a final response for this request. It may still be running; if the calling app has stopped, its completion was not recorded."
+                              className={`inline-flex items-center gap-1 whitespace-nowrap font-mono-code text-[11px] px-2 py-0.5 rounded-full border ${
+                                hasPendingNotice
+                                  ? 'text-amber-800 bg-amber-50 border-amber-300'
+                                  : 'text-amber-700 bg-amber-50 border-amber-200'
+                              }`}
+                            >
+                              {hasPendingNotice ? (
+                                <Clock3 className="w-3 h-3" />
+                              ) : (
+                                <Loader2 className="w-3 h-3 animate-spin" />
+                              )}
+                              {hasPendingNotice
+                                ? `No result recorded · ${formatElapsed(elapsedMs)}`
+                                : `Waiting · ${formatElapsed(elapsedMs)}`}
+                            </span>
+                            {hasPendingNotice && (
+                              <span className="mt-1 block text-[10px] leading-4 text-amber-800/80">
+                                No finish event is saved. The log cannot tell whether the client is still waiting or the request ended without reporting back.
+                              </span>
+                            )}
+                          </div>
                         ) : t.status === 200 ? (
                           <span className="inline-flex items-center gap-1 font-mono-code text-[11px] text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
                             <CheckCircle2 className="w-3 h-3" />
@@ -270,18 +357,24 @@ export const TrafficPage: React.FC<TrafficPageProps> = ({ traffic, onReady }) =>
                         )}
                       </td>
                       <td className="py-3.5 px-4 font-mono-code text-[#504C46] whitespace-nowrap">
-                        {t.latencyMs} ms
+                        {isPending ? `Open for ${formatElapsed(elapsedMs)}` : `${t.latencyMs} ms`}
                       </td>
                       <td className="py-3.5 px-4 font-mono-code text-[#504C46] whitespace-nowrap">
-                        <div className="flex items-center gap-1">
-                          <span>{t.totalTokens.toLocaleString()}</span>
-                          <span className="text-[10px] text-[#9E988F]">
-                            ({t.promptTokens} / {t.completionTokens})
-                          </span>
-                        </div>
+                        {isPending ? (
+                          <span className="text-[#9E988F]">Not recorded</span>
+                        ) : (
+                          <div className="flex items-center gap-1">
+                            <span>{t.totalTokens.toLocaleString()}</span>
+                            <span className="text-[10px] text-[#9E988F]">
+                              ({t.promptTokens} / {t.completionTokens})
+                            </span>
+                          </div>
+                        )}
                       </td>
                       <td className="py-3.5 px-4 font-mono-code text-xs text-[#706B65] whitespace-nowrap">
-                        {t.backingAccountEmail}
+                        {isPending && t.backingAccountEmail === 'unknown'
+                          ? 'Not assigned yet'
+                          : t.backingAccountEmail}
                       </td>
                     </tr>
                   );

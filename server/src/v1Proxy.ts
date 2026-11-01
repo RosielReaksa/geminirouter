@@ -84,6 +84,23 @@ export async function handleV1ProxyRequest(
     }
   }
 
+  // Gemini-native API routes carry the model in the path, not in a body field:
+  //   /v1beta/models/gemini-3.8-flash-tiered:generateContent
+  // Without this, every /v1beta request would lease with no model, which would
+  // make quota checks use the wrong family and cooldowns account-wide.
+  if (!requestedModel) {
+    const match = /\/(?:v1|v1beta)\/models\/([^/:?]+)/.exec(
+      request.raw.url || request.url || ''
+    );
+    if (match) {
+      try {
+        requestedModel = decodeURIComponent(match[1]);
+      } catch {
+        requestedModel = match[1];
+      }
+    }
+  }
+
   // Attempt to acquire lease across accounts pool
   const attemptedAccountIds = new Set<string>();
   const maxAttempts = Math.max(1, accounts.filter((a) => a.status !== 'error').length);
@@ -369,11 +386,27 @@ export async function handleV1ProxyRequest(
         continue; // Try next account in loop
       }
 
-      // If pool was exhausted (non-retryable rate limit before streaming):
-      if (!outcome.retryable && !outcome.streamStarted && (outcome.status === 429 || outcome.status === 503)) {
+      // Any non-retryable response that never started streaming is an error the
+      // client must see. A connection-level failure (502) used to fall through
+      // this branch and Fastify answered 200 with an empty body, which looked
+      // like a successful empty completion.
+      if (!outcome.retryable && !outcome.streamStarted) {
         safeRelease();
-        reply.header('Retry-After', lastRetryAfter);
-        return reply.code(outcome.status).send(outcome.errorBody);
+        if (outcome.status === 429 || outcome.status === 503) {
+          reply.header('Retry-After', lastRetryAfter);
+        }
+        const errorBody = outcome.errorBody?.error
+          ? outcome.errorBody
+          : {
+              error: {
+                message:
+                  outcome.errorBody?.message ||
+                  `The gateway did not answer (upstream status ${outcome.status}).`,
+                type: 'gateway_error',
+                code: outcome.status,
+              },
+            };
+        return reply.code(outcome.status >= 400 ? outcome.status : 502).send(errorBody);
       }
 
       // If we finished successfully or delivered response (streamStarted is true):

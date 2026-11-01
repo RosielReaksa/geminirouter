@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Boxes,
   Search,
@@ -14,7 +14,6 @@ import { api } from '../services/api';
 import { ModelInfo, ModelTestResult } from '../types';
 
 interface ModelsPageProps {
-  gatewayOnline: boolean;
   onNavigateToGateway: () => void;
   onReady: () => void;
 }
@@ -44,13 +43,11 @@ const formatHistoryTime = (value: string) =>
   });
 
 export const ModelsPage: React.FC<ModelsPageProps> = ({
-  gatewayOnline,
   onNavigateToGateway,
   onReady,
 }) => {
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [source, setSource] = useState<'gateway' | 'catalog'>('catalog');
-  const [isLiveApi, setIsLiveApi] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [providerFilter, setProviderFilter] = useState<string>('all');
   const [loading, setLoading] = useState(true);
@@ -60,6 +57,12 @@ export const ModelsPage: React.FC<ModelsPageProps> = ({
   const [results, setResults] = useState<Record<string, ModelTestResult>>({});
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [testingAll, setTestingAll] = useState(false);
+  const [testAllNotice, setTestAllNotice] = useState<{ kind: 'success' | 'error'; message: string } | null>(null);
+  const onReadyRef = useRef(onReady);
+
+  useEffect(() => {
+    onReadyRef.current = onReady;
+  }, [onReady]);
 
   useEffect(() => {
     let active = true;
@@ -75,13 +78,12 @@ export const ModelsPage: React.FC<ModelsPageProps> = ({
             .map((model) => [model.id, model.availability!]),
         ));
         setSource(res.data.source);
-        setIsLiveApi(res.isLiveApi);
       } catch {
         if (active) setModels([]);
       } finally {
         if (active) {
           setLoading(false);
-          onReady();
+          onReadyRef.current();
         }
       }
     };
@@ -111,6 +113,7 @@ export const ModelsPage: React.FC<ModelsPageProps> = ({
 
   const handleTestAll = async () => {
     setTestingAll(true);
+    setTestAllNotice(null);
     try {
       const run = await api.testAllModelsAcrossAccounts();
       if (!run.ok) throw new Error(run.error || 'The full model check could not start.');
@@ -122,9 +125,15 @@ export const ModelsPage: React.FC<ModelsPageProps> = ({
           .filter((model) => model.availability)
           .map((model) => [model.id, model.availability!]),
       ));
-      window.alert(`Checked ${run.models || 0} models across ${run.accounts || 0} accounts.`);
+      setTestAllNotice({
+        kind: 'success',
+        message: `Checked ${run.models || 0} models across ${run.accounts || 0} accounts.`,
+      });
     } catch (err: any) {
-      window.alert(err?.message || 'The full model check failed.');
+      setTestAllNotice({
+        kind: 'error',
+        message: err?.message || 'The full model check failed.',
+      });
     } finally {
       setTestingAll(false);
     }
@@ -167,7 +176,7 @@ export const ModelsPage: React.FC<ModelsPageProps> = ({
           <button
             type="button"
             onClick={() => void handleTestAll()}
-            disabled={testingAll || loading}
+            disabled={testingAll || loading || testingId !== null}
             className="inline-flex items-center gap-2 rounded-full border border-[#EAE5DE] bg-white px-3 py-1.5 text-[11px] font-medium text-[#504C46] hover:bg-[#FAF7F2] disabled:cursor-wait disabled:opacity-60"
           >
             {testingAll ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Zap className="h-3.5 w-3.5" />}
@@ -190,6 +199,26 @@ export const ModelsPage: React.FC<ModelsPageProps> = ({
           </span>
         </div>
       </div>
+
+      {testingAll && (
+        <p role="status" aria-live="polite" className="text-xs text-[#706B65]">
+          Checking every advertised model against each connected account. This full sweep can take several minutes; results appear here when it finishes.
+        </p>
+      )}
+
+      {testAllNotice && (
+        <div
+          role={testAllNotice.kind === 'error' ? 'alert' : 'status'}
+          aria-live="polite"
+          className={`rounded-xl border px-4 py-3 text-xs ${
+            testAllNotice.kind === 'error'
+              ? 'border-[#F2DDD5] bg-[#FAF2EF] text-[#A8462A]'
+              : 'border-[#D3E4DB] bg-[#EEF5F1] text-[#4E7B62]'
+          }`}
+        >
+          {testAllNotice.message}
+        </div>
+      )}
 
       {/* Gateway notice when offline */}
       {source !== 'gateway' && (
@@ -378,7 +407,7 @@ export const ModelsPage: React.FC<ModelsPageProps> = ({
                   <div className="flex items-center justify-between gap-2">
                     <button
                       onClick={() => handleTest(m.id)}
-                      disabled={isTesting}
+                      disabled={isTesting || testingId !== null || testingAll}
                       className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#F2ECE4] hover:bg-[#EAE1D5] border border-[#DDD7CE] text-xs font-semibold text-[#2A2723] transition-colors disabled:opacity-60"
                     >
                       {isTesting ? (

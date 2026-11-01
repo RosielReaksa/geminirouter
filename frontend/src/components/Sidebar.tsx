@@ -78,10 +78,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
   ];
 
   return (
-    <aside className="w-64 h-screen sticky top-0 shrink-0 flex flex-col bg-[#FAF7F2] border-r border-[#EAE5DE]/80">
-      <div className="px-4 pt-5 pb-3">
+    <aside className="sticky top-0 z-30 w-full shrink-0 border-b border-[#EAE5DE]/80 bg-[#FAF7F2]/95 backdrop-blur-sm md:flex md:h-screen md:w-64 md:flex-col md:border-b-0 md:border-r">
+      <div className="px-3 pt-3 pb-2 md:px-4 md:pt-5 md:pb-3">
         {/* Brand */}
-        <div className="flex items-center gap-2.5 px-1">
+        <div className="flex items-center justify-between gap-3 px-1">
+          <div className="flex min-w-0 items-center gap-2.5">
           <div className="w-9 h-9 rounded-xl bg-[#C25938] flex items-center justify-center shadow-soft">
             <span className="font-serif-editorial text-lg leading-none text-white">g</span>
           </div>
@@ -91,10 +92,22 @@ export const Sidebar: React.FC<SidebarProps> = ({
             </div>
             <div className="text-[11px] text-[#9E988F] -mt-0.5">private gateway</div>
           </div>
+          </div>
+          {onSignOut && (
+            <button
+              type="button"
+              onClick={onSignOut}
+              aria-label="Sign out"
+              title="Sign out"
+              className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-[#EAE5DE] text-[#706B65] transition-colors hover:bg-white hover:text-[#C25938] md:hidden"
+            >
+              <LogOut className="h-4 w-4" />
+            </button>
+          )}
         </div>
 
         {/* Gateway running pill */}
-        <div className="mt-3 flex items-center gap-2 px-1">
+        <div className="mt-2 flex items-center gap-2 px-1 md:mt-3">
           <span
             className={`w-2 h-2 rounded-full ${
               isRunning ? 'bg-emerald-500 animate-pulse' : 'bg-stone-300'
@@ -117,32 +130,34 @@ export const Sidebar: React.FC<SidebarProps> = ({
       </div>
 
       {/* Navigation list */}
-      <nav className="px-3 py-2 space-y-1">
+      <nav aria-label="Main navigation" className="dashboard-nav-scroll flex gap-1 overflow-x-auto px-3 pb-3 md:block md:space-y-1 md:overflow-x-visible md:py-2 md:pb-2">
         {navItems.map((item) => {
           const Icon = item.icon;
           const isActive = currentTab === item.id;
           return (
             <button
               key={item.id}
+              type="button"
               onClick={() => onSelectTab(item.id)}
               title={item.desc}
-              className={`w-full text-left px-3.5 py-2.5 rounded-xl flex items-center justify-between text-sm transition-all duration-150 ${
+              aria-current={isActive ? 'page' : undefined}
+              className={`flex w-auto shrink-0 items-center gap-2 rounded-xl border px-3 py-2 text-[11px] transition-all duration-150 md:w-full md:justify-between md:px-3.5 md:py-2.5 md:text-sm ${
                 isActive
                   ? 'bg-[#FFFFFF] text-[#C25938] font-semibold shadow-soft border border-[#EAE5DE]'
-                  : 'text-[#504C46] hover:bg-[#F2ECE4] hover:text-[#2A2723]'
+                  : 'border-transparent text-[#504C46] hover:bg-[#F2ECE4] hover:text-[#2A2723]'
               }`}
             >
-              <div className="flex items-center gap-3">
+              <div className="flex items-center gap-2 md:gap-3">
                 <Icon
-                  className={`w-4 h-4 transition-colors ${
+                  className={`h-4 w-4 shrink-0 transition-colors ${
                     isActive ? 'text-[#C25938]' : 'text-[#706B65]'
                   }`}
                 />
-                <span>{item.label}</span>
+                <span className="whitespace-nowrap">{item.label}</span>
               </div>
               {item.badge && (
                 <span
-                    className={`text-[11px] px-2 py-0.5 rounded-full font-mono-code ${
+                    className={`hidden text-[11px] px-2 py-0.5 rounded-full font-mono-code md:inline-flex ${
                       isActive
                         ? 'bg-[#FAF2EF] text-[#C25938]'
                         : 'bg-[#EAE5DE] text-[#706B65]'
@@ -157,7 +172,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       </nav>
 
       {/* Footer Info & Support */}
-      <div className="mt-auto p-4 border-t border-[#EAE5DE]/80 bg-[#FAF7F2]">
+      <div className="mt-auto hidden border-t border-[#EAE5DE]/80 bg-[#FAF7F2] p-4 md:block">
         <div className="bg-[#FAF2EF] border border-[#F2DDD5] rounded-xl p-3.5 text-xs text-[#706B65]">
           <div className="flex items-center gap-1.5 text-[#C25938] font-medium mb-1">
             <ShieldCheck className="w-4 h-4" />

@@ -9,9 +9,15 @@
 
 **geminirouter** turns multiple personal or workspace Google accounts into your own private **OpenRouter** or **Anthropic Claude** endpoint. Instead of paying hefty third-party fees or getting rate-limited during heavy coding sessions, geminirouter automatically pools multiple accounts, balancing traffic via atomic concurrency leases, automatically rotating accounts on quota depletion, and serving standard `/v1/chat/completions` and `/v1/models` endpoints to any AI coding assistant or tool.
 
+The API can also forward audio and video inputs to supported models. A separate
+dubbing website can send media to `/v1/chat/completions` and receive model text
+such as a transcript or translation. See the [audio/video API guide](docs/MEDIA_API.md)
+for request examples, size limits, and current output limitations.
+
 ### Key Highlights
 - **100% Native & Lightweight**: Zero Docker overhead. Runs directly via standard Node.js (v22/v24), managed with systemd or PM2, consuming less than 150MB of RAM.
 - **OpenAI & Anthropic Compatible**: Drop-in base URL replacement for Claude Code, Codex CLI, Cursor, Aider, OpenCode, LibreChat, and standard OpenAI SDKs.
+- **Multimodal API Input**: OpenAI-compatible audio and video content blocks are forwarded to the core; media support depends on the selected model.
 - **Smart Concurrency Balancer**:
   - Atomic in-flight lease tracking (`acquireLease` / `releaseLease`).
   - Model-scoped rate-limit cooldowns (60s–300s TTL).

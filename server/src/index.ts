@@ -1,4 +1,8 @@
-import Fastify, { type FastifyInstance } from 'fastify';
+import Fastify, {
+  type FastifyInstance,
+  type FastifyRequest,
+  type FastifyReply,
+} from 'fastify';
 import fastifyStatic from '@fastify/static';
 import fastifyCors from '@fastify/cors';
 import fastifyHttpProxy from '@fastify/http-proxy';
@@ -36,6 +40,10 @@ const PORT = parseInt(process.env.PORT || '3000', 10);
 const HOST = process.env.HOST || '0.0.0.0';
 const ADMIN_PASSWORD = process.env.GEMINIROUTER_ADMIN_PASSWORD || '';
 const INTERNAL_GATEWAY_PORT = parseInt(process.env.INTERNAL_GATEWAY_PORT || '8045', 10);
+// Match the core's 64 MiB JSON model-route limit. This leaves enough room for
+// base64 media plus prompt text without making every dashboard route accept
+// large request bodies.
+const V1_REQUEST_BODY_LIMIT_BYTES = 64 * 1024 * 1024;
 const WEBSITE_OAUTH_CALLBACK_URI =
   process.env.OAUTH_CALLBACK_URL || 'https://framecall.site/oauth/callback';
 const LOCAL_OAUTH_RELAY_REDIRECT_URI = 'http://127.0.0.1:41209/oauth-callback';
@@ -141,6 +149,15 @@ export async function createServer(): Promise<{
     credentials: true,
   });
 
+  // The bridge does not inspect multipart API bodies. Preserve them as raw
+  // bytes so endpoints such as audio transcription and file uploads can be
+  // forwarded with their original boundary and Content-Type intact.
+  app.addContentTypeParser(
+    'multipart/form-data',
+    { parseAs: 'buffer', bodyLimit: V1_REQUEST_BODY_LIMIT_BYTES },
+    (_request, body, done) => done(null, body),
+  );
+
   // Admin authentication hook. Paired desktop helpers may only reach the
   // import endpoint with their scoped token.
   const sessions = new SessionStore();
@@ -183,7 +200,8 @@ export async function createServer(): Promise<{
     app.log.warn(`Frontend build not found at ${frontendDistPath}. Run pnpm build in frontend/`);
   }
 
-  // Reverse proxy for coding tools on /v1/*
+  // Reverse proxy for API clients on /v1/*, including media-bearing requests
+  // used by a separate audio/video dubbing application.
   // Dispatches requests across N accounts using ConcurrencyLeaseManager:
   // - Picks healthy account with fewest in-flight leases (min in-flight)
   // - Breaks ties by least quota used
@@ -191,13 +209,23 @@ export async function createServer(): Promise<{
   // - If at capacity: queues briefly or returns 429 Retry-After
   // - Transparently retries on next account if upstream 429 before streaming
   // - Never retries once first streamed byte is emitted
-  app.all('/v1/*', async (request, reply) => {
+  //
+  // /v1beta is the Gemini-native path used by the dubbing app
+  // (/v1beta/models/<model>:generateContent). It goes through the same leases,
+  // quota checks and failover as /v1, and the path is forwarded unchanged.
+  const proxyApiRequest = async (
+    request: FastifyRequest,
+    reply: FastifyReply,
+  ): Promise<void> => {
     await handleV1ProxyRequest(request, reply, {
       leaseManager,
       store,
       getGatewayPort: () => resolveGateway().port,
     });
-  });
+  };
+
+  app.all('/v1/*', { bodyLimit: V1_REQUEST_BODY_LIMIT_BYTES }, proxyApiRequest);
+  app.all('/v1beta/*', { bodyLimit: V1_REQUEST_BODY_LIMIT_BYTES }, proxyApiRequest);
 
   // REST API Routes
 
@@ -480,23 +508,38 @@ export async function createServer(): Promise<{
     }
   };
 
+  // The core leaves request_logs at outcome=in_progress when the calling
+  // client disconnects mid-request. Those rows never receive a finish event,
+  // so after this window the dashboard reports them as aborted instead of an
+  // endless "in progress" spinner. Override with STALE_IN_PROGRESS_MS.
+  const STALE_IN_PROGRESS_MS = Math.max(
+    60_000,
+    Number.parseInt(process.env.STALE_IN_PROGRESS_MS || '300000', 10) || 300_000,
+  );
+
   const mapCoreTrafficItems = (items: any[], accounts: GoogleAccount[]): TrafficRecord[] => {
     const emailsByAccountId = new Map(accounts.map((account) => [account.id, account.email]));
     return items.map((item: any) => {
       const routedModel = item.mappedModel || item.physicalModel || item.model || 'unknown';
       const promptTokens = item.inputTokens ?? 0;
       const completionTokens = item.outputTokens ?? 0;
+      const timestampMs =
+        typeof item.timestamp === 'number' ? item.timestamp : Date.parse(item.timestamp);
+      const stale =
+        item.outcome === 'in_progress' &&
+        Number.isFinite(timestampMs) &&
+        Date.now() - timestampMs > STALE_IN_PROGRESS_MS;
       return {
         id: item.id,
-        timestamp: new Date(item.timestamp).toISOString(),
+        timestamp: new Date(timestampMs).toISOString(),
         clientName: item.clientName || item.userAgent || item.protocol || 'HTTP Client',
         clientIp: item.clientIp || '127.0.0.1',
         modelRequested: item.model || routedModel,
         modelRouted: routedModel,
         backingAccountEmail:
           emailsByAccountId.get(item.attributedAccountId) || item.attributedAccountId || 'unknown',
-        status: item.status ?? 0,
-        outcome: item.outcome ?? undefined,
+        status: stale ? 0 : item.status ?? 0,
+        outcome: stale ? 'aborted' : item.outcome ?? undefined,
         latencyMs: item.durationMs ?? 0,
         promptTokens,
         completionTokens,

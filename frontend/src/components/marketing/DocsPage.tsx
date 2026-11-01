@@ -39,6 +39,7 @@ const Code: React.FC<{ code: string; title?: string }> = ({ code, title }) => (
 const SECTIONS = [
   { id: 'quickstart', label: 'Quickstart' },
   { id: 'endpoints', label: 'Endpoints' },
+  { id: 'media', label: 'Audio & video input' },
   { id: 'openai', label: 'OpenAI SDK' },
   { id: 'anthropic', label: 'Anthropic SDK' },
   { id: 'streaming', label: 'Streaming' },
@@ -169,6 +170,82 @@ export const DocsPage: React.FC = () => {
                     ))}
                   </tbody>
                 </table>
+              </div>
+            </section>
+
+            <div className="mkt-rule my-10" />
+
+            <section id="media" className="scroll-mt-24">
+              <h2 className="mkt-display text-[28px] text-[#191714] mb-3">
+                Audio &amp; video input
+              </h2>
+              <p className="text-[14px] leading-relaxed text-[#4A453E]">
+                A separate dubbing app can upload media to its own server, then send the file to{' '}
+                <code className="px-1.5 py-0.5 rounded bg-[#F0EBE3] text-[12.5px] font-mono-code text-[#A8462A]">
+                  /v1/chat/completions
+                </code>{' '}
+                as base64. Keep the gateway key on that server; browser code must never contain it.
+                Select a model from{' '}
+                <code className="px-1.5 py-0.5 rounded bg-[#F0EBE3] text-[12.5px] font-mono-code text-[#A8462A]">
+                  GET /v1/models
+                </code>{' '}
+                and verify it with the media type your app will send.
+              </p>
+              <Code
+                title="audio · server-side JavaScript"
+                code={`const audioBase64 = (await fs.readFile(audioPath)).toString("base64");
+
+const response = await fetch("${origin}/v1/chat/completions", {
+  method: "POST",
+  headers: {
+    Authorization: \`Bearer \${process.env.GEMINIROUTER_KEY}\`,
+    "Content-Type": "application/json",
+  },
+  body: JSON.stringify({
+    model: process.env.GEMINIROUTER_MODEL,
+    stream: false,
+    messages: [{ role: "user", content: [
+      { type: "text", text: "Transcribe this dialogue and translate it to Khmer. Keep speakers separate." },
+      { type: "input_audio", input_audio: { data: audioBase64, format: "wav" } },
+    ] }],
+  }),
+});
+
+const result = await response.json();
+const translatedDialogue = result.choices?.[0]?.message?.content;`}
+              />
+              <Code
+                title="video · server-side JavaScript"
+                code={`const videoBase64 = (await fs.readFile(videoPath)).toString("base64");
+
+const response = await fetch("${origin}/v1/chat/completions", {
+  method: "POST",
+  headers: {
+    Authorization: \`Bearer \${process.env.GEMINIROUTER_KEY}\`,
+    "Content-Type": "application/json",
+  },
+  body: JSON.stringify({
+    model: process.env.GEMINIROUTER_MODEL,
+    stream: false,
+    messages: [{ role: "user", content: [
+      { type: "text", text: "Transcribe and translate the spoken dialogue. Keep speaker turns separate." },
+      { type: "video_url", video_url: { url: \`data:video/mp4;base64,\${videoBase64}\` } },
+    ] }],
+  }),
+});
+
+const result = await response.json();
+const translatedDialogue = result.choices?.[0]?.message?.content;`}
+              />
+              <div className="rounded-xl border border-[#E4DED4] bg-[#FBF9F5] p-4 text-[12.5px] leading-relaxed text-[#7A736A] space-y-2">
+                <p>
+                  Audio input supports MP3, WAV, OGG, FLAC, AAC/M4A, and AIFF up to 15 MiB decoded.
+                  Keep inline video around 20 MiB or less. The full request limit is 64 MiB.
+                </p>
+                <p>
+                  The model returns text such as a transcript or translation. Creating a finished
+                  dubbed video also needs speech generation and video/audio muxing in the dubbing app.
+                </p>
               </div>
             </section>
 

@@ -28,8 +28,28 @@
     # Protected by Bearer API Key checked against {$API_KEY} if basic header filter desired,
     # or passed through directly to geminirouter backend for validation & metering.
     # =========================================================================
+    # Gemini-native clients (the dubbing service) use /v1beta/models/... and go
+    # through the bridge, so leases, quota checks and failover apply to them.
+    @v1beta {
+        path /v1beta/*
+    }
+
+    handle @v1beta {
+        reverse_proxy 127.0.0.1:3000 {
+            header_up Host {upstream_hostport}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+
+            transport http {
+                response_header_timeout 600s
+                read_timeout 600s
+            }
+        }
+    }
+
     @api {
-        path /v1/* /v1beta/*
+        path /v1/*
     }
 
     # If you wish to enforce API key check directly at Caddy level, uncomment below:

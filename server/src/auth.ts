@@ -95,7 +95,7 @@ const PUBLIC_EXACT = new Set([
   '/oauth/callback',
 ]);
 
-const PUBLIC_PREFIXES = ['/assets/', '/v1/'];
+const PUBLIC_PREFIXES = ['/assets/', '/v1/', '/v1beta/'];
 
 /** Public marketing pages — served as the SPA shell without auth. */
 const PUBLIC_PAGE_PREFIXES = ['/pricing', '/models', '/docs', '/privacy', '/terms', '/login'];

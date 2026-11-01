@@ -28,35 +28,42 @@ const BRIDGE_PORT = 3892;
 
 let upstreamHits = 0;
 let upstreamMode = 'exhausted'; // 'exhausted' | 'ok' | 'stream-break'
+let upstreamRequestBody = Buffer.alloc(0);
+let upstreamClosed = false;
 
 const upstream = http.createServer((req, res) => {
   upstreamHits++;
-  if (upstreamMode === 'exhausted') {
-    // What the core emits when the whole pool is exhausted.
-    res.writeHead(429, { 'Retry-After': '60', 'Content-Type': 'application/json' });
-    res.end(
-      JSON.stringify({
-        error: { message: 'All accounts failed or unhealthy', type: 'pool_exhausted' },
-      }),
-    );
-    return;
-  }
-  if (upstreamMode === 'ok') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(
-      JSON.stringify({
-        id: 'cmpl-1',
-        choices: [{ message: { role: 'assistant', content: 'pong from account B' } }],
-      }),
-    );
-    return;
-  }
-  // stream-break: start an SSE response, emit one event, then kill the socket.
-  res.writeHead(200, { 'Content-Type': 'text/event-stream' });
-  res.write('data: {"delta":"partial"}\n\n');
-  setTimeout(() => {
-    res.destroy();
-  }, 150);
+  const chunks: Buffer[] = [];
+  req.on('data', (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
+  req.on('end', () => {
+    upstreamRequestBody = Buffer.concat(chunks);
+    if (upstreamMode === 'exhausted') {
+      // What the core emits when the whole pool is exhausted.
+      res.writeHead(429, { 'Retry-After': '60', 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          error: { message: 'All accounts failed or unhealthy', type: 'pool_exhausted' },
+        }),
+      );
+      return;
+    }
+    if (upstreamMode === 'ok') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          id: 'cmpl-1',
+          choices: [{ message: { role: 'assistant', content: 'pong from account B' } }],
+        }),
+      );
+      return;
+    }
+    // stream-break: start an SSE response, emit one event, then kill the socket.
+    res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+    res.write('data: {"delta":"partial"}\n\n');
+    setTimeout(() => {
+      res.destroy();
+    }, 150);
+  });
 });
 
 let bridge: ReturnType<typeof spawn>;
@@ -130,7 +137,7 @@ before(async () => {
 
 after(async () => {
   bridge?.kill();
-  upstream.close();
+  if (!upstreamClosed) upstream.close();
   try {
     fs.rmSync(tempHome, { recursive: true, force: true });
   } catch {
@@ -170,6 +177,63 @@ test('successful (failed-over) response passes through', async () => {
   const body = await res.json();
   assert.equal(body.choices[0].message.content, 'pong from account B');
   assert.equal(upstreamHits, 1);
+});
+
+test('multimodal JSON larger than 10 MiB reaches the core unchanged', async () => {
+  upstreamMode = 'ok';
+  upstreamHits = 0;
+  upstreamRequestBody = Buffer.alloc(0);
+  const base64Video = Buffer.alloc(8 * 1024 * 1024, 7).toString('base64');
+  const body = JSON.stringify({
+    model: 'gemini-2.5-pro',
+    messages: [
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'Summarize this clip.' },
+          { type: 'video_url', video_url: { url: `data:video/mp4;base64,${base64Video}` } },
+        ],
+      },
+    ],
+  });
+  assert.ok(Buffer.byteLength(body) > 10 * 1024 * 1024);
+
+  const res = await request(BRIDGE_PORT, '/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body,
+  });
+
+  assert.equal(res.status, 200);
+  assert.equal(upstreamHits, 1);
+  assert.equal(upstreamRequestBody.toString('utf8'), body);
+});
+
+test('multipart audio requests keep their boundary and bytes when proxied', async () => {
+  upstreamMode = 'ok';
+  upstreamHits = 0;
+  upstreamRequestBody = Buffer.alloc(0);
+  const boundary = 'framecall-audio-test-boundary';
+  const body = Buffer.from(
+    `--${boundary}\r\n` +
+      'Content-Disposition: form-data; name="model"\r\n\r\n' +
+      'gemini-2.5-pro\r\n' +
+      `--${boundary}\r\n` +
+      'Content-Disposition: form-data; name="file"; filename="sample.wav"\r\n' +
+      'Content-Type: audio/wav\r\n\r\n' +
+      'RIFF-test-audio-bytes\r\n' +
+      `--${boundary}--\r\n`,
+  );
+
+  const res = await request(BRIDGE_PORT, '/v1/audio/transcriptions', {
+    method: 'POST',
+    headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}` },
+    body,
+  });
+
+  assert.equal(res.status, 200);
+  assert.equal(upstreamHits, 1);
+  assert.deepEqual(upstreamRequestBody, body);
 });
 
 test('no retry after a streamed response has started', async () => {
@@ -223,4 +287,51 @@ test('core offline: /api/oauth/start errors instead of returning a fake URL', as
   const body = await res.json();
   assert.match(body.error, /Core is offline/);
   assert.ok(!body.authorizationUrl, 'no fake authorization URL may be returned');
+});
+
+test('v1beta model paths are proxied and attributed from the URL', async () => {
+  upstreamMode = 'ok';
+  upstreamHits = 0;
+  upstreamRequestBody = Buffer.alloc(0);
+
+  const res = await request(BRIDGE_PORT, '/v1beta/models/gemini-2.5-pro:generateContent', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents: [{ parts: [{ text: 'hi' }] }],
+      generationConfig: { maxOutputTokens: 4 },
+    }),
+  });
+
+  assert.equal(res.status, 200);
+  assert.equal(upstreamHits, 1);
+
+  await wait(100);
+  const traffic = (await (await request(BRIDGE_PORT, '/api/traffic')).json()) as Array<{
+    modelRequested: string;
+  }>;
+  assert.ok(
+    traffic.some((record) => record.modelRequested === 'gemini-2.5-pro'),
+    'the model must be read from /v1beta/models/<model>:generateContent',
+  );
+});
+
+test('core unreachable: /v1 returns 502, never an empty 200', async () => {
+  assert.ok(!upstreamClosed, 'this must be the last test that needs the fake core');
+  await new Promise<void>((resolve) => upstream.close(() => resolve()));
+  upstreamClosed = true;
+
+  const res = await request(BRIDGE_PORT, '/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: 'gemini-2.5-pro',
+      messages: [{ role: 'user', content: 'hi' }],
+    }),
+  });
+
+  assert.equal(res.status, 502, 'connection failure must not look like a 200');
+  const body = await res.json();
+  assert.equal(body.error.type, 'gateway_error');
+  assert.ok(body.error.message.length > 0);
 });

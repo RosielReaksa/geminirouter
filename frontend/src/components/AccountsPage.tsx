@@ -268,6 +268,17 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
     return 'text-red-600';
   };
 
+  /**
+   * A window at 0% is held out of rotation until its reset time. Once the
+   * reset passes, the next quota refresh makes the account eligible again.
+   */
+  const isQuotaHeld = (pct: number, resetTime?: string) => {
+    if (pct > 0) return false;
+    if (!resetTime) return true;
+    const resetMs = Date.parse(resetTime);
+    return !Number.isFinite(resetMs) || resetMs > Date.now();
+  };
+
   const getQuotaBarBg = (pct: number) => {
     if (pct >= 75) return 'bg-emerald-500';
     if (pct >= 40) return 'bg-amber-500';
@@ -726,6 +737,14 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
                               <div className="flex items-center justify-between text-[10px]">
                                 <span className="text-[#706B65] font-medium">{b.displayName}</span>
                                 <div className="flex items-center gap-2">
+                                  {isQuotaHeld(pct, b.resetTime) && (
+                                    <span
+                                      title="Held out of rotation for this quota until it resets"
+                                      className="rounded-full border border-[#EAD9B8] bg-[#FDF6EC] px-1.5 py-[1px] font-mono-code text-[8px] font-semibold uppercase tracking-wider text-[#A9761F]"
+                                    >
+                                      held
+                                    </span>
+                                  )}
                                   {resetStr && <span className="font-mono-code text-[9px] text-[#9E988F]">{resetStr}</span>}
                                   <span className={`font-mono-code font-bold ${getQuotaTextColor(pct)}`}>{pct}%</span>
                                 </div>

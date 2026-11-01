@@ -64,48 +64,109 @@ export const DashboardApp: React.FC = () => {
   // Action loaders
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [notification, setNotification] = useState<string | null>(null);
+  const notificationTimer = useRef<number | null>(null);
 
   const showNotification = (msg: string) => {
     setNotification(msg);
-    setTimeout(() => setNotification(null), 3000);
-  };
-
-  // Initial load
-  const loadInitialData = async () => {
-    try {
-      const [statusRes, accRes, configRes, trafficRes] = await Promise.all([
-        api.getStatus(),
-        api.getAccounts(),
-        api.getConfig(),
-        api.getTraffic(),
-      ]);
-
-      setStatus(statusRes.data);
-      setAccounts(accRes.data);
-      setConfig(configRes.data);
-      setTraffic(trafficRes.data);
-      setIsLiveApi(statusRes.isLiveApi);
-    } catch (err) {
-      console.error('Data load error:', err);
-    } finally {
-      setIsInitialLoading(false);
+    if (notificationTimer.current !== null) {
+      window.clearTimeout(notificationTimer.current);
     }
+    notificationTimer.current = window.setTimeout(() => {
+      notificationTimer.current = null;
+      setNotification(null);
+    }, 3000);
   };
 
+  // Initial load is cancellable so quick route changes and StrictMode cleanup
+  // do not update an unmounted dashboard.
   useEffect(() => {
-    loadInitialData();
-    // Poll status & traffic every 15 seconds
-    const interval = setInterval(() => {
-      api.getStatus().then((res) => {
-        setStatus(res.data);
-        setIsLiveApi(res.isLiveApi);
-      });
-      api.getTraffic().then((res) => {
-        setTraffic(res.data);
-      });
-    }, 15000);
+    let active = true;
+    const loadInitialData = async () => {
+      try {
+        const [statusRes, accRes, configRes, trafficRes] = await Promise.all([
+          api.getStatus(),
+          api.getAccounts(),
+          api.getConfig(),
+          api.getTraffic(),
+        ]);
+        if (!active) return;
+        setStatus(statusRes.data);
+        setAccounts(accRes.data);
+        setConfig(configRes.data);
+        setTraffic(trafficRes.data);
+        setIsLiveApi(statusRes.isLiveApi);
+      } catch (err) {
+        if (active) console.error('Data load error:', err);
+      } finally {
+        if (active) setIsInitialLoading(false);
+      }
+    };
+    void loadInitialData();
+    return () => { active = false; };
+  }, []);
 
-    return () => clearInterval(interval);
+  // Refresh without overlapping requests, and pause polling while the browser
+  // tab is hidden so background tabs do not keep waking the gateway.
+  useEffect(() => {
+    let active = true;
+    let polling = false;
+    let timer: number | null = null;
+
+    const scheduleNext = () => {
+      if (active && document.visibilityState === 'visible') {
+        timer = window.setTimeout(() => void refresh(), 15000);
+      }
+    };
+
+    const refresh = async () => {
+      if (!active || polling) return;
+      if (document.visibilityState !== 'visible') return;
+
+      polling = true;
+      try {
+        const [statusRes, trafficRes] = await Promise.all([
+          api.getStatus(),
+          api.getTraffic(),
+        ]);
+        if (!active) return;
+        setStatus(statusRes.data);
+        setIsLiveApi(statusRes.isLiveApi);
+        setTraffic(trafficRes.data);
+      } catch (err) {
+        if (active) console.warn('Dashboard refresh failed:', err);
+      } finally {
+        polling = false;
+        scheduleNext();
+      }
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState !== 'visible') {
+        if (timer !== null) window.clearTimeout(timer);
+        timer = null;
+        return;
+      }
+      if (timer !== null) window.clearTimeout(timer);
+      timer = null;
+      void refresh();
+    };
+
+    if (document.visibilityState === 'visible') {
+      timer = window.setTimeout(() => void refresh(), 15000);
+    }
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      active = false;
+      if (timer !== null) window.clearTimeout(timer);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, []);
+
+  useEffect(() => () => {
+    if (notificationTimer.current !== null) {
+      window.clearTimeout(notificationTimer.current);
+      notificationTimer.current = null;
+    }
   }, []);
 
   useEffect(() => {
@@ -117,8 +178,14 @@ export const DashboardApp: React.FC = () => {
     // overlay from their request's finally handler.
     if (!['overview', 'models', 'playground'].includes(currentTab) && !hasSelectedTrafficRange) {
       setIsPageSwitchLoading(false);
+      return;
     }
-  }, [currentTab]);
+
+    // Show the mascot while the page warms up, then reveal its local skeleton
+    // if a slow API call is still running. The whole app should never stay blocked.
+    const failsafe = window.setTimeout(() => setIsPageSwitchLoading(false), 8000);
+    return () => window.clearTimeout(failsafe);
+  }, [currentTab, hasSelectedTrafficRange]);
 
   const handlePageReady = (tab: NavTab) => {
     const segment = window.location.pathname.split('/')[2] as NavTab | undefined;
@@ -132,7 +199,7 @@ export const DashboardApp: React.FC = () => {
     setIsRefreshing(true);
     try {
       const { data, isLiveApi: live } = await api.refreshAccounts();
-      if (data && Array.isArray(data) && data.length > 0) {
+      if (Array.isArray(data)) {
         setAccounts(data);
       }
       setIsLiveApi(live);
@@ -156,9 +223,13 @@ export const DashboardApp: React.FC = () => {
   };
 
   const handleDeleteAccount = async (id: string) => {
-    const updated = await api.deleteAccount(id);
-    setAccounts(updated);
-    showNotification('Account removed from rotation pool.');
+    try {
+      const updated = await api.deleteAccount(id);
+      setAccounts(updated);
+      showNotification('Account removed from rotation pool.');
+    } catch (err) {
+      showNotification(err instanceof Error ? err.message : 'Failed to remove account.');
+    }
   };
 
   const handleSetDefaultAccount = async (id: string) => {
@@ -199,9 +270,9 @@ export const DashboardApp: React.FC = () => {
       {/* Main Content Pane */}
       <main className="flex-1 flex flex-col min-w-0">
         {/* Top Floating App Bar */}
-        <header className="h-16 border-b border-[#EAE5DE] px-6 sm:px-10 flex items-center justify-between bg-white/70 backdrop-blur-sm sticky top-0 z-20">
-          <div className="flex items-center gap-3">
-            <span key={currentTab} className="font-serif-editorial text-xl font-bold text-[#2A2723] capitalize dashboard-title-enter">
+        <header className="h-16 border-b border-[#EAE5DE] px-4 sm:px-10 flex items-center justify-between bg-white/70 backdrop-blur-sm md:sticky md:top-0 md:z-20">
+          <div className="flex min-w-0 items-center gap-2 sm:gap-3">
+            <span key={currentTab} className="truncate whitespace-nowrap font-serif-editorial text-base font-bold text-[#2A2723] capitalize dashboard-title-enter sm:text-xl">
               {currentTab === 'overview'
                 ? 'Overview'
                 : currentTab === 'accounts'
@@ -216,18 +287,18 @@ export const DashboardApp: React.FC = () => {
                 ? 'Traffic Monitor'
                 : 'Settings'}
             </span>
-            <span className="text-stone-300">/</span>
-            <span className="text-xs text-[#706B65]">geminirouter</span>
+            <span className="hidden text-stone-300 sm:inline">/</span>
+            <span className="hidden text-xs text-[#706B65] sm:inline">geminirouter</span>
           </div>
 
-          <div className="flex items-center gap-3">
+          <div className="flex shrink-0 items-center gap-2 sm:gap-3">
             {notification && (
               <div className="text-xs px-3 py-1.5 rounded-xl bg-[#FAF2EF] text-[#C25938] border border-[#F2DDD5] font-medium animate-in fade-in">
                 {notification}
               </div>
             )}
 
-            <div className="flex items-center gap-2 text-xs font-mono-code text-[#706B65] bg-[#FAF7F2] border border-[#EAE5DE] px-3 py-1.5 rounded-xl">
+            <div className="flex items-center gap-1.5 text-[10px] font-mono-code text-[#706B65] bg-[#FAF7F2] border border-[#EAE5DE] px-2 py-1.5 rounded-xl sm:gap-2 sm:px-3 sm:text-xs">
               <span className={`w-2 h-2 rounded-full ${status.isRunning ? 'bg-emerald-500 animate-pulse' : 'bg-stone-300'}`}></span>
               <span>127.0.0.1:{status.port || config.port}</span>
             </div>
@@ -274,7 +345,6 @@ export const DashboardApp: React.FC = () => {
 
           {currentTab === 'models' && (
             <ModelsPage
-              gatewayOnline={status.isRunning}
               onReady={() => handlePageReady('models')}
               onNavigateToGateway={() => navigateToTab('gateway')}
             />
