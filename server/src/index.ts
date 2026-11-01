@@ -1461,6 +1461,8 @@ export async function createServer(): Promise<{
     { id: 'gemini-3-pro', name: 'Gemini 3 Pro', provider: 'Google Gemini', family: 'gemini', contextLength: 1048576, maxOutputTokens: 65535 },
     { id: 'gemini-3-flash', name: 'Gemini 3 Flash', provider: 'Google Gemini', family: 'gemini', contextLength: 1048576, maxOutputTokens: 65535 },
     { id: 'gemini-3.1-pro', name: 'Gemini 3.1 Pro', provider: 'Google Gemini', family: 'gemini', contextLength: 1048576, maxOutputTokens: 65535 },
+    { id: 'gemini-3.1-flash-lite', name: 'Gemini 3.1 Flash Lite', provider: 'Google Gemini', family: 'gemini', contextLength: 1048576, maxOutputTokens: 65535 },
+    { id: 'gemini-3.5-flash-lite', name: 'Gemini 3.5 Flash Lite', provider: 'Google Gemini', family: 'gemini', contextLength: 1048576, maxOutputTokens: 65535 },
     { id: 'gemini-3-pro-image', name: 'Gemini 3 Pro Image', provider: 'Google Gemini', family: 'gemini-image', contextLength: 1048576, maxOutputTokens: 65535 },
     { id: 'gemini-3.8-flash-high', name: 'Gemini 3.8 Flash High', provider: 'Google Gemini', family: 'gemini', contextLength: 1048576, maxOutputTokens: 65535 },
     { id: 'claude-sonnet-4-5', name: 'Claude 4.5 Sonnet', provider: 'Anthropic Claude', family: 'claude', contextLength: 200000, maxOutputTokens: 65535 },
@@ -1474,7 +1476,11 @@ export async function createServer(): Promise<{
 
   // The current gateway model list may omit aliases that still accept real
   // completion requests. Expose only aliases verified against the live API.
-  const WEBSITE_MODEL_ALIASES = new Set(['gemini-3.8-flash-high']);
+  const WEBSITE_MODEL_ALIASES = new Set([
+    'gemini-3.1-flash-lite',
+    'gemini-3.5-flash-lite',
+    'gemini-3.8-flash-high',
+  ]);
   function includeWebsiteModelAliases(gatewayIds: string[]): string[] {
     const verifiedIds = MODEL_CATALOG
       .filter((model) => WEBSITE_MODEL_ALIASES.has(model.id))
