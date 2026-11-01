@@ -289,19 +289,22 @@ export function readMediaConfig(): MediaConfig {
   // Keep every chunk below the core's 15 MiB decoded-audio limit. 14 MiB
   // leaves room for container overhead regardless of the requested bitrate.
   const maxSecondsBySize = Math.floor((14 * 1024 * 1024 * 8) / (audioBitrateKbps * 1000));
-  const requestedChunkSeconds = envInt('MEDIA_CHUNK_SECONDS', 1800, 60, 3600);
+  // The API is sized for 10-20 minute windows. Callers that have a longer
+  // recording should split it themselves and send each part as its own
+  // request; this keeps one request responsive and fits the website's usage.
+  const requestedChunkSeconds = envInt('MEDIA_CHUNK_SECONDS', 20 * 60, 60, 3600);
   const chunkSeconds = Math.max(60, Math.min(requestedChunkSeconds, maxSecondsBySize));
 
   return {
     maxUploadBytes: envInt('MEDIA_MAX_UPLOAD_BYTES', 2 * 1024 * 1024 * 1024, 1024 * 1024, 8 * 1024 * 1024 * 1024),
-    maxDurationSeconds: envInt('MEDIA_MAX_DURATION_SECONDS', 4 * 60 * 60, 60, 12 * 60 * 60),
+    maxDurationSeconds: envInt('MEDIA_MAX_DURATION_SECONDS', 20 * 60, 60, 60 * 60),
     chunkSeconds,
     audioBitrate: `${audioBitrateKbps}k`,
     audioBitrateKbps,
     jsonBodyLimitBytes: envInt('MEDIA_JSON_BODY_LIMIT_BYTES', 96 * 1024 * 1024, 1024 * 1024, 512 * 1024 * 1024),
     chunkTimeoutMs: envInt('MEDIA_CHUNK_TIMEOUT_MS', 15 * 60 * 1000, 30_000, 60 * 60 * 1000),
     transcodeTimeoutMs: envInt('MEDIA_TRANSCODE_TIMEOUT_MS', 30 * 60 * 1000, 30_000, 2 * 60 * 60 * 1000),
-    totalTimeoutMs: envInt('MEDIA_TOTAL_TIMEOUT_MS', 2 * 60 * 60 * 1000, 0, 12 * 60 * 60 * 1000),
+    totalTimeoutMs: envInt('MEDIA_TOTAL_TIMEOUT_MS', 30 * 60 * 1000, 0, 2 * 60 * 60 * 1000),
     maxRetries: envInt('MEDIA_MAX_RETRIES', 2, 0, 5),
     ffmpegPath: process.env.FFMPEG_PATH || 'ffmpeg',
     ffprobePath: process.env.FFPROBE_PATH || 'ffprobe',
@@ -738,7 +741,7 @@ async function handleAudioTranscription(
         'duration_too_long',
         `Audio is ${formatDuration(probe.durationSeconds)}; the configured maximum is ${formatDuration(
           config.maxDurationSeconds,
-        )}.`,
+        )}. Split the recording into 10-20 minute parts and send each part as a separate request.`,
       );
     }
 

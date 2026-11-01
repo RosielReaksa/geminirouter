@@ -183,8 +183,8 @@ ${USER_DOMAIN} {
         -Server
     }
 
-    # Long media uploads go to the bridge, which chunks them before calling
-    # the core. The core cannot accept a 1-2 hour recording in one request.
+    # Audio uploads (10-20 minute windows) go to the bridge, which streams and
+    # transcodes them before calling the core.
     @media {
         path /v1/audio/* /v1/media/*
     }
@@ -197,8 +197,8 @@ ${USER_DOMAIN} {
             header_up X-Forwarded-Proto {scheme}
 
             transport http {
-                response_header_timeout 7200s
-                read_timeout 7200s
+                response_header_timeout 1800s
+                read_timeout 1800s
             }
         }
     }

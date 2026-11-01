@@ -11,11 +11,12 @@
 
 The API can also forward audio and video inputs to supported models. A separate
 dubbing website can send media to `/v1/chat/completions` and receive model text
-such as a transcript or translation. For long recordings, use
-`POST /v1/audio/transcriptions`: it streams a 1–2 hour upload, splits it into
-safe chunks, transcribes and translates in one call, and accepts any target
-language name or ISO code. See the [audio/video API guide](docs/MEDIA_API.md)
-for request examples, size limits, and current output limitations.
+such as a transcript or translation. For 10–20 minute windows, use
+`POST /v1/audio/transcriptions`: it streams the upload, transcribes and
+translates in one call, and accepts any target language name or ISO code.
+Longer recordings should be split by the website and sent as separate requests.
+See the [audio/video API guide](docs/MEDIA_API.md) for request examples, size
+limits, and current output limitations.
 
 ### Key Highlights
 - **100% Native & Lightweight**: Zero Docker overhead. Runs directly via standard Node.js (v22/v24), managed with systemd or PM2, consuming less than 150MB of RAM.
@@ -73,10 +74,10 @@ for request examples, size limits, and current output limitations.
 
 ---
 
-Long media uploads (`/v1/audio/*` and `/v1/media/*`) are routed to the bridge
-(port 3000) instead of the core. The bridge streams the upload to disk, chunks
-it with FFmpeg, and calls the core once per chunk so leases, quota checks, and
-account failover still apply.
+Audio uploads (`/v1/audio/*` and `/v1/media/*`) are routed to the bridge
+(port 3000) instead of the core. The bridge streams a 10–20 minute window to
+disk, transcodes it with FFmpeg, and calls the core through the normal lease,
+quota, and account-failover path.
 
 ## 🚀 Quick Start: VPS Automated Deployment
 

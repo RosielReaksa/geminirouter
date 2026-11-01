@@ -19,6 +19,7 @@ import {
   buildChunkPrompt,
   isModelFailureText,
   languageLabel,
+  readMediaConfig,
   splitStructuredOutput,
 } from '../src/mediaTranscription.js';
 
@@ -182,6 +183,23 @@ after(async () => {
     fs.rmSync(tempHome, { recursive: true, force: true });
   } catch {
     /* best effort */
+  }
+});
+
+test('default media window is 20 minutes per request', () => {
+  const oldChunk = process.env.MEDIA_CHUNK_SECONDS;
+  const oldMax = process.env.MEDIA_MAX_DURATION_SECONDS;
+  delete process.env.MEDIA_CHUNK_SECONDS;
+  delete process.env.MEDIA_MAX_DURATION_SECONDS;
+  try {
+    const config = readMediaConfig();
+    assert.equal(config.maxDurationSeconds, 1200);
+    assert.equal(config.chunkSeconds, 1200);
+  } finally {
+    if (oldChunk === undefined) delete process.env.MEDIA_CHUNK_SECONDS;
+    else process.env.MEDIA_CHUNK_SECONDS = oldChunk;
+    if (oldMax === undefined) delete process.env.MEDIA_MAX_DURATION_SECONDS;
+    else process.env.MEDIA_MAX_DURATION_SECONDS = oldMax;
   }
 });
 

@@ -62,14 +62,18 @@ Set `format` to the actual file format (`mp3`, `wav`, `ogg`, `flac`, `aac`,
 `m4a`, or `aiff`). The core validates audio bytes and rejects unsupported or
 mislabeled input.
 
-## Long recordings (1–2 hours or more)
+## 10–20 minute audio windows
 
-A single model request cannot carry a long recording: the core's audio validator
-caps decoded audio at 15 MiB, which is roughly 40 minutes at 48 kbps. Use the
-bridge-level audio endpoint for long files. It streams the upload to disk,
-transcodes it to mono 16 kHz MP3, splits it into safe chunks, and sends each
-chunk through the same lease/quota/failover path as `/v1/chat/completions`. One
-call returns the combined transcript and translation.
+Send one 10–20 minute recording per request. The core's audio validator caps
+decoded audio at 15 MiB (roughly 40 minutes at 48 kbps), so a 20-minute request
+fits comfortably in one chunk. The bridge-level endpoint streams the upload to
+disk, transcodes it to mono 16 kHz MP3, and sends it through the same
+lease/quota/failover path as `/v1/chat/completions`. One call returns the
+transcript and translation for that window.
+
+For a longer recording, split it in the website and send each part as a
+separate request. The default maximum is 20 minutes; a request over that limit
+is rejected with `duration_too_long` and a message telling the caller to split.
 
 | Route | Purpose |
 |---|---|
@@ -93,8 +97,9 @@ All three formats accept the same options:
 - `source_language` — optional source language hint (`en`, `French`, etc.).
 - `model` — defaults to `gemini-3.5-flash-lite`.
 - `response_format` — `json` (default) or `text`.
-- `chunk_seconds` — target chunk length, 60–3600 seconds; the server also
-  reduces it automatically if a chunk would exceed the core's audio limit.
+- `chunk_seconds` — target chunk length, 60–3600 seconds; default `1200`
+  (20 minutes). The server also reduces it automatically if a chunk would
+  exceed the core's audio limit.
 - `temperature`, `max_tokens`, `concurrency` (1–4 chunks in parallel).
 
 #### Multipart upload (recommended for large files)
@@ -250,15 +255,15 @@ hosted publicly.
 - `/v1/chat/completions` accepts bodies up to 64 MiB, matching the core's
   model-request limit. Base64 expands files by about one third. Keep inline
   audio at or below 15 MiB decoded and inline video around 20 MiB or smaller.
-- `/v1/audio/transcriptions` is the long-recording path. It streams uploads to
-  disk, so a 1–2 hour file is not limited by the JSON body size. The default
-  maximum is 2 GiB uploaded / 4 hours of audio, configurable with
-  `MEDIA_MAX_UPLOAD_BYTES` and `MEDIA_MAX_DURATION_SECONDS`. Chunks are kept
-  below the core's 15 MiB audio limit automatically.
-- A long synchronous request can take several minutes. Set the client and
-  reverse-proxy timeouts accordingly, or send smaller `chunk_seconds` values
-  from an async job worker. The shipped configs allow up to two hours for
-  `/v1/audio/*`.
+- `/v1/audio/transcriptions` is sized for 10–20 minute windows. The default
+  maximum is 20 minutes (`MEDIA_MAX_DURATION_SECONDS=1200`); longer input is
+  rejected with `duration_too_long`. Uploads are streamed to disk, so the JSON
+  body limit is not the constraint. Chunks stay below the core's 15 MiB audio
+  limit automatically.
+- A 20-minute request can still take several minutes of model time. Set the
+  client and reverse-proxy timeouts to at least 30 minutes, or send smaller
+  `chunk_seconds` values from an async job worker. The shipped configs allow
+  30 minutes for `/v1/audio/*`.
 - Model availability does not guarantee audio/video capability. Choose a model
   from `GET /v1/models` and test it with the actual media type before making it
   selectable in the dubbing app. The current model list does not advertise
