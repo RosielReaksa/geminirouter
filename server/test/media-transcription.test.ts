@@ -56,6 +56,7 @@ let appInstance: Awaited<ReturnType<typeof createServer>>['app'];
 const modelRequests: ModelRequest[] = [];
 const modelAuthHeaders: Array<string | undefined> = [];
 let failNextModelRequest = false;
+let nextCustomReply: string | null = null;
 
 const upstream = http.createServer((request, response) => {
   modelAuthHeaders.push(typeof request.headers.authorization === 'string' ? request.headers.authorization : undefined);
@@ -95,6 +96,10 @@ const upstream = http.createServer((request, response) => {
       return;
     }
 
+    const content =
+      nextCustomReply ?? `TRANSCRIPT:\nspoken line ${index}\nTRANSLATION:\ntranslated line ${index}`;
+    nextCustomReply = null;
+
     response.writeHead(200, {
       'Content-Type': 'application/json',
       'x-antigravity-account-id': 'media-acc-1',
@@ -107,7 +112,7 @@ const upstream = http.createServer((request, response) => {
           {
             message: {
               role: 'assistant',
-              content: `TRANSCRIPT:\nspoken line ${index}\nTRANSLATION:\ntranslated line ${index}`,
+              content,
             },
           },
         ],
@@ -361,6 +366,38 @@ test(
     assert.match(body.text, /spoken line 2/);
     assert.doesNotMatch(body.text, /could not complete a tool call/);
     failNextModelRequest = false;
+  },
+);
+
+test(
+  'prompt-first request returns the raw model answer without task semantics',
+  { skip: !hasFfmpeg },
+  async () => {
+    modelRequests.length = 0;
+    modelAuthHeaders.length = 0;
+    nextCustomReply = 'BANANA';
+
+    const form = new FormData();
+    form.append('file', new Blob([makeWav(1)], { type: 'audio/wav' }), 'prompt-first.wav');
+    form.append('model', 'gemini-3.5-flash-lite');
+    form.append('prompt', 'Answer with the single word BANANA.');
+
+    const response = await fetch(`http://127.0.0.1:${bridgePort}/v1/audio/transcriptions`, {
+      method: 'POST',
+      headers: authHeaders(),
+      body: form,
+    });
+
+    const rawBody = await response.text();
+    assert.equal(response.status, 200, rawBody);
+    const body: any = JSON.parse(rawBody);
+    assert.equal(body.task, 'custom');
+    assert.equal(body.text, 'BANANA');
+    assert.equal(body.transcript, undefined);
+    assert.equal(body.translation, undefined);
+    assert.equal(modelRequests.length, 1);
+    const textBlock = modelRequests[0].messages[0].content.find((block) => block.type === 'text');
+    assert.equal(textBlock?.text, 'Answer with the single word BANANA.');
   },
 );
 

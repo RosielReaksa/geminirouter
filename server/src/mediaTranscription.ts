@@ -30,7 +30,7 @@ export const MEDIA_ROUTE_PATHS = [
 
 export const MEDIA_LANGUAGES_PATH = '/v1/audio/languages';
 
-export type MediaTask = 'transcribe' | 'translate' | 'both';
+export type MediaTask = 'custom' | 'transcribe' | 'translate' | 'both';
 export type MediaResponseFormat = 'json' | 'text';
 
 export interface MediaConfig {
@@ -934,6 +934,10 @@ function parseMediaOptions(
   let task: MediaTask;
   if (requestedTask === 'translate' || requestedTask === 'transcribe' || requestedTask === 'both') {
     task = requestedTask;
+  } else if (prompt) {
+    // Prompt-first: the caller's own instruction controls the answer. The
+    // website must not impose a transcript/translation result shape.
+    task = 'custom';
   } else if (routeOptions.forceTranslate) {
     task = 'translate';
   } else if (targetLanguage) {
@@ -1559,7 +1563,14 @@ function buildResponse(input: {
   let transcript: string | undefined;
   let translation: string | undefined;
 
-  if (options.task === 'both') {
+  if (options.task === 'custom') {
+    // Prompt-first: return exactly the model answer for the caller's prompt.
+    // Only expose transcript/translation if the model happened to use markers.
+    text = ordered.map((result) => result.content).join('\n\n').trim();
+    const parsed = splitStructuredOutput(text);
+    transcript = parsed.transcript;
+    translation = parsed.translation;
+  } else if (options.task === 'both') {
     if (parsedAll) {
       transcript = ordered.map((result) => result.transcript || '').join('\n\n').trim();
       translation = ordered.map((result) => result.translation || '').join('\n\n').trim();

@@ -196,10 +196,9 @@ export const DocsPage: React.FC = () => {
                 <code className="px-1.5 py-0.5 rounded bg-[#F0EBE3] text-[12.5px] font-mono-code text-[#A8462A]">
                   POST /v1/audio/transcriptions
                 </code>
-                . It streams the upload and returns the transcript/translation for that window.
-                Split longer files in the website and send each part separately. Any target
-                language name or ISO code works — Japanese, Spanish, Thai, Khmer, Arabic,
-                Portuguese, and so on.
+                . It streams the upload and returns the model's answer for the user's own
+                prompt. The website does not need to set a task or target language. Split
+                longer files in the website and send each part separately.
               </p>
               <Code
                 title="audio · server-side JavaScript"
@@ -229,9 +228,8 @@ const translatedDialogue = result.choices?.[0]?.message?.content;`}
                 code={`const form = new FormData();
 form.append("file", new Blob([await fs.readFile(audioPath)]), "episode.mp3");
 form.append("model", process.env.GEMINIROUTER_MODEL);
-form.append("task", "both");
-form.append("target_language", "ja"); // any language name or ISO code: es, th, km, ar, ...
-form.append("prompt", "Transcribe and translate. Keep speaker turns on separate lines.");
+// Pass the user's own prompt unchanged; no task/target_language is required.
+form.append("prompt", userPrompt);
 
 const response = await fetch("${origin}/v1/audio/transcriptions", {
   method: "POST",

@@ -75,6 +75,13 @@ For a longer recording, split it in the website and send each part as a
 separate request. The default maximum is 20 minutes; a request over that limit
 is rejected with `duration_too_long` and a message telling the caller to split.
 
+### Prompt-first requests
+
+Put the user's own instruction in `prompt`. The endpoint sends that prompt with
+the audio and returns the model's answer in `text`; it does not force a
+transcript/translation shape or add website-authored instructions. `task` and
+`target_language` are optional fallbacks for callers that do not send a prompt.
+
 | Route | Purpose |
 |---|---|
 | `POST /v1/audio/transcriptions` | Transcribe, translate, or do both in one call. |
@@ -86,14 +93,17 @@ is rejected with `duration_too_long` and a message telling the caller to split.
 
 All three formats accept the same options:
 
-- `prompt` — your instruction for every chunk. If omitted, the endpoint builds
-  a prompt from `task`, `source_language`, and `target_language`.
-- `task` — `transcribe`, `translate`, or `both`. Defaults to `both` when
-  `target_language` is present, otherwise `transcribe`.
-- `target_language` — any language name or ISO 639-1/639-2 code. Examples:
-  `Spanish`, `es`, `Japanese`, `ja`, `Thai`, `th`, `Khmer`, `km`, `pt-BR`,
-  `zh-TW`, `Arabic`, `ar`. The endpoint does not restrict this to a fixed list;
-  values it does not recognize are passed to the model unchanged.
+- `prompt` — the user's own instruction, sent with the audio. This is the
+  primary field: the model returns whatever the prompt asks for. If omitted,
+  the endpoint builds a fallback prompt from `task` and `target_language`.
+- `task` — optional fallback: `transcribe`, `translate`, or `both`. When a
+  `prompt` is present and `task` is omitted, the response is `task: "custom"` and
+  `text` is the raw model answer. If no prompt is sent, `task` defaults to
+  `both` when `target_language` is present, otherwise `transcribe`.
+- `target_language` — optional fallback for the built-in prompts. Any language
+  name or ISO 639-1/639-2 code works: `Spanish`, `es`, `Japanese`, `ja`,
+  `Thai`, `th`, `Khmer`, `km`, `pt-BR`, `zh-TW`, `Arabic`, `ar`. It is not an
+  allow-list; unknown values are passed to the model unchanged.
 - `source_language` — optional source language hint (`en`, `French`, etc.).
 - `model` — defaults to `gemini-3.5-flash-lite`.
 - `response_format` — `json` (default) or `text`.
@@ -105,13 +115,22 @@ All three formats accept the same options:
 #### Multipart upload (recommended for large files)
 
 ```sh
+# The user's own prompt. No task/target_language is set by the website.
 curl -X POST "$GEMINIROUTER_URL/v1/audio/transcriptions" \
   -H "Authorization: Bearer $GEMINIROUTER_API_KEY" \
   -F "file=@episode.mp3" \
-  -F "model=gemini-3.5-flash-lite" \
+  -F "prompt=Summarize this recording in Japanese, list the speakers, and include the key points."
+```
+
+If the caller does not send a prompt, the optional built-in transcript+translation
+mode still works:
+
+```sh
+curl -X POST "$GEMINIROUTER_URL/v1/audio/transcriptions" \
+  -H "Authorization: Bearer $GEMINIROUTER_API_KEY" \
+  -F "file=@episode.mp3" \
   -F "task=both" \
-  -F "target_language=ja" \
-  -F "prompt=Transcribe the dialogue and translate it into Japanese. Keep speaker turns."
+  -F "target_language=ja"
 ```
 
 #### Raw binary upload
@@ -145,6 +164,37 @@ const response = await fetch(`${GEMINIROUTER_URL}/v1/audio/transcriptions`, {
 });
 ```
 
+#### Standard LLM chat with audio
+
+If the website already uses the OpenAI chat shape, it can pass the user's prompt
+and audio unchanged to `/v1/chat/completions`:
+
+```js
+const response = await fetch(`${GEMINIROUTER_URL}/v1/chat/completions`, {
+  method: 'POST',
+  headers: {
+    Authorization: `Bearer ${GEMINIROUTER_API_KEY}`,
+    'Content-Type': 'application/json',
+  },
+  body: JSON.stringify({
+    model: 'gemini-3.5-flash-lite',
+    stream: false,
+    messages: [{
+      role: 'user',
+      content: [
+        { type: 'text', text: userPrompt },
+        { type: 'input_audio', input_audio: { data: audioBase64, format: 'mp3' } },
+      ],
+    }],
+  }),
+});
+const answer = (await response.json()).choices?.[0]?.message?.content;
+```
+
+This path sends the prompt verbatim. Use compressed 10–20 minute audio
+(≤15 MiB decoded); for larger or unsupported files, use
+`/v1/audio/transcriptions` with the same `prompt`.
+
 ### Response
 
 ```json
@@ -177,7 +227,10 @@ const response = await fetch(`${GEMINIROUTER_URL}/v1/audio/transcriptions`, {
 }
 ```
 
-With `response_format=text`, the response body is the plain `text` value.
+For prompt-first requests, `task` is `"custom"` and `text` is the raw model
+answer. `transcript` and `translation` are included only if the model happened
+to return those section markers. With `response_format=text`, the response body
+is the plain `text` value.
 If a chunk still fails after retries, the error includes
 `details.completed_chunks` and `details.partial_text` so the caller can keep the
 work that succeeded instead of losing the whole recording. Always use a
