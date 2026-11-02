@@ -1502,14 +1502,17 @@ async function transcribeChunkWithRetry(
           502,
           failed ? 'model_failure_text' : 'empty_model_response',
           failed
-            ? `Chunk ${chunk.index + 1} returned a model failure message instead of a transcript.`
+            ? `Chunk ${chunk.index + 1} returned a model failure message instead of a transcript. Try a simpler prompt or a different model.`
             : `Chunk ${chunk.index + 1} returned an empty model response.`,
           {
             chunkIndex: chunk.index,
             ...(failed ? { model_text: content.slice(0, 1000) } : {}),
           },
         );
-        if (attempt < attempts - 1) {
+        // A tool-call failure text is usually deterministic. Retry it once,
+        // then fail fast instead of spending the full three-attempt budget.
+        const retryBudget = failed ? 2 : attempts;
+        if (attempt + 1 < retryBudget) {
           await sleepWithSignal(backoffMs(attempt), signal);
           continue;
         }

@@ -434,6 +434,7 @@ export class ApiClient {
     systemPrompt?: string;
     temperature: number;
     maxTokens: number;
+    onUploadProgress?: (percent: number) => void;
   }): Promise<PlaygroundResult> {
     const form = new FormData();
     form.append('file', input.file, input.file.name);
@@ -443,31 +444,40 @@ export class ApiClient {
     form.append('temperature', String(input.temperature));
     form.append('maxTokens', String(input.maxTokens));
 
-    const controller = new AbortController();
-    const timeoutId = window.setTimeout(() => controller.abort(), 2 * 60 * 60 * 1000);
-    try {
-      const response = await fetch('/api/playground/media', {
-        method: 'POST',
-        headers: { ...authApi.headers() },
-        body: form,
-        signal: controller.signal,
-      });
-      const data = await response.json().catch(() => null) as (PlaygroundResult & { error?: string }) | null;
-      if (response.status === 401) {
-        window.dispatchEvent(new CustomEvent('geminirouter:unauthorized'));
+    const startedAt = Date.now();
+    return new Promise<PlaygroundResult>((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', '/api/playground/media');
+      const headers = authApi.headers();
+      for (const [name, value] of Object.entries(headers)) {
+        xhr.setRequestHeader(name, value);
       }
-      if (!response.ok || !data) {
-        throw new Error(data?.error || `Large media request failed (HTTP ${response.status}).`);
-      }
-      return data;
-    } catch (error) {
-      if (controller.signal.aborted) {
-        throw new Error('The large media request timed out after 2 hours.');
-      }
-      throw error instanceof Error ? error : new Error('Could not upload the media.');
-    } finally {
-      window.clearTimeout(timeoutId);
-    }
+      xhr.timeout = 2 * 60 * 60 * 1000;
+      xhr.upload.onprogress = (event) => {
+        if (!event.lengthComputable) return;
+        input.onUploadProgress?.(Math.min(100, Math.round((event.loaded / event.total) * 100)));
+      };
+      xhr.onload = () => {
+        let data: (PlaygroundResult & { error?: string }) | null = null;
+        try {
+          data = xhr.responseText ? JSON.parse(xhr.responseText) : null;
+        } catch {
+          data = null;
+        }
+        if (xhr.status === 401) {
+          window.dispatchEvent(new CustomEvent('geminirouter:unauthorized'));
+        }
+        if (xhr.status < 200 || xhr.status >= 300 || !data) {
+          reject(new Error(data?.error || `Large media request failed (HTTP ${xhr.status}).`));
+          return;
+        }
+        resolve({ ...data, latencyMs: Date.now() - startedAt });
+      };
+      xhr.onerror = () => reject(new Error('Could not upload the media.'));
+      xhr.ontimeout = () => reject(new Error('The large media request timed out after 2 hours.'));
+      xhr.onabort = () => reject(new Error('The large media request was cancelled.'));
+      xhr.send(form);
+    });
   }
 
   // Helper: Delete account

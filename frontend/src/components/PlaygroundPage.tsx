@@ -164,6 +164,12 @@ const ResultCard: React.FC<{
     {result && !loading && (
       <div className="flex flex-wrap items-center gap-4 px-5 py-3 border-t border-[#F0ECE6] text-[11px] text-[#8D867D]">
         <span className="inline-flex items-center gap-1"><Timer className="w-3.5 h-3.5" /> {result.latencyMs} ms</span>
+        {typeof result.timings?.transcode_ms === 'number' && (
+          <span>audio {Math.max(1, Math.round(result.timings.transcode_ms / 1000))}s</span>
+        )}
+        {typeof result.timings?.model_ms === 'number' && (
+          <span>model {Math.max(1, Math.round(result.timings.model_ms / 1000))}s</span>
+        )}
         <span>{formatTokens(result.usage?.prompt_tokens)} input tokens</span>
         <span>{formatTokens(result.usage?.completion_tokens)} output tokens</span>
         {result.media && (
@@ -191,6 +197,8 @@ export const PlaygroundPage: React.FC<{ onReady: () => void }> = ({ onReady }) =
   const [maxTokens, setMaxTokens] = useState(saved?.maxTokens ?? 1024);
   const [results, setResults] = useState<Record<string, PlaygroundResult>>(saved?.results ?? {});
   const [running, setRunning] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<number | null>(null);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [mediaFile, setMediaFile] = useState<File | null>(cachedPlaygroundFile);
   const [mediaPreviewUrl, setMediaPreviewUrl] = useState<string | null>(() =>
     cachedPlaygroundFile ? URL.createObjectURL(cachedPlaygroundFile) : null,
@@ -254,6 +262,18 @@ export const PlaygroundPage: React.FC<{ onReady: () => void }> = ({ onReady }) =
     }
   }, [prompt, systemPrompt, showSystemPrompt, model, compareEnabled, compareModel, temperature, maxTokens, results]);
 
+  useEffect(() => {
+    if (!running) {
+      setElapsedSeconds(0);
+      return;
+    }
+    const startedAt = Date.now();
+    const timer = window.setInterval(() => {
+      setElapsedSeconds(Math.floor((Date.now() - startedAt) / 1000));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [running]);
+
   const compareOptions = useMemo(() => models.filter((item) => item.id !== model), [models, model]);
   const mediaIsVideo = mediaFile ? isVideoFile(mediaFile) : false;
   const mediaInlineLimit = mediaIsVideo ? MAX_VIDEO_BYTES : MAX_AUDIO_BYTES;
@@ -301,31 +321,38 @@ export const PlaygroundPage: React.FC<{ onReady: () => void }> = ({ onReady }) =
     if (mediaFile && mediaIsLarge) {
       setRunning(true);
       setResults({});
-      await Promise.all(selected.map(async (selectedModel) => {
-        const startedAt = Date.now();
-        try {
-          const result = await api.playgroundMediaRequest({
-            file: mediaFile,
-            model: selectedModel,
-            prompt: prompt.trim(),
-            systemPrompt: systemPrompt.trim() || undefined,
-            temperature,
-            maxTokens,
-          });
-          setResults((current) => ({ ...current, [selectedModel]: result }));
-        } catch (error) {
-          setResults((current) => ({
-            ...current,
-            [selectedModel]: {
-              ok: false,
+      setUploadProgress(0);
+      try {
+        await Promise.all(selected.map(async (selectedModel) => {
+          const startedAt = Date.now();
+          try {
+            const result = await api.playgroundMediaRequest({
+              file: mediaFile,
               model: selectedModel,
-              latencyMs: Date.now() - startedAt,
-              error: error instanceof Error ? error.message : 'The large media request failed.',
-            },
-          }));
-        }
-      }));
-      setRunning(false);
+              prompt: prompt.trim(),
+              systemPrompt: systemPrompt.trim() || undefined,
+              temperature,
+              maxTokens,
+              onUploadProgress: (percent) =>
+                setUploadProgress((current) => Math.max(current ?? 0, percent)),
+            });
+            setResults((current) => ({ ...current, [selectedModel]: result }));
+          } catch (error) {
+            setResults((current) => ({
+              ...current,
+              [selectedModel]: {
+                ok: false,
+                model: selectedModel,
+                latencyMs: Date.now() - startedAt,
+                error: error instanceof Error ? error.message : 'The large media request failed.',
+              },
+            }));
+          }
+        }));
+      } finally {
+        setUploadProgress(null);
+        setRunning(false);
+      }
       return;
     }
 
@@ -563,10 +590,28 @@ export const PlaygroundPage: React.FC<{ onReady: () => void }> = ({ onReady }) =
             <div className="flex gap-2 pt-1">
               <button type="submit" disabled={(!prompt.trim() && !mediaFile) || !model || running || modelsLoading} className="flex-1 inline-flex items-center justify-center gap-2 rounded-xl bg-[#C25938] px-4 py-2.5 text-sm font-semibold text-white hover:bg-[#B24E2E] disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
                 {running ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4 fill-current" />}
-                {running ? 'Running…' : compareEnabled ? 'Run comparison' : 'Run prompt'}
+                {running
+                  ? uploadProgress !== null && uploadProgress < 100
+                    ? `Uploading… ${uploadProgress}%`
+                    : `Running… ${elapsedSeconds}s`
+                  : compareEnabled ? 'Run comparison' : 'Run prompt'}
               </button>
               <button type="button" onClick={clearPrompt} title="Clear prompt and results" className="rounded-xl border border-[#EAE5DE] bg-white px-3 text-[#706B65] hover:text-[#C25938] hover:bg-[#F8F5F0]" aria-label="Clear prompt and results"><RotateCcw className="w-4 h-4" /></button>
             </div>
+
+            {running && uploadProgress !== null && uploadProgress < 100 && (
+              <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-[#F2ECE4]">
+                <div
+                  className="h-full rounded-full bg-[#C25938] transition-[width] duration-300"
+                  style={{ width: `${uploadProgress}%` }}
+                />
+              </div>
+            )}
+            {running && uploadProgress === 100 && (
+              <p className="mt-2 text-[11px] text-[#8D867D]">
+                Upload complete; the server is processing the media…
+              </p>
+            )}
           </aside>
         </div>
       </form>

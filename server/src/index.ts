@@ -2066,6 +2066,7 @@ export async function createServer(): Promise<{
             sizeBytes: upload.sizeBytes,
           },
           chunks: data.chunk_count,
+          timings: data.timings,
           note: video
             ? 'Large video is analyzed from its audio track; visual frames are not included.'
             : undefined,

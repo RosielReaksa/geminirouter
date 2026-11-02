@@ -301,6 +301,7 @@ export interface PlaygroundResult {
   };
   media?: { kind: 'audio' | 'video'; filename: string; sizeBytes: number };
   chunks?: number;
+  timings?: { transcode_ms?: number; model_ms?: number; total_ms?: number };
   note?: string;
   error?: string;
   httpStatus?: number | null;
