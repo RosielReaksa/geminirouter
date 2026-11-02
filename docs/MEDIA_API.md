@@ -62,18 +62,19 @@ Set `format` to the actual file format (`mp3`, `wav`, `ogg`, `flac`, `aac`,
 `m4a`, or `aiff`). The core validates audio bytes and rejects unsupported or
 mislabeled input.
 
-## 10–20 minute audio windows
+## 10–20 minute windows (up to 2 hours for large files)
 
-Send one 10–20 minute recording per request. The core's audio validator caps
-decoded audio at 15 MiB (roughly 40 minutes at 48 kbps), so a 20-minute request
-fits comfortably in one chunk. The bridge-level endpoint streams the upload to
-disk, transcodes it to mono 16 kHz MP3, and sends it through the same
-lease/quota/failover path as `/v1/chat/completions`. One call returns the
-transcript and translation for that window.
+10–20 minute windows are the recommended unit for the website. The core's
+audio validator caps decoded audio at 15 MiB (roughly 40 minutes at 48 kbps),
+so each window fits comfortably in one chunk. The bridge-level endpoint streams
+the upload to disk, transcodes it to mono 16 kHz MP3, and sends each 20-minute
+chunk through the same lease/quota/failover path as `/v1/chat/completions`. One
+call returns the transcript and translation for that window.
 
-For a longer recording, split it in the website and send each part as a
-separate request. The default maximum is 20 minutes; a request over that limit
-is rejected with `duration_too_long` and a message telling the caller to split.
+The playground's large-media path and the API accept up to **2 hours** per
+request; the server splits it into 20-minute chunks automatically. The website
+can still split at 10–20 minutes for faster responses. A request over the
+2-hour maximum is rejected with `duration_too_long`.
 
 ### Prompt-first requests
 
@@ -308,15 +309,13 @@ hosted publicly.
 - `/v1/chat/completions` accepts bodies up to 64 MiB, matching the core's
   model-request limit. Base64 expands files by about one third. Keep inline
   audio at or below 15 MiB decoded and inline video around 20 MiB or smaller.
-- `/v1/audio/transcriptions` is sized for 10–20 minute windows. The default
-  maximum is 20 minutes (`MEDIA_MAX_DURATION_SECONDS=1200`); longer input is
-  rejected with `duration_too_long`. Uploads are streamed to disk, so the JSON
-  body limit is not the constraint. Chunks stay below the core's 15 MiB audio
-  limit automatically.
-- A 20-minute request can still take several minutes of model time. Set the
-  client and reverse-proxy timeouts to at least 30 minutes, or send smaller
-  `chunk_seconds` values from an async job worker. The shipped configs allow
-  30 minutes for `/v1/audio/*`.
+- `/v1/audio/transcriptions` recommends 10–20 minute windows and accepts up
+  to 2 hours (`MEDIA_MAX_DURATION_SECONDS=7200`). Uploads are streamed to disk,
+  so the JSON body limit is not the constraint. Chunks stay below the core's
+  15 MiB audio limit automatically.
+- Large requests can take many minutes. Set the client and reverse-proxy
+  timeouts to at least 30 minutes for short windows and up to 2 hours for the
+  largest files. The shipped configs allow 2 hours for `/v1/audio/*`.
 - Model availability does not guarantee audio/video capability. Choose a model
   from `GET /v1/models` and test it with the actual media type before making it
   selectable in the dubbing app. The current model list does not advertise

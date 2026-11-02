@@ -14,8 +14,9 @@ dubbing website can send media to `/v1/chat/completions` and receive model text
 such as a transcript or translation. For 10–20 minute windows, use
 `POST /v1/audio/transcriptions`: the caller sends the user's own prompt with the
 audio, and the model returns that answer. The website does not need to set a
-task or target language. Longer recordings should be split by the website and
-sent as separate requests.
+task or target language. The endpoint also accepts up to 2 hours per request for
+large files; the website can split into 10–20 minute windows for faster
+responses.
 See the [audio/video API guide](docs/MEDIA_API.md) for request examples, size
 limits, and current output limitations.
 

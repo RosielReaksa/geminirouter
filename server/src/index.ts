@@ -27,6 +27,7 @@ import {
   readMediaConfig,
   registerMediaBodyParsers,
   registerMediaRoutes,
+  takeMediaUpload,
 } from './mediaTranscription.js';
 
 import { fileURLToPath } from 'node:url';
@@ -1970,6 +1971,119 @@ export async function createServer(): Promise<{
       });
     }
   });
+
+  // 13b. POST /api/playground/media - large audio/video attachment.
+  // The inline chat path is limited by the core's 15 MiB audio / ~20 MiB video
+  // validators. Large files are streamed to disk and sent through the chunked
+  // transcription pipeline instead. Large video uses its audio track.
+  app.post(
+    '/api/playground/media',
+    { bodyLimit: 2 * 1024 * 1024 * 1024 },
+    async (request, reply) => {
+      const upload = takeMediaUpload(request);
+      const startedAt = Date.now();
+      if (!upload) {
+        return reply.code(400).send({ ok: false, error: 'Attach an audio or video file.' });
+      }
+      try {
+        if (upload.error) {
+          return reply.code(upload.error.statusCode).send({ ok: false, error: upload.error.message });
+        }
+        if (!upload.filePath) {
+          return reply.code(400).send({ ok: false, error: 'Attach an audio or video file.' });
+        }
+
+        const fields = upload.fields || {};
+        const model = (fields.model || process.env.MEDIA_DEFAULT_MODEL || 'gemini-3.5-flash-lite').trim();
+        const userPrompt = (fields.prompt || '').trim();
+        const systemPrompt = (fields.systemPrompt || '').trim();
+        const video = String(upload.mimeType || '').toLowerCase().startsWith('video/');
+        const prompt =
+          [systemPrompt, userPrompt].filter(Boolean).join('\n\n') ||
+          (video
+            ? 'Describe this video in detail. Include the spoken dialogue, the key events, and any on-screen text.'
+            : 'Describe this audio in detail. If there is speech, transcribe it and summarize the key points.');
+
+        const requestedTemperature = Number.parseFloat(fields.temperature || '');
+        const requestedMaxTokens = Number.parseInt(fields.maxTokens || '', 10);
+        const address = app.server.address();
+        const mediaPort =
+          address && typeof address === 'object' && 'port' in address && address.port
+            ? address.port
+            : PORT;
+        const { apiKey } = resolveGateway();
+
+        const form = new FormData();
+        const blob = await fs.openAsBlob(upload.filePath, {
+          type: upload.mimeType || 'application/octet-stream',
+        });
+        form.append('file', blob, upload.filename);
+        form.append('prompt', prompt);
+        form.append('model', model);
+        if (Number.isFinite(requestedTemperature)) {
+          form.append('temperature', String(Math.max(0, Math.min(2, requestedTemperature))));
+        }
+        if (Number.isFinite(requestedMaxTokens)) {
+          form.append('max_tokens', String(Math.max(1, Math.min(32768, requestedMaxTokens))));
+        }
+
+        const response = await fetch(`http://127.0.0.1:${mediaPort}/v1/audio/transcriptions`, {
+          method: 'POST',
+          headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+          body: form,
+          signal: AbortSignal.timeout(2 * 60 * 60 * 1000),
+        });
+        const data: any = await response.json().catch(() => null);
+        if (!response.ok || !data) {
+          return reply.code(response.status >= 400 ? response.status : 502).send({
+            ok: false,
+            model,
+            latencyMs: Date.now() - startedAt,
+            error:
+              data?.error?.message ||
+              data?.message ||
+              `Large-media processing failed (HTTP ${response.status}).`,
+          });
+        }
+
+        const usage = data.usage
+          ? {
+              prompt_tokens: data.usage.promptTokens,
+              completion_tokens: data.usage.completionTokens,
+              total_tokens: data.usage.totalTokens,
+            }
+          : undefined;
+
+        return {
+          ok: true,
+          model,
+          response: data.text || '(empty response)',
+          latencyMs: Date.now() - startedAt,
+          usage,
+          media: {
+            kind: video ? 'video' : 'audio',
+            filename: upload.filename,
+            sizeBytes: upload.sizeBytes,
+          },
+          chunks: data.chunk_count,
+          note: video
+            ? 'Large video is analyzed from its audio track; visual frames are not included.'
+            : undefined,
+        };
+      } catch (error: any) {
+        return reply.code(503).send({
+          ok: false,
+          error: `Large-media processing failed: ${error?.message || String(error)}`,
+        });
+      } finally {
+        try {
+          fs.rmSync(upload.tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+        } catch {
+          /* best effort */
+        }
+      }
+    },
+  );
 
   // 14. Core process control endpoints
   app.post('/api/core/start', async () => {

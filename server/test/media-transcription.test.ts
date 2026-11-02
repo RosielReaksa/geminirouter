@@ -191,14 +191,14 @@ after(async () => {
   }
 });
 
-test('default media window is 20 minutes per request', () => {
+test('media chunks default to 20 minutes with a 2-hour maximum', () => {
   const oldChunk = process.env.MEDIA_CHUNK_SECONDS;
   const oldMax = process.env.MEDIA_MAX_DURATION_SECONDS;
   delete process.env.MEDIA_CHUNK_SECONDS;
   delete process.env.MEDIA_MAX_DURATION_SECONDS;
   try {
     const config = readMediaConfig();
-    assert.equal(config.maxDurationSeconds, 1200);
+    assert.equal(config.maxDurationSeconds, 7200);
     assert.equal(config.chunkSeconds, 1200);
   } finally {
     if (oldChunk === undefined) delete process.env.MEDIA_CHUNK_SECONDS;

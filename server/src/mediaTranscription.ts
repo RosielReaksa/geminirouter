@@ -30,6 +30,10 @@ export const MEDIA_ROUTE_PATHS = [
 
 export const MEDIA_LANGUAGES_PATH = '/v1/audio/languages';
 
+// Extra upload paths that need the streaming body parser but are not public
+// API model routes. The playground uses this for large files.
+const EXTRA_MEDIA_UPLOAD_PATHS = ['/api/playground/media'];
+
 export type MediaTask = 'custom' | 'transcribe' | 'translate' | 'both';
 export type MediaResponseFormat = 'json' | 'text';
 
@@ -289,22 +293,22 @@ export function readMediaConfig(): MediaConfig {
   // Keep every chunk below the core's 15 MiB decoded-audio limit. 14 MiB
   // leaves room for container overhead regardless of the requested bitrate.
   const maxSecondsBySize = Math.floor((14 * 1024 * 1024 * 8) / (audioBitrateKbps * 1000));
-  // The API is sized for 10-20 minute windows. Callers that have a longer
-  // recording should split it themselves and send each part as its own
-  // request; this keeps one request responsive and fits the website's usage.
+  // 10-20 minute windows are the recommended unit for the website. The
+  // endpoint also accepts up to 2 hours for the playground's large-media path;
+  // chunks are still kept at 20 minutes by default.
   const requestedChunkSeconds = envInt('MEDIA_CHUNK_SECONDS', 20 * 60, 60, 3600);
   const chunkSeconds = Math.max(60, Math.min(requestedChunkSeconds, maxSecondsBySize));
 
   return {
     maxUploadBytes: envInt('MEDIA_MAX_UPLOAD_BYTES', 2 * 1024 * 1024 * 1024, 1024 * 1024, 8 * 1024 * 1024 * 1024),
-    maxDurationSeconds: envInt('MEDIA_MAX_DURATION_SECONDS', 20 * 60, 60, 60 * 60),
+    maxDurationSeconds: envInt('MEDIA_MAX_DURATION_SECONDS', 2 * 60 * 60, 60, 4 * 60 * 60),
     chunkSeconds,
     audioBitrate: `${audioBitrateKbps}k`,
     audioBitrateKbps,
     jsonBodyLimitBytes: envInt('MEDIA_JSON_BODY_LIMIT_BYTES', 96 * 1024 * 1024, 1024 * 1024, 512 * 1024 * 1024),
     chunkTimeoutMs: envInt('MEDIA_CHUNK_TIMEOUT_MS', 15 * 60 * 1000, 30_000, 60 * 60 * 1000),
     transcodeTimeoutMs: envInt('MEDIA_TRANSCODE_TIMEOUT_MS', 30 * 60 * 1000, 30_000, 2 * 60 * 60 * 1000),
-    totalTimeoutMs: envInt('MEDIA_TOTAL_TIMEOUT_MS', 30 * 60 * 1000, 0, 2 * 60 * 60 * 1000),
+    totalTimeoutMs: envInt('MEDIA_TOTAL_TIMEOUT_MS', 2 * 60 * 60 * 1000, 0, 4 * 60 * 60 * 1000),
     maxRetries: envInt('MEDIA_MAX_RETRIES', 2, 0, 5),
     ffmpegPath: process.env.FFMPEG_PATH || 'ffmpeg',
     ffprobePath: process.env.FFPROBE_PATH || 'ffprobe',
@@ -315,7 +319,17 @@ export function readMediaConfig(): MediaConfig {
 export function isMediaUploadPath(url: string | undefined): boolean {
   if (!url) return false;
   const pathname = url.split('?')[0];
-  return (MEDIA_ROUTE_PATHS as readonly string[]).includes(pathname);
+  return (
+    (MEDIA_ROUTE_PATHS as readonly string[]).includes(pathname) ||
+    EXTRA_MEDIA_UPLOAD_PATHS.includes(pathname)
+  );
+}
+
+/** Take the streamed upload for a route that wants to process it itself. */
+export function takeMediaUpload(request: FastifyRequest): MediaUploadContext | undefined {
+  const upload = uploads.get(request);
+  uploads.delete(request);
+  return upload;
 }
 
 export function registerMediaBodyParsers(

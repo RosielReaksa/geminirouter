@@ -197,8 +197,8 @@ ${USER_DOMAIN} {
             header_up X-Forwarded-Proto {scheme}
 
             transport http {
-                response_header_timeout 1800s
-                read_timeout 1800s
+                response_header_timeout 7200s
+                read_timeout 7200s
             }
         }
     }
@@ -259,6 +259,11 @@ ${USER_DOMAIN} {
             header_up X-Forwarded-Proto {scheme}
             header_up Upgrade {>Upgrade}
             header_up Connection {>Connection}
+
+            transport http {
+                response_header_timeout 7200s
+                read_timeout 7200s
+            }
         }
     }
 }

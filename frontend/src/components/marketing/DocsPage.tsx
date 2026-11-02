@@ -197,8 +197,8 @@ export const DocsPage: React.FC = () => {
                   POST /v1/audio/transcriptions
                 </code>
                 . It streams the upload and returns the model's answer for the user's own
-                prompt. The website does not need to set a task or target language. Split
-                longer files in the website and send each part separately.
+                prompt. The website does not need to set a task or target language. Files up
+                to 2 hours are accepted; split very long files for faster responses.
               </p>
               <Code
                 title="audio · server-side JavaScript"

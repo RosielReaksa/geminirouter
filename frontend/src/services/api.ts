@@ -427,6 +427,49 @@ export class ApiClient {
     return data;
   }
 
+  async playgroundMediaRequest(input: {
+    file: File;
+    model: string;
+    prompt: string;
+    systemPrompt?: string;
+    temperature: number;
+    maxTokens: number;
+  }): Promise<PlaygroundResult> {
+    const form = new FormData();
+    form.append('file', input.file, input.file.name);
+    form.append('model', input.model);
+    form.append('prompt', input.prompt);
+    if (input.systemPrompt) form.append('systemPrompt', input.systemPrompt);
+    form.append('temperature', String(input.temperature));
+    form.append('maxTokens', String(input.maxTokens));
+
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), 2 * 60 * 60 * 1000);
+    try {
+      const response = await fetch('/api/playground/media', {
+        method: 'POST',
+        headers: { ...authApi.headers() },
+        body: form,
+        signal: controller.signal,
+      });
+      const data = await response.json().catch(() => null) as (PlaygroundResult & { error?: string }) | null;
+      if (response.status === 401) {
+        window.dispatchEvent(new CustomEvent('geminirouter:unauthorized'));
+      }
+      if (!response.ok || !data) {
+        throw new Error(data?.error || `Large media request failed (HTTP ${response.status}).`);
+      }
+      return data;
+    } catch (error) {
+      if (controller.signal.aborted) {
+        throw new Error('The large media request timed out after 2 hours.');
+      }
+      throw error instanceof Error ? error : new Error('Could not upload the media.');
+    } finally {
+      window.clearTimeout(timeoutId);
+    }
+  }
+
   // Helper: Delete account
   async deleteAccount(accountId: string): Promise<GoogleAccount[]> {
     const { response, data } = await this.fetchJson<{

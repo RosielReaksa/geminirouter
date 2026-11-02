@@ -300,6 +300,8 @@ export interface PlaygroundResult {
     total_tokens?: number;
   };
   media?: { kind: 'audio' | 'video'; filename: string; sizeBytes: number };
+  chunks?: number;
+  note?: string;
   error?: string;
   httpStatus?: number | null;
 }

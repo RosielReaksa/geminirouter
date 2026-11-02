@@ -28,8 +28,10 @@ const formatTokens = (value?: number) =>
 
 const MAX_AUDIO_BYTES = 15 * 1024 * 1024;
 const MAX_VIDEO_BYTES = 20 * 1024 * 1024;
+const MAX_LARGE_MEDIA_BYTES = 2 * 1024 * 1024 * 1024;
 
 const formatBytes = (value: number): string => {
+  if (value >= 1024 * 1024 * 1024) return `${(value / (1024 * 1024 * 1024)).toFixed(2)} GB`;
   if (value >= 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(1)} MB`;
   if (value >= 1024) return `${(value / 1024).toFixed(0)} KB`;
   return `${value} B`;
@@ -100,7 +102,14 @@ const ResultCard: React.FC<{
           <div className="h-3 rounded bg-[#F2ECE4] w-4/5" />
         </div>
       ) : result?.response ? (
-        <pre className="whitespace-pre-wrap break-words font-sans-ui text-sm leading-6 text-[#504C46]">{result.response}</pre>
+        <>
+          <pre className="whitespace-pre-wrap break-words font-sans-ui text-sm leading-6 text-[#504C46]">{result.response}</pre>
+          {result.note && (
+            <p className="mt-3 rounded-lg border border-[#EAE5DE] bg-[#FDFCF9] px-3 py-2 text-[11px] leading-5 text-[#8D867D]">
+              {result.note}
+            </p>
+          )}
+        </>
       ) : result?.error ? (
         <div className="flex gap-2 text-sm leading-6 text-[#A8462A]"><CircleAlert className="w-4 h-4 mt-1 shrink-0" /><span>{result.error}</span></div>
       ) : (
@@ -169,6 +178,8 @@ export const PlaygroundPage: React.FC<{ onReady: () => void }> = ({ onReady }) =
 
   const compareOptions = useMemo(() => models.filter((item) => item.id !== model), [models, model]);
   const mediaIsVideo = mediaFile ? isVideoFile(mediaFile) : false;
+  const mediaInlineLimit = mediaIsVideo ? MAX_VIDEO_BYTES : MAX_AUDIO_BYTES;
+  const mediaIsLarge = mediaFile ? mediaFile.size > mediaInlineLimit : false;
 
   const handleMediaChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -181,12 +192,8 @@ export const PlaygroundPage: React.FC<{ onReady: () => void }> = ({ onReady }) =
       setMediaError('Choose an audio or video file.');
       return;
     }
-    const maxBytes = video ? MAX_VIDEO_BYTES : MAX_AUDIO_BYTES;
-    if (file.size > maxBytes) {
-      setMediaError(
-        `${video ? 'Video' : 'Audio'} is too large for inline chat (${formatBytes(maxBytes)} max). ` +
-          (video ? 'Trim or compress it first.' : 'Use compressed 10–20 minute audio.'),
-      );
+    if (file.size > MAX_LARGE_MEDIA_BYTES) {
+      setMediaError(`File is too large (${formatBytes(MAX_LARGE_MEDIA_BYTES)} max).`);
       return;
     }
 
@@ -207,14 +214,44 @@ export const PlaygroundPage: React.FC<{ onReady: () => void }> = ({ onReady }) =
     if (!model || running) return;
     if (!prompt.trim() && !mediaFile) return;
 
+    const selected = compareEnabled && compareModel && compareModel !== model
+      ? [model, compareModel]
+      : [model];
+
+    if (mediaFile && mediaIsLarge) {
+      setRunning(true);
+      setResults({});
+      await Promise.all(selected.map(async (selectedModel) => {
+        const startedAt = Date.now();
+        try {
+          const result = await api.playgroundMediaRequest({
+            file: mediaFile,
+            model: selectedModel,
+            prompt: prompt.trim(),
+            systemPrompt: systemPrompt.trim() || undefined,
+            temperature,
+            maxTokens,
+          });
+          setResults((current) => ({ ...current, [selectedModel]: result }));
+        } catch (error) {
+          setResults((current) => ({
+            ...current,
+            [selectedModel]: {
+              ok: false,
+              model: selectedModel,
+              latencyMs: Date.now() - startedAt,
+              error: error instanceof Error ? error.message : 'The large media request failed.',
+            },
+          }));
+        }
+      }));
+      setRunning(false);
+      return;
+    }
+
     let media: PlaygroundMedia | undefined;
     if (mediaFile) {
       const video = isVideoFile(mediaFile);
-      const maxBytes = video ? MAX_VIDEO_BYTES : MAX_AUDIO_BYTES;
-      if (mediaFile.size > maxBytes) {
-        setMediaError(`${video ? 'Video' : 'Audio'} is too large for inline chat (${formatBytes(maxBytes)} max).`);
-        return;
-      }
       try {
         media = {
           kind: video ? 'video' : 'audio',
@@ -230,9 +267,6 @@ export const PlaygroundPage: React.FC<{ onReady: () => void }> = ({ onReady }) =
       }
     }
 
-    const selected = compareEnabled && compareModel && compareModel !== model
-      ? [model, compareModel]
-      : [model];
     setRunning(true);
     setResults({});
 
@@ -320,7 +354,7 @@ export const PlaygroundPage: React.FC<{ onReady: () => void }> = ({ onReady }) =
                 <Paperclip className="w-3.5 h-3.5" />
                 Attach audio / video
               </button>
-              <span className="text-[11px] text-[#9E988F]">Audio ≤15 MB · Video ≤20 MB</span>
+              <span className="text-[11px] text-[#9E988F]">Inline: audio ≤15 MB, video ≤20 MB · Large: up to 2 GB</span>
             </div>
 
             {mediaFile && (
@@ -371,6 +405,16 @@ export const PlaygroundPage: React.FC<{ onReady: () => void }> = ({ onReady }) =
               <p className="mt-2 flex items-start gap-1.5 text-xs text-[#A8462A]">
                 <CircleAlert className="w-3.5 h-3.5 mt-0.5 shrink-0" />
                 <span>{mediaError}</span>
+              </p>
+            )}
+
+            {mediaIsLarge && !mediaError && (
+              <p className="mt-2 flex items-start gap-1.5 text-xs text-[#8A621F]">
+                <CircleAlert className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+                <span>
+                  Large file: uses the chunked audio transcript path and may take several minutes.
+                  {mediaIsVideo ? ' Only the audio track is analyzed; visual frames are not included.' : ''}
+                </span>
               </p>
             )}
             <div className="mt-3 flex flex-wrap gap-2">

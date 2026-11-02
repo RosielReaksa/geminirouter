@@ -40,8 +40,8 @@
             header_up X-Forwarded-Proto {scheme}
 
             transport http {
-                response_header_timeout 1800s
-                read_timeout 1800s
+                response_header_timeout 7200s
+                read_timeout 7200s
             }
         }
     }
@@ -123,6 +123,12 @@
             # WebSocket support for live log streaming / RPC
             header_up Upgrade {>Upgrade}
             header_up Connection {>Connection}
+
+            # Large Playground uploads can take a long time to process.
+            transport http {
+                response_header_timeout 7200s
+                read_timeout 7200s
+            }
         }
     }
 }
