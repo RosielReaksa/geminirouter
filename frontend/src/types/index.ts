@@ -211,6 +211,10 @@ export interface OAuthCompleteResponse {
   success: boolean;
   account?: GoogleAccount;
   error?: string;
+  message?: string;
+  email?: string;
+  alreadyConnected?: boolean;
+  code?: string;
 }
 
 export interface ModelInfo {

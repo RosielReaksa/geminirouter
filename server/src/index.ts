@@ -386,17 +386,54 @@ export async function createServer(): Promise<{
     });
   };
 
-  /** Polls the pool until an account that was absent at start appears. */
-  const waitForNewAccount = async (sessionId: string, timeoutMs = 15_000): Promise<string | null> => {
+  const isDuplicateOAuth = (value: unknown): boolean => {
+    try {
+      return /duplicate|already exists|already connected/i.test(JSON.stringify(value || {}));
+    } catch {
+      return false;
+    }
+  };
+
+  const emailFromOAuthStatus = (value: unknown): string | undefined => {
+    try {
+      const match = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i.exec(JSON.stringify(value || {}));
+      return match?.[0];
+    } catch {
+      return undefined;
+    }
+  };
+
+  /**
+   * Polls for either a new account or the core's duplicate-account diagnostic.
+   * The core acknowledges the code before the asynchronous token exchange, so
+   * a duplicate is only visible through the OAuth status/diagnostic.
+   */
+  const waitForOAuthAccount = async (
+    sessionId: string,
+    timeoutMs = 15_000,
+  ): Promise<{ email?: string; duplicate?: boolean; status?: any }> => {
     const baseline = oauthBaselines.get(sessionId)?.emails;
     const deadline = Date.now() + timeoutMs;
+    let lastStatus: any = null;
+    let tick = 0;
     while (Date.now() < deadline) {
       const current = (await loadCoreAccounts()) ?? store.getAccounts();
       const fresh = current.find((account) => !baseline || !baseline.has(account.email.toLowerCase()));
-      if (fresh) return fresh.email;
+      if (fresh) return { email: fresh.email, status: lastStatus };
+
+      if (tick++ % 2 === 0) {
+        try {
+          lastStatus = await coreClient.getOAuthStatus(sessionId);
+        } catch {
+          lastStatus = null;
+        }
+        if (isDuplicateOAuth(lastStatus)) {
+          return { duplicate: true, status: lastStatus, email: emailFromOAuthStatus(lastStatus) };
+        }
+      }
       await new Promise((resolve) => setTimeout(resolve, 700));
     }
-    return null;
+    return { status: lastStatus };
   };
 
   const loadCoreAccounts = async (): Promise<GoogleAccount[] | null> => {
@@ -1382,28 +1419,45 @@ export async function createServer(): Promise<{
         );
       }
 
-      const accepted = await coreClient.completeOAuth(pending.sessionId, code);
-      if (!accepted) {
+      const completion = await coreClient.completeOAuth(pending.sessionId, code);
+      if (!completion.ok) {
         hostedOAuthSession = null;
         oauthBaselines.delete(pending.sessionId);
+        if (isDuplicateOAuth(completion.data)) {
+          return reply.code(409).type('text/html; charset=utf-8').send(
+            '<!doctype html><html><body><h1>Google account already connected</h1><p>This account is already in the gateway. Return to geminirouter and check the Accounts list.</p></body></html>',
+          );
+        }
         return reply.code(400).type('text/html; charset=utf-8').send(
           '<!doctype html><html><body><h1>Sign-in could not be completed</h1><p>Return to geminirouter and start a new Google sign-in.</p></body></html>',
         );
       }
 
       // "accepted" only means the core received the code. Confirm an account
-      // actually appeared, otherwise the code was invalid or expired.
-      const email = await waitForNewAccount(pending.sessionId);
+      // actually appeared, or detect the core's duplicate-account diagnostic.
+      const result = await waitForOAuthAccount(pending.sessionId);
       hostedOAuthSession = null;
       oauthBaselines.delete(pending.sessionId);
-      if (!email) {
+      if (result.duplicate) {
+        return reply.code(409).type('text/html; charset=utf-8').send(
+          `<!doctype html><html><body><h1>Google account already connected</h1><p>${
+            result.email
+              ? `${result.email
+                  .replace(/&/g, '&amp;')
+                  .replace(/</g, '&lt;')
+                  .replace(/>/g, '&gt;')} is already connected.`
+              : 'This account is already in the gateway.'
+          }</p><p>Return to geminirouter and check the Accounts list.</p></body></html>`,
+        );
+      }
+      if (!result.email) {
         return reply.code(400).type('text/html; charset=utf-8').send(
-          '<!doctype html><html><body><h1>Google sign-in did not complete</h1><p>No account was added. The authorization code may be invalid or expired — return to geminirouter and start again.</p></body></html>',
+          '<!doctype html><html><body><h1>Google sign-in did not complete</h1><p>No account was added. The account may already be connected, or the authorization code is invalid/expired — return to geminirouter and check the Accounts list.</p></body></html>',
         );
       }
 
       return reply.type('text/html; charset=utf-8').send(
-        `<!doctype html><html><body><h1>Google sign-in complete</h1><p>${email
+        `<!doctype html><html><body><h1>Google sign-in complete</h1><p>${result.email
           .replace(/&/g, '&amp;')
           .replace(/</g, '&lt;')
           .replace(/>/g, '&gt;')} is now connected.</p><script>setTimeout(()=>window.close(),1200)</script></body></html>`,
@@ -1432,8 +1486,22 @@ export async function createServer(): Promise<{
         });
       }
 
-      const ok = await coreClient.completeOAuth(sessionId, actualCode);
-      if (!ok) {
+      const completion = await coreClient.completeOAuth(sessionId, actualCode);
+      if (!completion.ok) {
+        if (isDuplicateOAuth(completion.data)) {
+          const email = emailFromOAuthStatus(completion.data);
+          oauthBaselines.delete(sessionId);
+          return reply.code(409).send({
+            success: false,
+            alreadyConnected: true,
+            code: 'account_already_connected',
+            email,
+            error: 'Google account already exists',
+            message: `This Google account${
+              email ? ` (${email})` : ''
+            } is already connected to the gateway. No new account was added; you can close this dialog.`,
+          });
+        }
         return reply.code(400).send({
           success: false,
           error: 'The core rejected the authorization code',
@@ -1443,19 +1511,33 @@ export async function createServer(): Promise<{
       }
 
       // The core acknowledges the code before exchanging it, so wait for the
-      // account to actually appear instead of reporting a false success.
-      const email = await waitForNewAccount(sessionId);
+      // account to appear — or for its duplicate-account diagnostic.
+      const result = await waitForOAuthAccount(sessionId);
       oauthBaselines.delete(sessionId);
-      if (!email) {
-        return reply.code(400).send({
+      if (result.duplicate) {
+        return reply.code(409).send({
           success: false,
-          error: 'The authorization code was not accepted',
+          alreadyConnected: true,
+          code: 'account_already_connected',
+          email: result.email,
+          error: 'Google account already exists',
+          message: `This Google account${
+            result.email ? ` (${result.email})` : ''
+          } is already connected to the gateway. No new account was added; you can close this dialog.`,
+        });
+      }
+      if (!result.email) {
+        return reply.code(409).send({
+          success: false,
+          alreadyConnected: false,
+          code: 'account_not_added',
+          error: 'No new account was added',
           message:
-            'Google did not issue a token for this code. It may be expired or copied incorrectly — start the sign-in again and paste the whole callback URL.',
+            'No new account was added. If this Google account is already in the Accounts list, it is already connected. Otherwise, the code expired or was copied incorrectly — start the sign-in again with a fresh callback URL.',
         });
       }
 
-      return { success: true, email };
+      return { success: true, email: result.email };
     },
   );
 

@@ -55,6 +55,7 @@ export const OAuthModal: React.FC<OAuthModalProps> = ({
   const [currentSession, setCurrentSession] = useState<OAuthStartResponse | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
+  const [noticeMsg, setNoticeMsg] = useState<{ tone: 'success' | 'warning'; text: string } | null>(null);
   const [baselineAccountIds, setBaselineAccountIds] = useState<string[] | null>(null);
 
   // Reset state when modal opens
@@ -63,6 +64,7 @@ export const OAuthModal: React.FC<OAuthModalProps> = ({
       setAuthCode('');
       setErrorMsg(null);
       setSuccessMsg(null);
+      setNoticeMsg(null);
       setCurrentSession(null);
       setBaselineAccountIds(null);
     }
@@ -101,6 +103,7 @@ export const OAuthModal: React.FC<OAuthModalProps> = ({
     setIsStarting(true);
     setErrorMsg(null);
     setSuccessMsg(null);
+    setNoticeMsg(null);
 
     try {
       // Snapshot existing accounts so completion is only reported for a new one.
@@ -168,6 +171,7 @@ export const OAuthModal: React.FC<OAuthModalProps> = ({
 
     setIsSubmittingCode(true);
     setErrorMsg(null);
+    setNoticeMsg(null);
 
     try {
       const sessionId = currentSession?.sessionId || 'current';
@@ -182,10 +186,29 @@ export const OAuthModal: React.FC<OAuthModalProps> = ({
 
       const data = await res.json();
       if (!res.ok || data.success === false) {
+        if (data.alreadyConnected) {
+          setNoticeMsg({
+            tone: 'success',
+            text:
+              data.message ||
+              `This Google account${data.email ? ` (${data.email})` : ''} is already connected. No new account was added.`,
+          });
+          return;
+        }
+        if (data.code === 'account_not_added') {
+          setNoticeMsg({
+            tone: 'warning',
+            text:
+              data.message ||
+              'No new account was added. If this account is already in the Accounts list, it is already connected. Otherwise, start the sign-in again with a fresh callback URL.',
+          });
+          return;
+        }
         setErrorMsg(data.message || data.error || 'Failed to verify authorization code.');
         return;
       }
 
+      setNoticeMsg(null);
       setSuccessMsg(data.email ? `Account ${data.email} connected!` : 'Account successfully verified and added!');
       // Fetch fresh accounts and prefer the one the server confirmed.
       const { data: accounts } = await api.getAccounts();
@@ -208,16 +231,27 @@ export const OAuthModal: React.FC<OAuthModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-in fade-in duration-150">
-      <div className="w-full max-w-[500px] bg-white rounded-2xl border border-[#EAE5DE] shadow-modal overflow-hidden text-[#2A2723]">
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto p-4 bg-black/60 backdrop-blur-xs animate-in fade-in duration-150"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Add Google Account"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <div className="w-full max-w-[500px] max-h-[calc(100dvh-2rem)] bg-white rounded-2xl border border-[#EAE5DE] shadow-modal overflow-hidden text-[#2A2723] flex flex-col">
         {/* Header */}
-        <div className="flex items-start justify-between p-6 pb-4 border-b border-[#EAE5DE]">
+        <div className="flex shrink-0 items-start justify-between p-6 pb-4 border-b border-[#EAE5DE]">
           <div>
             <h3 className="font-serif-editorial text-2xl font-bold text-[#2A2723]">
               Add Google Account
             </h3>
             <p className="text-xs text-[#706B65] mt-1">
               Sign in with the Google account you use for Antigravity. This adds that account’s Antigravity authorization to the gateway.
+            </p>
+            <p className="text-[11px] text-[#9E988F] mt-1">
+              Already connected? Use <strong className="text-[#706B65]">Reconnect</strong> on the account card instead of adding it again.
             </p>
           </div>
           <button
@@ -229,7 +263,7 @@ export const OAuthModal: React.FC<OAuthModalProps> = ({
         </div>
 
         {/* Content Body */}
-        <div className="p-6 space-y-5">
+        <div className="p-6 space-y-5 overflow-y-auto overscroll-contain min-h-0 flex-1">
           {/* Sign-in Method Dropdown */}
           <div className="space-y-1.5">
             <label className="text-xs font-semibold text-[#504C46]">
@@ -276,6 +310,23 @@ export const OAuthModal: React.FC<OAuthModalProps> = ({
             <div className="p-3 rounded-xl bg-[#EEF5F1] border border-[#D3E4DB] text-xs text-[#4E7B62] flex items-center gap-2 font-medium">
               <CheckCircle2 className="w-4 h-4 shrink-0" />
               <span>{successMsg}</span>
+            </div>
+          )}
+
+          {noticeMsg && (
+            <div
+              className={`p-3 rounded-xl border text-xs flex items-start gap-2 ${
+                noticeMsg.tone === 'success'
+                  ? 'bg-[#EEF5F1] border-[#D3E4DB] text-[#4E7B62]'
+                  : 'bg-[#FFF8E7] border-[#F0E0B8] text-[#8A621F]'
+              }`}
+            >
+              {noticeMsg.tone === 'success' ? (
+                <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
+              ) : (
+                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+              )}
+              <div className="leading-relaxed">{noticeMsg.text}</div>
             </div>
           )}
 
@@ -379,7 +430,7 @@ export const OAuthModal: React.FC<OAuthModalProps> = ({
         </div>
 
         {/* Footer */}
-        <div className="p-4 bg-[#FAF7F2] border-t border-[#EAE5DE] flex justify-end">
+        <div className="p-4 bg-[#FAF7F2] border-t border-[#EAE5DE] flex shrink-0 justify-end">
           <button
             onClick={onClose}
             className="px-4 py-2 rounded-xl border border-[#EAE5DE] bg-white hover:bg-[#F2ECE4] text-xs font-medium text-[#504C46] transition-colors shadow-soft"

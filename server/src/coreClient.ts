@@ -171,26 +171,31 @@ export class CoreClient {
 
   async getOAuthStatus(sessionId: string): Promise<any> {
     try {
-      const res = await this.rawRequest<any>({
+      return await this.rawRequest<any>({
         method: 'GET',
         url: `/v1/oauth/status/${encodeURIComponent(sessionId)}`,
       });
-      return res.status || null;
     } catch {
       return null;
     }
   }
 
-  async completeOAuth(sessionId: string, code: string): Promise<boolean> {
+  async completeOAuth(
+    sessionId: string,
+    code: string,
+  ): Promise<{ ok: boolean; data: any }> {
     try {
       const res = await this.rawRequest<any>({
         method: 'POST',
         url: `/v1/oauth/complete/${encodeURIComponent(sessionId)}`,
         data: { code },
       });
-      return !!res && res.ok === true;
-    } catch {
-      return false;
+      return { ok: !!res && res.ok === true, data: res };
+    } catch (error: any) {
+      return {
+        ok: false,
+        data: error?.response?.data ?? { message: error?.message || String(error) },
+      };
     }
   }
 
