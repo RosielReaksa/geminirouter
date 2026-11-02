@@ -2012,7 +2012,7 @@ export async function createServer(): Promise<{
           ? { model: model.trim(), messages }
           : { model: model.trim(), messages, temperature: safeTemperature, max_tokens: safeMaxTokens },
         {
-          timeout: media || isImageModel ? 180000 : 30000,
+          timeout: 180000,
           headers: {
             'Content-Type': 'application/json',
             ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),

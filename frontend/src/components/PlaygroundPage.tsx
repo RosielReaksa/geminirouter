@@ -284,7 +284,13 @@ export const PlaygroundPage: React.FC<{ onReady: () => void; isActive?: boolean 
       if (!active) return;
       const available = (data.models || []).filter((item) => item.availability?.ok !== false);
       setModels(available);
-      const first = available.find((item) => item.id.includes('gemini')) || available[0];
+      const preferred = ['gemini-3.5-flash-lite', 'gemini-3.1-flash-lite', 'gemini-2.5-flash-lite'];
+      const first =
+        preferred
+          .map((id) => available.find((item) => item.id === id))
+          .find((item) => Boolean(item)) ||
+        available.find((item) => item.id.includes('gemini')) ||
+        available[0];
       const savedModel = saved?.model;
       const nextModel =
         savedModel && available.some((item) => item.id === savedModel)
