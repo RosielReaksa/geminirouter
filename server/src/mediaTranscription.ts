@@ -295,8 +295,8 @@ export function readMediaConfig(): MediaConfig {
   const maxSecondsBySize = Math.floor((14 * 1024 * 1024 * 8) / (audioBitrateKbps * 1000));
   // 10-20 minute windows are the recommended unit for the website. The
   // endpoint also accepts up to 2 hours for the playground's large-media path;
-  // chunks are still kept at 20 minutes by default.
-  const requestedChunkSeconds = envInt('MEDIA_CHUNK_SECONDS', 20 * 60, 60, 3600);
+  // chunks default to 15 minutes so they fit the 65,535-token output budget.
+  const requestedChunkSeconds = envInt('MEDIA_CHUNK_SECONDS', 15 * 60, 60, 3600);
   const chunkSeconds = Math.max(60, Math.min(requestedChunkSeconds, maxSecondsBySize));
 
   return {
@@ -981,7 +981,7 @@ function parseMediaOptions(
   const requestedMaxTokens = Number.parseInt(fields.max_tokens || fields.maxTokens || '', 10);
   const maxTokens = Number.isFinite(requestedMaxTokens)
     ? Math.min(65535, Math.max(256, requestedMaxTokens))
-    : 32768;
+    : 65535;
 
   const requestedTemperature = Number.parseFloat(fields.temperature || '');
   const temperature = Number.isFinite(requestedTemperature)
@@ -1495,6 +1495,17 @@ async function transcribeChunkWithRetry(
       }
 
       const data: any = await response.json().catch(() => null);
+      const finishReason = completionFinishReason(data);
+      if (finishReason === 'length' || finishReason === 'max_tokens') {
+        // The model stopped at the output cap. The text is valid but incomplete,
+        // so returning it would silently drop the rest of the chunk's dialogue.
+        throw new MediaError(
+          502,
+          'model_output_truncated',
+          `Chunk ${chunk.index + 1} hit the ${options.maxTokens}-token output cap before finishing, so its transcript would be incomplete. Lower chunk_seconds or raise max_tokens.`,
+          { chunkIndex: chunk.index, finishReason, maxTokens: options.maxTokens },
+        );
+      }
       const content = completionText(data);
       if (!content || isModelFailureText(content)) {
         const failed = Boolean(content);
@@ -1538,7 +1549,7 @@ async function transcribeChunkWithRetry(
       };
     } catch (error) {
       if (error instanceof MediaError) {
-        if (error.code === 'upstream_auth_failed' || error.code === 'model_rejected_media') throw error;
+        if (error.code === 'upstream_auth_failed' || error.code === 'model_rejected_media' || error.code === 'model_output_truncated') throw error;
         lastError = error;
       } else if (isAbortError(error)) {
         throw abortError(signal);
@@ -1680,6 +1691,19 @@ function completionText(data: any): string {
       .map((part: any) => (typeof part === 'string' ? part : part?.text || part?.content || ''))
       .join('')
       .trim();
+  }
+  return '';
+}
+
+function completionFinishReason(data: any): string {
+  const openAiReason = data?.choices?.[0]?.finish_reason;
+  if (typeof openAiReason === 'string' && openAiReason.trim()) {
+    return openAiReason.trim().toLowerCase();
+  }
+  const geminiReason =
+    data?.candidates?.[0]?.finishReason ?? data?.candidates?.[0]?.finish_reason;
+  if (typeof geminiReason === 'string' && geminiReason.trim()) {
+    return geminiReason.trim().toLowerCase();
   }
   return '';
 }

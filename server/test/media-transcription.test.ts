@@ -57,6 +57,7 @@ const modelRequests: ModelRequest[] = [];
 const modelAuthHeaders: Array<string | undefined> = [];
 let failNextModelRequest = false;
 let nextCustomReply: string | null = null;
+let nextFinishReason: string | null = null;
 
 const upstream = http.createServer((request, response) => {
   modelAuthHeaders.push(typeof request.headers.authorization === 'string' ? request.headers.authorization : undefined);
@@ -99,6 +100,8 @@ const upstream = http.createServer((request, response) => {
     const content =
       nextCustomReply ?? `TRANSCRIPT:\nspoken line ${index}\nTRANSLATION:\ntranslated line ${index}`;
     nextCustomReply = null;
+    const finishReason = nextFinishReason ?? 'stop';
+    nextFinishReason = null;
 
     response.writeHead(200, {
       'Content-Type': 'application/json',
@@ -110,6 +113,7 @@ const upstream = http.createServer((request, response) => {
         model: parsed?.model || 'gemini-3.5-flash-lite',
         choices: [
           {
+            finish_reason: finishReason,
             message: {
               role: 'assistant',
               content,
@@ -191,7 +195,7 @@ after(async () => {
   }
 });
 
-test('media chunks default to 20 minutes with a 2-hour maximum', () => {
+test('media chunks default to 15 minutes with a 2-hour maximum', () => {
   const oldChunk = process.env.MEDIA_CHUNK_SECONDS;
   const oldMax = process.env.MEDIA_MAX_DURATION_SECONDS;
   delete process.env.MEDIA_CHUNK_SECONDS;
@@ -199,7 +203,7 @@ test('media chunks default to 20 minutes with a 2-hour maximum', () => {
   try {
     const config = readMediaConfig();
     assert.equal(config.maxDurationSeconds, 7200);
-    assert.equal(config.chunkSeconds, 1200);
+    assert.equal(config.chunkSeconds, 900);
   } finally {
     if (oldChunk === undefined) delete process.env.MEDIA_CHUNK_SECONDS;
     else process.env.MEDIA_CHUNK_SECONDS = oldChunk;
@@ -366,6 +370,38 @@ test(
     assert.match(body.text, /spoken line 2/);
     assert.doesNotMatch(body.text, /could not complete a tool call/);
     failNextModelRequest = false;
+  },
+);
+
+test(
+  'a chunk that hits the output cap fails instead of returning a shortened transcript',
+  { skip: !hasFfmpeg },
+  async () => {
+    modelRequests.length = 0;
+    modelAuthHeaders.length = 0;
+    nextCustomReply = 'TRANSCRIPT:\npartial line that would be silently short';
+    nextFinishReason = 'length';
+
+    const form = new FormData();
+    form.append('file', new Blob([makeWav(1)], { type: 'audio/wav' }), 'truncated.wav');
+    form.append('model', 'gemini-3.5-flash-lite');
+    form.append('prompt', 'Transcribe this clip.');
+    form.append('max_tokens', '65535');
+
+    const response = await fetch(`http://127.0.0.1:${bridgePort}/v1/audio/transcriptions`, {
+      method: 'POST',
+      headers: authHeaders(),
+      body: form,
+    });
+
+    const rawBody = await response.text();
+    assert.equal(response.status, 502, rawBody);
+    const body: any = JSON.parse(rawBody);
+    assert.equal(body.error.code, 'model_output_truncated');
+    assert.match(body.error.message, /output cap/);
+    assert.equal(modelRequests.length, 1, 'truncation must fail fast, not retry');
+    assert.doesNotMatch(rawBody, /partial line/);
+    assert.equal(modelRequests[0].max_tokens, 65535);
   },
 );
 

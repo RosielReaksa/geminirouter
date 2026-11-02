@@ -1966,8 +1966,8 @@ export async function createServer(): Promise<{
       ? Math.max(0, Math.min(2, temperature))
       : 0.7;
     const safeMaxTokens = typeof maxTokens === 'number' && Number.isFinite(maxTokens)
-      ? Math.max(1, Math.min(8192, Math.floor(maxTokens)))
-      : 1024;
+      ? Math.max(1, Math.min(65535, Math.floor(maxTokens)))
+      : 8192;
     const { port: gatewayPort, apiKey } = resolveGateway();
     const startedAt = Date.now();
     const isImageModel = /image/i.test(model.trim());
@@ -2111,7 +2111,7 @@ export async function createServer(): Promise<{
           form.append('temperature', String(Math.max(0, Math.min(2, requestedTemperature))));
         }
         if (Number.isFinite(requestedMaxTokens)) {
-          form.append('max_tokens', String(Math.max(1, Math.min(32768, requestedMaxTokens))));
+          form.append('max_tokens', String(Math.max(1, Math.min(65535, requestedMaxTokens))));
         }
 
         const response = await fetch(`http://127.0.0.1:${mediaPort}/v1/audio/transcriptions`, {

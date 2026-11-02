@@ -107,7 +107,7 @@ function loadSavedPlaygroundState(): SavedPlaygroundState | null {
       compareEnabled: Boolean(parsed.compareEnabled),
       compareModel: typeof parsed.compareModel === 'string' ? parsed.compareModel : '',
       temperature: typeof parsed.temperature === 'number' ? parsed.temperature : 0.7,
-      maxTokens: typeof parsed.maxTokens === 'number' ? parsed.maxTokens : 1024,
+      maxTokens: typeof parsed.maxTokens === 'number' ? parsed.maxTokens : 8192,
       results:
         parsed.results && typeof parsed.results === 'object'
           ? (parsed.results as Record<string, PlaygroundResult>)
@@ -266,7 +266,7 @@ export const PlaygroundPage: React.FC<{ onReady: () => void; isActive?: boolean 
   const [systemPrompt, setSystemPrompt] = useState(saved?.systemPrompt || '');
   const [showSystemPrompt, setShowSystemPrompt] = useState(saved?.showSystemPrompt ?? false);
   const [temperature, setTemperature] = useState(saved?.temperature ?? 0.7);
-  const [maxTokens, setMaxTokens] = useState(saved?.maxTokens ?? 1024);
+  const [maxTokens, setMaxTokens] = useState(saved?.maxTokens ?? 8192);
   const [results, setResults] = useState<Record<string, PlaygroundResult>>(saved?.results ?? {});
   const [running, setRunning] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
@@ -659,7 +659,7 @@ export const PlaygroundPage: React.FC<{ onReady: () => void; isActive?: boolean 
               </div>
               <div>
                 <label htmlFor="playground-max-tokens" className="block text-xs font-semibold text-[#504C46] mb-2">Max tokens</label>
-                <input id="playground-max-tokens" type="number" min="1" max="8192" step="1" value={maxTokens} onChange={(event) => setMaxTokens(Number(event.target.value))} className="w-full rounded-xl border border-[#EAE5DE] bg-white px-3 py-2.5 text-sm focus:outline-none focus:border-[#C25938]" />
+                <input id="playground-max-tokens" type="number" min="1" max="65535" step="1" value={maxTokens} onChange={(event) => setMaxTokens(Number(event.target.value))} className="w-full rounded-xl border border-[#EAE5DE] bg-white px-3 py-2.5 text-sm focus:outline-none focus:border-[#C25938]" />
               </div>
             </div>
 

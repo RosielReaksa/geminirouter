@@ -67,14 +67,16 @@ mislabeled input.
 10–20 minute windows are the recommended unit for the website. The core's
 audio validator caps decoded audio at 15 MiB (roughly 40 minutes at 48 kbps),
 so each window fits comfortably in one chunk. The bridge-level endpoint streams
-the upload to disk, transcodes it to mono 16 kHz MP3, and sends each 20-minute
+the upload to disk, transcodes it to mono 16 kHz MP3, and sends each 15-minute
 chunk through the same lease/quota/failover path as `/v1/chat/completions`. One
 call returns the transcript and translation for that window.
 
 The playground's large-media path and the API accept up to **2 hours** per
-request; the server splits it into 20-minute chunks automatically. The website
-can still split at 10–20 minutes for faster responses. A request over the
-2-hour maximum is rejected with `duration_too_long`.
+request; the server splits it into 15-minute chunks automatically. Each chunk
+has a 65,535-token output budget, so 15–20 minute windows fit without
+truncating dialogue. The website can still split at 10–20 minutes for faster
+responses. A request over the 2-hour maximum is rejected with
+`duration_too_long`.
 
 ### Prompt-first requests
 
@@ -108,10 +110,11 @@ All three formats accept the same options:
 - `source_language` — optional source language hint (`en`, `French`, etc.).
 - `model` — defaults to `gemini-3.5-flash-lite`.
 - `response_format` — `json` (default) or `text`.
-- `chunk_seconds` — target chunk length, 60–3600 seconds; default `1200`
-  (20 minutes). The server also reduces it automatically if a chunk would
+- `chunk_seconds` — target chunk length, 60–3600 seconds; default `900`
+  (15 minutes). The server also reduces it automatically if a chunk would
   exceed the core's audio limit.
-- `temperature`, `max_tokens`, `concurrency` (1–4 chunks in parallel).
+- `temperature`, `max_tokens` (256–65,535, default `65,535`), `concurrency`
+  (1–4 chunks in parallel).
 
 #### Multipart upload (recommended for large files)
 
@@ -313,6 +316,11 @@ hosted publicly.
   to 2 hours (`MEDIA_MAX_DURATION_SECONDS=7200`). Uploads are streamed to disk,
   so the JSON body limit is not the constraint. Chunks stay below the core's
   15 MiB audio limit automatically.
+- Each transcription chunk gets a 65,535-token output budget by default. If a
+  response still stops at the cap (`finish_reason: "length"`), the endpoint
+  fails the request with `model_output_truncated` instead of returning a
+  silently shortened transcript. Lower `chunk_seconds` or send a smaller
+  `max_tokens` only when you also accept shorter output.
 - Large requests can take many minutes. Set the client and reverse-proxy
   timeouts to at least 30 minutes for short windows and up to 2 hours for the
   largest files. The shipped configs allow 2 hours for `/v1/audio/*`.
