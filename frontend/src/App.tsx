@@ -316,7 +316,7 @@ export const DashboardApp: React.FC = () => {
 
         {/* Tab Page Container */}
         <div className="p-6 sm:p-10 max-w-6xl w-full mx-auto pb-20">
-          <div key={currentTab} className="dashboard-page-enter">
+          <div className="dashboard-page-enter">
           {currentTab === 'overview' && (
             <OverviewPage
               status={status}
