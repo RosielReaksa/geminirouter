@@ -19,6 +19,12 @@ import { GoogleAccount } from '../types';
 import { api } from '../services/api';
 import { authApi } from '../services/authApi';
 
+function formatUsageNumber(value: number): string {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}k`;
+  return String(value);
+}
+
 interface AccountsPageProps {
   accounts: GoogleAccount[];
   inFlightPerAccount?: Record<string, number>;
@@ -322,6 +328,7 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
           </h2>
           <p className="text-sm text-[#706B65] mt-1 max-w-xl">
             Manage your connected Google accounts and inspect their respective 5-hour and 7-day rate limits.
+            The 24h request/token counts update every 15 seconds; quota snapshots refresh from the core every 5 minutes.
             Requests automatically failover when an account's quota gets exhausted.
           </p>
         </div>
@@ -572,6 +579,21 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
                           </span>
                         );
                       })()}
+
+                      {acc.usage24h && (
+                        <>
+                          <span className="text-[#DDD7CE]">·</span>
+                          <span
+                            className="inline-flex items-center gap-1 text-[11px] font-mono-code px-2 py-0.5 rounded bg-[#FAF7F2] border border-[#EAE5DE] text-[#706B65]"
+                            title="Requests and tokens attributed to this account in the last 24 hours"
+                          >
+                            <span>24h:</span>
+                            <span className="font-semibold text-[#4A453E]">{formatUsageNumber(acc.usage24h.requests)} req</span>
+                            <span>·</span>
+                            <span className="font-semibold text-[#4A453E]">{formatUsageNumber(acc.usage24h.tokens)} tokens</span>
+                          </span>
+                        </>
+                      )}
 
                       {acc.lastTestResult && (
                         <>

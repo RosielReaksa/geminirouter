@@ -124,12 +124,14 @@ export const DashboardApp: React.FC = () => {
 
       polling = true;
       try {
-        const [statusRes, trafficRes] = await Promise.all([
+        const [statusRes, accRes, trafficRes] = await Promise.all([
           api.getStatus(),
+          api.getAccounts(),
           api.getTraffic(),
         ]);
         if (!active) return;
         setStatus(statusRes.data);
+        setAccounts(accRes.data);
         setIsLiveApi(statusRes.isLiveApi);
         setTraffic(trafficRes.data);
       } catch (err) {

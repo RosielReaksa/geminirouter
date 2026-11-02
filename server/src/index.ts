@@ -742,6 +742,26 @@ export async function createServer(): Promise<{
     }
   };
 
+  const getAccountUsage24h = async (
+    accounts: GoogleAccount[],
+  ): Promise<Map<string, { requests: number; tokens: number }>> => {
+    const since = Date.now() - 24 * 60 * 60 * 1000;
+    const live = await loadCoreModelTraffic({ from: since, allPages: true, accounts });
+    const records = live?.records ?? store.getTraffic();
+    const usage = new Map<string, { requests: number; tokens: number }>();
+    for (const record of records) {
+      const timestamp = Date.parse(record.timestamp);
+      if (!Number.isFinite(timestamp) || timestamp < since) continue;
+      const key = record.backingAccountEmail;
+      if (!key) continue;
+      const current = usage.get(key) ?? { requests: 0, tokens: 0 };
+      current.requests += 1;
+      current.tokens += record.totalTokens || 0;
+      usage.set(key, current);
+    }
+    return usage;
+  };
+
   type AvailabilityBucketState = 'ok' | 'partial' | 'error' | 'empty';
   type ModelAvailabilityHistory = {
     windowStart: string;
@@ -1036,10 +1056,15 @@ export async function createServer(): Promise<{
 
   // 2. GET /api/accounts
   app.get('/api/accounts', async () => {
-    // Real core accounts whenever the core is reachable — including an empty
+    // Real core accounts whenever the core is reachable - including an empty
     // pool. The demo fallback is ONLY for core-offline demo mode; it must
     // never mask the real pool state.
-    return (await loadCoreAccounts()) ?? store.getAccounts();
+    const accounts = (await loadCoreAccounts()) ?? store.getAccounts();
+    const usage = await getAccountUsage24h(accounts);
+    return accounts.map((account) => ({
+      ...account,
+      usage24h: usage.get(account.email) ?? { requests: 0, tokens: 0 },
+    }));
   });
 
   // 2b. GET /api/accounts/:id/validation-url — resolves fresh, live Google account checkpoint URL
