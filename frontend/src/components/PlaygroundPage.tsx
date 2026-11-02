@@ -76,6 +76,50 @@ const readFileAsBase64 = (file: File): Promise<string> =>
     reader.readAsDataURL(file);
   });
 
+const PLAYGROUND_STORAGE_KEY = 'geminirouter_playground_v1';
+
+interface SavedPlaygroundState {
+  prompt: string;
+  systemPrompt: string;
+  showSystemPrompt: boolean;
+  model: string;
+  compareEnabled: boolean;
+  compareModel: string;
+  temperature: number;
+  maxTokens: number;
+  results: Record<string, PlaygroundResult>;
+}
+
+function loadSavedPlaygroundState(): SavedPlaygroundState | null {
+  try {
+    const raw = sessionStorage.getItem(PLAYGROUND_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<SavedPlaygroundState> | null;
+    if (!parsed || typeof parsed !== 'object') return null;
+    return {
+      prompt: typeof parsed.prompt === 'string' ? parsed.prompt : '',
+      systemPrompt: typeof parsed.systemPrompt === 'string' ? parsed.systemPrompt : '',
+      showSystemPrompt: Boolean(parsed.showSystemPrompt),
+      model: typeof parsed.model === 'string' ? parsed.model : '',
+      compareEnabled: Boolean(parsed.compareEnabled),
+      compareModel: typeof parsed.compareModel === 'string' ? parsed.compareModel : '',
+      temperature: typeof parsed.temperature === 'number' ? parsed.temperature : 0.7,
+      maxTokens: typeof parsed.maxTokens === 'number' ? parsed.maxTokens : 1024,
+      results:
+        parsed.results && typeof parsed.results === 'object'
+          ? (parsed.results as Record<string, PlaygroundResult>)
+          : {},
+    };
+  } catch {
+    return null;
+  }
+}
+
+// The File object cannot go into sessionStorage. Keep it in module memory so
+// switching dashboard tabs does not lose the attachment; a full reload still
+// requires re-selecting the file.
+let cachedPlaygroundFile: File | null = null;
+
 const ResultCard: React.FC<{
   model: string;
   result?: PlaygroundResult;
@@ -134,20 +178,23 @@ const ResultCard: React.FC<{
 );
 
 export const PlaygroundPage: React.FC<{ onReady: () => void }> = ({ onReady }) => {
+  const saved = useMemo(() => loadSavedPlaygroundState(), []);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [modelsLoading, setModelsLoading] = useState(true);
-  const [model, setModel] = useState('');
-  const [compareEnabled, setCompareEnabled] = useState(false);
-  const [compareModel, setCompareModel] = useState('');
-  const [prompt, setPrompt] = useState('');
-  const [systemPrompt, setSystemPrompt] = useState('');
-  const [showSystemPrompt, setShowSystemPrompt] = useState(false);
-  const [temperature, setTemperature] = useState(0.7);
-  const [maxTokens, setMaxTokens] = useState(1024);
-  const [results, setResults] = useState<Record<string, PlaygroundResult>>({});
+  const [model, setModel] = useState(saved?.model || '');
+  const [compareEnabled, setCompareEnabled] = useState(saved?.compareEnabled ?? false);
+  const [compareModel, setCompareModel] = useState(saved?.compareModel || '');
+  const [prompt, setPrompt] = useState(saved?.prompt || '');
+  const [systemPrompt, setSystemPrompt] = useState(saved?.systemPrompt || '');
+  const [showSystemPrompt, setShowSystemPrompt] = useState(saved?.showSystemPrompt ?? false);
+  const [temperature, setTemperature] = useState(saved?.temperature ?? 0.7);
+  const [maxTokens, setMaxTokens] = useState(saved?.maxTokens ?? 1024);
+  const [results, setResults] = useState<Record<string, PlaygroundResult>>(saved?.results ?? {});
   const [running, setRunning] = useState(false);
-  const [mediaFile, setMediaFile] = useState<File | null>(null);
-  const [mediaPreviewUrl, setMediaPreviewUrl] = useState<string | null>(null);
+  const [mediaFile, setMediaFile] = useState<File | null>(cachedPlaygroundFile);
+  const [mediaPreviewUrl, setMediaPreviewUrl] = useState<string | null>(() =>
+    cachedPlaygroundFile ? URL.createObjectURL(cachedPlaygroundFile) : null,
+  );
   const [mediaError, setMediaError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -158,9 +205,21 @@ export const PlaygroundPage: React.FC<{ onReady: () => void }> = ({ onReady }) =
       const available = (data.models || []).filter((item) => item.availability?.ok !== false);
       setModels(available);
       const first = available.find((item) => item.id.includes('gemini')) || available[0];
-      const second = available.find((item) => item.id !== first?.id);
-      setModel(first?.id || '');
-      setCompareModel(second?.id || '');
+      const savedModel = saved?.model;
+      const nextModel =
+        savedModel && available.some((item) => item.id === savedModel)
+          ? savedModel
+          : first?.id || '';
+      setModel(nextModel);
+
+      const savedCompare = saved?.compareModel;
+      const nextCompare =
+        savedCompare &&
+        savedCompare !== nextModel &&
+        available.some((item) => item.id === savedCompare)
+          ? savedCompare
+          : available.find((item) => item.id !== nextModel)?.id || '';
+      setCompareModel(nextCompare);
     }).catch(() => {
       if (active) setModels([]);
     }).finally(() => {
@@ -175,6 +234,25 @@ export const PlaygroundPage: React.FC<{ onReady: () => void }> = ({ onReady }) =
   useEffect(() => () => {
     if (mediaPreviewUrl) URL.revokeObjectURL(mediaPreviewUrl);
   }, [mediaPreviewUrl]);
+
+  useEffect(() => {
+    try {
+      const state: SavedPlaygroundState = {
+        prompt,
+        systemPrompt,
+        showSystemPrompt,
+        model,
+        compareEnabled,
+        compareModel,
+        temperature,
+        maxTokens,
+        results,
+      };
+      sessionStorage.setItem(PLAYGROUND_STORAGE_KEY, JSON.stringify(state));
+    } catch {
+      // Private mode or quota exceeded: keep the playground working in memory.
+    }
+  }, [prompt, systemPrompt, showSystemPrompt, model, compareEnabled, compareModel, temperature, maxTokens, results]);
 
   const compareOptions = useMemo(() => models.filter((item) => item.id !== model), [models, model]);
   const mediaIsVideo = mediaFile ? isVideoFile(mediaFile) : false;
@@ -198,11 +276,13 @@ export const PlaygroundPage: React.FC<{ onReady: () => void }> = ({ onReady }) =
     }
 
     setMediaError(null);
+    cachedPlaygroundFile = file;
     setMediaFile(file);
     setMediaPreviewUrl(URL.createObjectURL(file));
   };
 
   const removeMedia = () => {
+    cachedPlaygroundFile = null;
     setMediaFile(null);
     setMediaPreviewUrl(null);
     setMediaError(null);
@@ -356,6 +436,10 @@ export const PlaygroundPage: React.FC<{ onReady: () => void }> = ({ onReady }) =
               </button>
               <span className="text-[11px] text-[#9E988F]">Inline: audio ≤15 MB, video ≤20 MB · Large: up to 2 GB</span>
             </div>
+            <p className="mt-2 text-[11px] text-[#9E988F]">
+              Prompt and results stay in this tab. Attachments survive tab switches; after a full refresh,
+              re-attach the file.
+            </p>
 
             {mediaFile && (
               <div className="mt-3 rounded-xl border border-[#EAE5DE] bg-[#FDFCF9] p-3">
