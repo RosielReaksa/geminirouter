@@ -634,6 +634,50 @@ export async function createServer(): Promise<{
     });
   };
 
+  // The core's audit/list RPC can become very slow when the audit database
+  // grows (the payload tables are ~1 GB). Its HTTP audit endpoint is indexed
+  // and paginated, so prefer it and keep the RPC as a compatibility fallback.
+  const fetchCoreAuditPage = async (query: {
+    from?: number;
+    to?: number;
+    trafficClass: string;
+    limit: number;
+    offset: number;
+  }): Promise<any | null> => {
+    try {
+      const { port, apiKey } = resolveGateway();
+      const params: Record<string, string | number> = {
+        trafficClass: query.trafficClass,
+        limit: query.limit,
+        offset: query.offset,
+      };
+      if (Number.isFinite(query.from)) params.from = query.from as number;
+      if (Number.isFinite(query.to)) params.to = query.to as number;
+
+      const response = await axios.get(`http://127.0.0.1:${port}/internal/audit/requests`, {
+        timeout: Math.max(
+          2000,
+          Number.parseInt(process.env.CORE_AUDIT_TIMEOUT_MS || '', 10) || 8000,
+        ),
+        headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+        params,
+        validateStatus: () => true,
+      });
+      if (response.status === 200 && Array.isArray(response.data?.items)) {
+        return response.data;
+      }
+    } catch {
+      // Fall back to the RPC below for older cores without the HTTP endpoint.
+    }
+    return null;
+  };
+
+  let trafficCache: {
+    key: string;
+    expiresAt: number;
+    value: { total: number; records: TrafficRecord[] };
+  } | null = null;
+
   const loadCoreModelTraffic = async (options: {
     from?: number;
     to?: number;
@@ -641,6 +685,16 @@ export async function createServer(): Promise<{
     accounts?: GoogleAccount[];
   } = {}): Promise<{ total: number; records: TrafficRecord[] } | null> => {
     if (!(await coreClient.isCoreAlive())) return null;
+
+    const cacheKey = [
+      options.allPages ? 'all' : 'first',
+      Math.floor((options.from ?? 0) / 60_000),
+      Math.floor((options.to ?? 0) / 60_000),
+    ].join(':');
+    if (trafficCache && trafficCache.key === cacheKey && trafficCache.expiresAt > Date.now()) {
+      return trafficCache.value;
+    }
+
     try {
       const limit = 200;
       let query: { from?: number; to?: number; trafficClass: string; limit: number; offset: number } = {
@@ -650,12 +704,17 @@ export async function createServer(): Promise<{
         limit,
         offset: 0,
       };
-      let firstPage = await coreClient.callRpc<any>('audit/list', query);
+      let firstPage = await fetchCoreAuditPage(query);
+      if (!firstPage) {
+        firstPage = await coreClient.callRpc<any>('audit/list', query);
+      }
       // Older core builds may not accept an upper time bound. Retry with the
       // supported lower bound and apply `to` after mapping the returned rows.
       if (!firstPage && options.to !== undefined) {
         query = { from: options.from, trafficClass: 'model', limit, offset: 0 };
-        firstPage = await coreClient.callRpc<any>('audit/list', query);
+        firstPage =
+          (await fetchCoreAuditPage(query)) ??
+          (await coreClient.callRpc<any>('audit/list', query));
       }
       if (!firstPage || !Array.isArray(firstPage.items)) return null;
 
@@ -663,17 +722,21 @@ export async function createServer(): Promise<{
       if (options.allPages) {
         const total = Number(firstPage.total) || items.length;
         for (let offset = limit; offset < total; offset += limit) {
-          const page = await coreClient.callRpc<any>('audit/list', { ...query, offset });
+          const page =
+            (await fetchCoreAuditPage({ ...query, offset })) ??
+            (await coreClient.callRpc<any>('audit/list', { ...query, offset }));
           if (!page || !Array.isArray(page.items) || page.items.length === 0) break;
           items.push(...page.items);
         }
       }
 
       const accounts = options.accounts ?? (await loadCoreAccounts()) ?? store.getAccounts();
-      return {
+      const value = {
         total: Number(firstPage.total) || items.length,
         records: mapCoreTrafficItems(items, accounts),
       };
+      trafficCache = { key: cacheKey, expiresAt: Date.now() + 15_000, value };
+      return value;
     } catch {
       return null;
     }
