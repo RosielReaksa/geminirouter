@@ -514,6 +514,53 @@ export async function createServer(): Promise<{
     }
   };
 
+  // Quota snapshots in the core are cached. Without a refresh the dashboard
+  // keeps showing the values from the last test/refresh, which can be days old
+  // while traffic is still being served. Refresh all active accounts on a
+  // timer and expose a manual endpoint for an immediate update.
+  let quotaRefreshedAt: string | null = null;
+  let quotaRefreshInFlight = false;
+
+  const refreshAllQuotas = async (): Promise<void> => {
+    if (quotaRefreshInFlight) return;
+    if (!(await coreClient.isCoreAlive())) return;
+    quotaRefreshInFlight = true;
+    try {
+      const accounts = (await loadCoreAccounts()) ?? store.getAccounts();
+      for (const account of accounts) {
+        if (account.status === 'error') continue;
+        try {
+          await coreClient.callRpc('accountRefreshQuota', { accountId: account.id });
+        } catch {
+          // One account failing must not stop the others.
+        }
+      }
+      await loadCoreAccounts();
+      quotaRefreshedAt = new Date().toISOString();
+    } catch (err: any) {
+      app.log.warn({ err: err?.message }, 'Automatic quota refresh failed');
+    } finally {
+      quotaRefreshInFlight = false;
+    }
+  };
+
+  const quotaRefreshMs = Math.max(
+    60_000,
+    Number.parseInt(process.env.QUOTA_REFRESH_INTERVAL_MS || '300000', 10) || 300_000,
+  );
+  const quotaRefreshTimer = setInterval(() => {
+    void refreshAllQuotas();
+  }, quotaRefreshMs);
+  quotaRefreshTimer.unref();
+  setTimeout(() => {
+    void refreshAllQuotas();
+  }, 5_000).unref();
+
+  app.post('/api/accounts/refresh-quotas', async () => {
+    await refreshAllQuotas();
+    return (await loadCoreAccounts()) ?? store.getAccounts();
+  });
+
   // Long-audio transcription/translation. These routes live on the bridge,
   // not the core, because a 1-2 hour recording must be split into <15 MiB
   // chunks. Each chunk is sent back through the normal /v1 proxy so leases,
@@ -745,6 +792,9 @@ export async function createServer(): Promise<{
   // cooldowns are owned by the core (docs/ACCOUNT-FAILOVER.md); the bridge
   // reports what it can observe.
   app.get('/api/status', async () => {
+    if (!quotaRefreshedAt || Date.now() - Date.parse(quotaRefreshedAt) > quotaRefreshMs) {
+      void refreshAllQuotas();
+    }
     const isCoreAlive = await coreClient.isCoreAlive();
     let coreStatus = null;
     if (isCoreAlive) {
@@ -836,6 +886,7 @@ export async function createServer(): Promise<{
       ).length,
       coreCredentials: readCoreCredentialState(),
       coreConnected: isCoreAlive,
+      quotaRefreshedAt,
       coreEndpoint: coreClient.getEndpoint(),
       corePid: coreStatus?.pid,
       version: BRIDGE_VERSION,
