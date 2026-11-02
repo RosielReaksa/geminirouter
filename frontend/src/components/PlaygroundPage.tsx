@@ -1,17 +1,21 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowRightLeft,
   Check,
   CircleAlert,
   FlaskConical,
   Loader2,
+  Music,
+  Paperclip,
   Play,
   RotateCcw,
   Sparkles,
   Timer,
+  Video,
+  X,
 } from 'lucide-react';
 import { api } from '../services/api';
-import { ModelInfo, PlaygroundResult } from '../types';
+import { ModelInfo, PlaygroundMedia, PlaygroundResult } from '../types';
 
 const STARTER_PROMPTS = [
   'Explain how a reverse proxy works in three simple sentences.',
@@ -21,6 +25,54 @@ const STARTER_PROMPTS = [
 
 const formatTokens = (value?: number) =>
   typeof value === 'number' ? value.toLocaleString() : '—';
+
+const MAX_AUDIO_BYTES = 15 * 1024 * 1024;
+const MAX_VIDEO_BYTES = 20 * 1024 * 1024;
+
+const formatBytes = (value: number): string => {
+  if (value >= 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+  if (value >= 1024) return `${(value / 1024).toFixed(0)} KB`;
+  return `${value} B`;
+};
+
+const isVideoFile = (file: File): boolean =>
+  file.type.startsWith('video/') || /\.(mp4|mov|webm|mkv|avi|m4v)$/i.test(file.name);
+
+const isAudioFile = (file: File): boolean =>
+  file.type.startsWith('audio/') || /\.(mp3|wav|ogg|flac|aac|m4a|aiff|aif|opus)$/i.test(file.name);
+
+const attachmentFormat = (file: File, video: boolean): string => {
+  const extension = file.name.split('.').pop()?.toLowerCase();
+  if (extension && /^[a-z0-9]{1,10}$/.test(extension)) return extension;
+  const byMime: Record<string, string> = {
+    'audio/mpeg': 'mp3',
+    'audio/mp3': 'mp3',
+    'audio/wav': 'wav',
+    'audio/x-wav': 'wav',
+    'audio/ogg': 'ogg',
+    'audio/flac': 'flac',
+    'audio/aac': 'aac',
+    'audio/mp4': 'm4a',
+    'audio/x-m4a': 'm4a',
+    'audio/aiff': 'aiff',
+    'video/mp4': 'mp4',
+    'video/quicktime': 'mov',
+    'video/webm': 'webm',
+    'video/x-matroska': 'mkv',
+  };
+  return byMime[file.type] || (video ? 'mp4' : 'mp3');
+};
+
+const readFileAsBase64 = (file: File): Promise<string> =>
+  new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = String(reader.result || '');
+      resolve(result.includes(',') ? result.split(',')[1] : result);
+    };
+    reader.onerror = () => reject(new Error('Could not read the attachment.'));
+    reader.readAsDataURL(file);
+  });
 
 const ResultCard: React.FC<{
   model: string;
@@ -57,10 +109,16 @@ const ResultCard: React.FC<{
     </div>
 
     {result && !loading && (
-      <div className="flex items-center gap-4 px-5 py-3 border-t border-[#F0ECE6] text-[11px] text-[#8D867D]">
+      <div className="flex flex-wrap items-center gap-4 px-5 py-3 border-t border-[#F0ECE6] text-[11px] text-[#8D867D]">
         <span className="inline-flex items-center gap-1"><Timer className="w-3.5 h-3.5" /> {result.latencyMs} ms</span>
         <span>{formatTokens(result.usage?.prompt_tokens)} input tokens</span>
         <span>{formatTokens(result.usage?.completion_tokens)} output tokens</span>
+        {result.media && (
+          <span className="inline-flex min-w-0 items-center gap-1">
+            {result.media.kind === 'video' ? <Video className="w-3.5 h-3.5" /> : <Music className="w-3.5 h-3.5" />}
+            <span className="truncate max-w-40" title={result.media.filename}>{result.media.filename}</span>
+          </span>
+        )}
       </div>
     )}
   </section>
@@ -79,6 +137,10 @@ export const PlaygroundPage: React.FC<{ onReady: () => void }> = ({ onReady }) =
   const [maxTokens, setMaxTokens] = useState(1024);
   const [results, setResults] = useState<Record<string, PlaygroundResult>>({});
   const [running, setRunning] = useState(false);
+  const [mediaFile, setMediaFile] = useState<File | null>(null);
+  const [mediaPreviewUrl, setMediaPreviewUrl] = useState<string | null>(null);
+  const [mediaError, setMediaError] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -101,11 +163,72 @@ export const PlaygroundPage: React.FC<{ onReady: () => void }> = ({ onReady }) =
     return () => { active = false; };
   }, []);
 
+  useEffect(() => () => {
+    if (mediaPreviewUrl) URL.revokeObjectURL(mediaPreviewUrl);
+  }, [mediaPreviewUrl]);
+
   const compareOptions = useMemo(() => models.filter((item) => item.id !== model), [models, model]);
+  const mediaIsVideo = mediaFile ? isVideoFile(mediaFile) : false;
+
+  const handleMediaChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+
+    const video = isVideoFile(file);
+    const audio = isAudioFile(file);
+    if (!video && !audio) {
+      setMediaError('Choose an audio or video file.');
+      return;
+    }
+    const maxBytes = video ? MAX_VIDEO_BYTES : MAX_AUDIO_BYTES;
+    if (file.size > maxBytes) {
+      setMediaError(
+        `${video ? 'Video' : 'Audio'} is too large for inline chat (${formatBytes(maxBytes)} max). ` +
+          (video ? 'Trim or compress it first.' : 'Use compressed 10–20 minute audio.'),
+      );
+      return;
+    }
+
+    setMediaError(null);
+    setMediaFile(file);
+    setMediaPreviewUrl(URL.createObjectURL(file));
+  };
+
+  const removeMedia = () => {
+    setMediaFile(null);
+    setMediaPreviewUrl(null);
+    setMediaError(null);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
 
   const runPrompt = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (!model || !prompt.trim() || running) return;
+    if (!model || running) return;
+    if (!prompt.trim() && !mediaFile) return;
+
+    let media: PlaygroundMedia | undefined;
+    if (mediaFile) {
+      const video = isVideoFile(mediaFile);
+      const maxBytes = video ? MAX_VIDEO_BYTES : MAX_AUDIO_BYTES;
+      if (mediaFile.size > maxBytes) {
+        setMediaError(`${video ? 'Video' : 'Audio'} is too large for inline chat (${formatBytes(maxBytes)} max).`);
+        return;
+      }
+      try {
+        media = {
+          kind: video ? 'video' : 'audio',
+          mimeType: mediaFile.type || (video ? 'video/mp4' : 'audio/mpeg'),
+          format: attachmentFormat(mediaFile, video),
+          dataBase64: await readFileAsBase64(mediaFile),
+          filename: mediaFile.name,
+          sizeBytes: mediaFile.size,
+        };
+      } catch (error) {
+        setMediaError(error instanceof Error ? error.message : 'Could not read the attachment.');
+        return;
+      }
+    }
 
     const selected = compareEnabled && compareModel && compareModel !== model
       ? [model, compareModel]
@@ -122,6 +245,7 @@ export const PlaygroundPage: React.FC<{ onReady: () => void }> = ({ onReady }) =
           systemPrompt: systemPrompt.trim() || undefined,
           temperature,
           maxTokens,
+          media,
         });
         setResults((current) => ({ ...current, [selectedModel]: result }));
       } catch (error) {
@@ -142,6 +266,8 @@ export const PlaygroundPage: React.FC<{ onReady: () => void }> = ({ onReady }) =
   const clearPrompt = () => {
     setPrompt('');
     setResults({});
+    setMediaError(null);
+    removeMedia();
   };
 
   return (
@@ -153,7 +279,7 @@ export const PlaygroundPage: React.FC<{ onReady: () => void }> = ({ onReady }) =
             <span>Try it live</span>
           </div>
           <h2 className="font-serif-editorial text-3xl font-semibold text-[#2A2723]">Playground</h2>
-          <p className="text-sm text-[#706B65] mt-1 max-w-2xl">Send a prompt through your gateway, then compare how different models respond.</p>
+          <p className="text-sm text-[#706B65] mt-1 max-w-2xl">Send a prompt or attach audio/video through your gateway, then compare how different models respond.</p>
         </div>
         <div className="inline-flex items-center gap-2 text-xs text-[#706B65] bg-white border border-[#EAE5DE] rounded-xl px-3 py-2">
           <Sparkles className="w-3.5 h-3.5 text-[#C25938]" /> Requests run through your local gateway
@@ -164,7 +290,7 @@ export const PlaygroundPage: React.FC<{ onReady: () => void }> = ({ onReady }) =
         <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_260px]">
           <div className="p-5 sm:p-6">
             <div className="flex items-center justify-between gap-4 mb-2">
-              <label htmlFor="playground-prompt" className="text-sm font-semibold text-[#2A2723]">Your prompt</label>
+              <label htmlFor="playground-prompt" className="text-sm font-semibold text-[#2A2723]">Your prompt / question</label>
               <span className="text-[11px] text-[#9E988F]">{prompt.length.toLocaleString()} characters</span>
             </div>
             <textarea
@@ -173,9 +299,80 @@ export const PlaygroundPage: React.FC<{ onReady: () => void }> = ({ onReady }) =
               onChange={(event) => setPrompt(event.target.value)}
               maxLength={20000}
               rows={7}
-              placeholder="Ask a question, test an instruction, or paste a small piece of code…"
+              placeholder="Ask a question, test an instruction, or attach audio/video and ask what is in it…"
               className="w-full resize-y min-h-40 rounded-xl border border-[#EAE5DE] bg-[#FDFCF9] px-4 py-3 text-sm leading-6 text-[#2A2723] placeholder:text-[#AAA399] focus:outline-none focus:border-[#C25938] focus:ring-2 focus:ring-[#C25938]/10"
             />
+
+            <div className="mt-3 flex flex-wrap items-center gap-3">
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="audio/*,video/*"
+                className="hidden"
+                aria-label="Attach audio or video"
+                onChange={handleMediaChange}
+              />
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                className="inline-flex items-center gap-2 rounded-xl border border-[#EAE5DE] bg-white px-3 py-2 text-xs font-medium text-[#504C46] hover:border-[#C25938]/40 hover:text-[#C25938] transition-colors"
+              >
+                <Paperclip className="w-3.5 h-3.5" />
+                Attach audio / video
+              </button>
+              <span className="text-[11px] text-[#9E988F]">Audio ≤15 MB · Video ≤20 MB</span>
+            </div>
+
+            {mediaFile && (
+              <div className="mt-3 rounded-xl border border-[#EAE5DE] bg-[#FDFCF9] p-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex min-w-0 items-center gap-2">
+                    {mediaIsVideo ? (
+                      <Video className="w-4 h-4 shrink-0 text-[#C25938]" />
+                    ) : (
+                      <Music className="w-4 h-4 shrink-0 text-[#C25938]" />
+                    )}
+                    <div className="min-w-0">
+                      <div className="truncate text-xs font-semibold text-[#2A2723]" title={mediaFile.name}>
+                        {mediaFile.name}
+                      </div>
+                      <div className="text-[11px] text-[#9E988F]">
+                        {formatBytes(mediaFile.size)} · {mediaIsVideo ? 'Video' : 'Audio'}
+                      </div>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={removeMedia}
+                    aria-label="Remove attachment"
+                    className="rounded-lg p-1.5 text-[#9E988F] hover:bg-[#F2ECE4] hover:text-[#A8462A]"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+                {mediaPreviewUrl && (
+                  <div className="mt-3">
+                    {mediaIsVideo ? (
+                      <video
+                        src={mediaPreviewUrl}
+                        controls
+                        preload="metadata"
+                        className="max-h-48 w-full rounded-lg bg-black"
+                      />
+                    ) : (
+                      <audio src={mediaPreviewUrl} controls preload="metadata" className="w-full" />
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {mediaError && (
+              <p className="mt-2 flex items-start gap-1.5 text-xs text-[#A8462A]">
+                <CircleAlert className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+                <span>{mediaError}</span>
+              </p>
+            )}
             <div className="mt-3 flex flex-wrap gap-2">
               {STARTER_PROMPTS.map((starter) => (
                 <button key={starter} type="button" onClick={() => setPrompt(starter)} className="rounded-full border border-[#EAE5DE] px-3 py-1.5 text-[11px] text-[#706B65] hover:border-[#C25938]/40 hover:text-[#C25938] transition-colors">
@@ -236,7 +433,7 @@ export const PlaygroundPage: React.FC<{ onReady: () => void }> = ({ onReady }) =
             </div>
 
             <div className="flex gap-2 pt-1">
-              <button type="submit" disabled={!prompt.trim() || !model || running || modelsLoading} className="flex-1 inline-flex items-center justify-center gap-2 rounded-xl bg-[#C25938] px-4 py-2.5 text-sm font-semibold text-white hover:bg-[#B24E2E] disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
+              <button type="submit" disabled={(!prompt.trim() && !mediaFile) || !model || running || modelsLoading} className="flex-1 inline-flex items-center justify-center gap-2 rounded-xl bg-[#C25938] px-4 py-2.5 text-sm font-semibold text-white hover:bg-[#B24E2E] disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
                 {running ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4 fill-current" />}
                 {running ? 'Running…' : compareEnabled ? 'Run comparison' : 'Run prompt'}
               </button>

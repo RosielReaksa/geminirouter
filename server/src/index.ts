@@ -23,6 +23,7 @@ import { ConcurrencyLeaseManager } from './leaseManager.js';
 import { handleV1ProxyRequest } from './v1Proxy.js';
 import { AccountTester, type AccountTestResult } from './accountTester.js';
 import {
+  isModelFailureText,
   readMediaConfig,
   registerMediaBodyParsers,
   registerMediaRoutes,
@@ -1796,16 +1797,83 @@ export async function createServer(): Promise<{
       systemPrompt?: unknown;
       temperature?: unknown;
       maxTokens?: unknown;
+      media?: {
+        kind?: unknown;
+        mimeType?: unknown;
+        format?: unknown;
+        dataBase64?: unknown;
+        filename?: unknown;
+        sizeBytes?: unknown;
+      };
     };
-  }>('/api/playground', async (request, reply) => {
-    const { model, prompt, systemPrompt, temperature, maxTokens } = request.body || {};
+  }>('/api/playground', { bodyLimit: 64 * 1024 * 1024 }, async (request, reply) => {
+    const { model, prompt, systemPrompt, temperature, maxTokens, media: rawMedia } = request.body || {};
     if (typeof model !== 'string' || !model.trim()) {
       return reply.code(400).send({ ok: false, error: 'Choose a model to run.' });
     }
-    if (typeof prompt !== 'string' || !prompt.trim()) {
-      return reply.code(400).send({ ok: false, error: 'Enter a prompt to run.' });
+
+    let media: {
+      kind: 'audio' | 'video';
+      mimeType: string;
+      format: string;
+      dataBase64: string;
+      filename: string;
+      sizeBytes: number;
+    } | null = null;
+
+    if (rawMedia && typeof rawMedia === 'object') {
+      const kind = rawMedia.kind === 'video' ? 'video' : rawMedia.kind === 'audio' ? 'audio' : null;
+      if (!kind) {
+        return reply.code(400).send({ ok: false, error: 'Attachment kind must be audio or video.' });
+      }
+      const dataBase64 =
+        typeof rawMedia.dataBase64 === 'string'
+          ? rawMedia.dataBase64.replace(/^data:[^;]+;base64,/i, '').replace(/\s+/g, '')
+          : '';
+      if (!dataBase64) {
+        return reply.code(400).send({ ok: false, error: 'The attached file is empty.' });
+      }
+      if (!/^[A-Za-z0-9+/]*={0,2}$/.test(dataBase64) || dataBase64.length % 4 !== 0) {
+        return reply.code(400).send({ ok: false, error: 'The attached file is not valid base64.' });
+      }
+      const decoded = Buffer.from(dataBase64, 'base64');
+      const maxBytes = kind === 'audio' ? 15 * 1024 * 1024 : 20 * 1024 * 1024;
+      if (decoded.length > maxBytes) {
+        return reply.code(413).send({
+          ok: false,
+          error:
+            kind === 'audio'
+              ? 'Audio is too large for inline playground chat (15 MB decoded max). Use compressed 10–20 minute audio or the /v1/audio/transcriptions endpoint.'
+              : 'Video is too large for inline playground chat (20 MB max). Trim or compress it first.',
+        });
+      }
+      const mimeType =
+        typeof rawMedia.mimeType === 'string' && rawMedia.mimeType.trim()
+          ? rawMedia.mimeType.trim()
+          : kind === 'audio'
+            ? 'audio/mpeg'
+            : 'video/mp4';
+      const format =
+        typeof rawMedia.format === 'string' && rawMedia.format.trim()
+          ? rawMedia.format.trim().replace(/^\./, '').toLowerCase()
+          : kind === 'audio'
+            ? 'mp3'
+            : 'mp4';
+      if (!/^[a-z0-9]{1,10}$/.test(format)) {
+        return reply.code(400).send({ ok: false, error: 'Unsupported attachment format.' });
+      }
+      const filename =
+        typeof rawMedia.filename === 'string' && rawMedia.filename.trim()
+          ? rawMedia.filename.trim().slice(0, 200)
+          : `upload.${format}`;
+      media = { kind, mimeType, format, dataBase64, filename, sizeBytes: decoded.length };
     }
-    if (prompt.length > 20000 || (typeof systemPrompt === 'string' && systemPrompt.length > 5000)) {
+
+    const promptText = typeof prompt === 'string' ? prompt.trim() : '';
+    if (!promptText && !media) {
+      return reply.code(400).send({ ok: false, error: 'Enter a prompt or attach audio/video.' });
+    }
+    if (promptText.length > 20000 || (typeof systemPrompt === 'string' && systemPrompt.length > 5000)) {
       return reply.code(413).send({ ok: false, error: 'Prompt is too long.' });
     }
 
@@ -1817,11 +1885,38 @@ export async function createServer(): Promise<{
       : 1024;
     const { port: gatewayPort, apiKey } = resolveGateway();
     const startedAt = Date.now();
+    const effectivePrompt =
+      promptText ||
+      (media?.kind === 'video'
+        ? 'Describe this video in detail. Include the spoken dialogue, the key events, and any on-screen text.'
+        : 'Describe this audio in detail. If there is speech, transcribe it and summarize the key points.');
+
+    const userContent = media
+      ? [
+          { type: 'text', text: effectivePrompt },
+          ...(media.kind === 'audio'
+            ? [
+                {
+                  type: 'input_audio',
+                  input_audio: { data: media.dataBase64, format: media.format },
+                },
+              ]
+            : [
+                {
+                  type: 'video_url',
+                  video_url: {
+                    url: `data:${media.mimeType};base64,${media.dataBase64}`,
+                  },
+                },
+              ]),
+        ]
+      : effectivePrompt;
+
     const messages = [
       ...(typeof systemPrompt === 'string' && systemPrompt.trim()
         ? [{ role: 'system', content: systemPrompt.trim() }]
         : []),
-      { role: 'user', content: prompt.trim() },
+      { role: 'user', content: userContent },
     ];
 
     try {
@@ -1829,7 +1924,7 @@ export async function createServer(): Promise<{
         `http://127.0.0.1:${gatewayPort}/v1/chat/completions`,
         { model: model.trim(), messages, temperature: safeTemperature, max_tokens: safeMaxTokens },
         {
-          timeout: 30000,
+          timeout: media ? 180000 : 30000,
           headers: {
             'Content-Type': 'application/json',
             ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
@@ -1842,12 +1937,24 @@ export async function createServer(): Promise<{
         : Array.isArray(content)
           ? content.map((part: any) => typeof part?.text === 'string' ? part.text : '').join('')
           : '';
+      if (isModelFailureText(resultText)) {
+        return reply.code(502).send({
+          ok: false,
+          model: model.trim(),
+          latencyMs: Date.now() - startedAt,
+          httpStatus: 502,
+          error: 'The model returned a failure message instead of an answer. Try again or adjust the prompt.',
+        });
+      }
       return {
         ok: true,
         model: model.trim(),
         response: resultText || '(empty response)',
         latencyMs: Date.now() - startedAt,
         usage: response.data?.usage || undefined,
+        ...(media
+          ? { media: { kind: media.kind, filename: media.filename, sizeBytes: media.sizeBytes } }
+          : {}),
       };
     } catch (error: any) {
       const status = error?.response?.status;

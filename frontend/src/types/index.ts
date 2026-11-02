@@ -280,6 +280,15 @@ export interface ModelTestResult {
   error?: string;
 }
 
+export interface PlaygroundMedia {
+  kind: 'audio' | 'video';
+  mimeType: string;
+  format: string;
+  dataBase64: string;
+  filename: string;
+  sizeBytes: number;
+}
+
 export interface PlaygroundResult {
   ok: boolean;
   model: string;
@@ -290,6 +299,7 @@ export interface PlaygroundResult {
     completion_tokens?: number;
     total_tokens?: number;
   };
+  media?: { kind: 'audio' | 'video'; filename: string; sizeBytes: number };
   error?: string;
   httpStatus?: number | null;
 }

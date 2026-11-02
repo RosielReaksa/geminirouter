@@ -8,6 +8,7 @@ import {
   ModelsResponse,
   ModelTestResult,
   PlaygroundResult,
+  PlaygroundMedia,
   TrafficVolumeRange,
   TrafficVolumeResponse,
 } from '../types';
@@ -411,11 +412,12 @@ export class ApiClient {
     systemPrompt?: string;
     temperature: number;
     maxTokens: number;
+    media?: PlaygroundMedia;
   }): Promise<PlaygroundResult> {
     const { response, data } = await this.fetchJson<PlaygroundResult & { error?: string }>('/api/playground', {
       method: 'POST',
       body: JSON.stringify(input),
-    }, 45000);
+    }, input.media ? 180000 : 45000);
     if (response.status === 401) {
       window.dispatchEvent(new CustomEvent('geminirouter:unauthorized'));
     }
