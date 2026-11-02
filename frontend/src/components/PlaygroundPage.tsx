@@ -183,7 +183,10 @@ const ResultCard: React.FC<{
   </section>
 );
 
-export const PlaygroundPage: React.FC<{ onReady: () => void }> = ({ onReady }) => {
+export const PlaygroundPage: React.FC<{ onReady: () => void; isActive?: boolean }> = ({
+  onReady,
+  isActive = true,
+}) => {
   const saved = useMemo(() => loadSavedPlaygroundState(), []);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [modelsLoading, setModelsLoading] = useState(true);
@@ -238,6 +241,10 @@ export const PlaygroundPage: React.FC<{ onReady: () => void }> = ({ onReady }) =
     });
     return () => { active = false; };
   }, []);
+
+  useEffect(() => {
+    if (isActive) onReady();
+  }, [isActive, onReady]);
 
   useEffect(() => () => {
     if (mediaPreviewUrl) URL.revokeObjectURL(mediaPreviewUrl);
@@ -464,8 +471,8 @@ export const PlaygroundPage: React.FC<{ onReady: () => void }> = ({ onReady }) =
               <span className="text-[11px] text-[#9E988F]">Inline: audio ≤15 MB, video ≤20 MB · Large: up to 2 GB</span>
             </div>
             <p className="mt-2 text-[11px] text-[#9E988F]">
-              Prompt and results stay in this tab. Attachments survive tab switches; after a full refresh,
-              re-attach the file.
+              Prompt, results, and any running request continue while you switch dashboard pages. A full
+              refresh cancels the request; re-attach the file afterward.
             </p>
 
             {mediaFile && (

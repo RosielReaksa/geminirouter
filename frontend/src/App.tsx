@@ -54,6 +54,13 @@ export const DashboardApp: React.FC = () => {
   const [isOAuthModalOpen, setIsOAuthModalOpen] = useState(false);
   const [isLiveApi, setIsLiveApi] = useState(false);
   const [isInitialLoading, setIsInitialLoading] = useState(true);
+  const [playgroundEverOpened, setPlaygroundEverOpened] = useState(currentTab === 'playground');
+
+  // Keep the Playground mounted after its first visit so uploads, progress and
+  // results survive switching to another dashboard page.
+  useEffect(() => {
+    if (currentTab === 'playground') setPlaygroundEverOpened(true);
+  }, [currentTab]);
 
   // Core Data States
   const [status, setStatus] = useState<GatewayStatus>(INITIAL_MOCK_STATUS);
@@ -352,8 +359,16 @@ export const DashboardApp: React.FC = () => {
             />
           )}
 
-          {currentTab === 'playground' && (
-            <PlaygroundPage onReady={() => handlePageReady('playground')} />
+          {(currentTab === 'playground' || playgroundEverOpened) && (
+            <div
+              className={currentTab === 'playground' ? '' : 'hidden'}
+              aria-hidden={currentTab !== 'playground'}
+            >
+              <PlaygroundPage
+                onReady={() => handlePageReady('playground')}
+                isActive={currentTab === 'playground'}
+              />
+            </div>
           )}
 
           {currentTab === 'gateway' && (
