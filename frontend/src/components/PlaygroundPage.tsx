@@ -2,6 +2,8 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowRightLeft,
   Check,
+  ChevronDown,
+  ChevronUp,
   CircleAlert,
   FlaskConical,
   Loader2,
@@ -124,18 +126,49 @@ const ResultCard: React.FC<{
   model: string;
   result?: PlaygroundResult;
   loading: boolean;
-}> = ({ model, result, loading }) => (
+}> = ({ model, result, loading }) => {
+  const responseRef = useRef<HTMLPreElement | null>(null);
+
+  useEffect(() => {
+    responseRef.current?.scrollTo({ top: 0 });
+  }, [result?.response]);
+
+  return (
   <section className="min-h-72 rounded-2xl border border-[#EAE5DE] bg-white shadow-soft overflow-hidden">
     <div className="flex items-center justify-between gap-4 px-5 py-4 border-b border-[#F0ECE6]">
       <div className="min-w-0">
         <div className="text-[10px] uppercase tracking-[0.16em] text-[#9E988F] font-semibold">Response</div>
         <div className="mt-1 text-sm font-semibold truncate" title={model}>{model || 'Choose a model'}</div>
       </div>
-      {loading ? (
-        <span className="flex items-center gap-1.5 text-xs text-[#C25938]"><Loader2 className="w-3.5 h-3.5 animate-spin" /> Running</span>
-      ) : result?.ok ? (
-        <span className="flex items-center gap-1.5 text-xs text-[#4E7B62]"><Check className="w-3.5 h-3.5" /> Complete</span>
-      ) : null}
+      <div className="flex shrink-0 items-center gap-2">
+        {loading ? (
+          <span className="flex items-center gap-1.5 text-xs text-[#C25938]"><Loader2 className="w-3.5 h-3.5 animate-spin" /> Running</span>
+        ) : result?.ok ? (
+          <span className="flex items-center gap-1.5 text-xs text-[#4E7B62]"><Check className="w-3.5 h-3.5" /> Complete</span>
+        ) : null}
+        {result?.response && !loading && (
+          <div className="flex items-center gap-0.5">
+            <button
+              type="button"
+              onClick={() => responseRef.current?.scrollTo({ top: 0, behavior: 'smooth' })}
+              title="Scroll response to top"
+              aria-label="Scroll response to top"
+              className="rounded-lg p-1.5 text-[#8D867D] hover:bg-[#F2ECE4] hover:text-[#C25938] transition-colors"
+            >
+              <ChevronUp className="w-3.5 h-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={() => responseRef.current?.scrollTo({ top: responseRef.current.scrollHeight, behavior: 'smooth' })}
+              title="Scroll response to bottom"
+              aria-label="Scroll response to bottom"
+              className="rounded-lg p-1.5 text-[#8D867D] hover:bg-[#F2ECE4] hover:text-[#C25938] transition-colors"
+            >
+              <ChevronDown className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
+      </div>
     </div>
 
     <div className="p-5">
@@ -147,7 +180,12 @@ const ResultCard: React.FC<{
         </div>
       ) : result?.response ? (
         <>
-          <pre className="whitespace-pre-wrap break-words font-sans-ui text-sm leading-6 text-[#504C46]">{result.response}</pre>
+          <pre
+            ref={responseRef}
+            className="max-h-[60vh] overflow-y-auto overscroll-contain whitespace-pre-wrap break-words rounded-lg border border-[#F0ECE6] bg-[#FDFCF9] p-3 pr-2 font-sans-ui text-sm leading-6 text-[#504C46] scroll-smooth"
+          >
+            {result.response}
+          </pre>
           {result.note && (
             <p className="mt-3 rounded-lg border border-[#EAE5DE] bg-[#FDFCF9] px-3 py-2 text-[11px] leading-5 text-[#8D867D]">
               {result.note}
@@ -181,7 +219,8 @@ const ResultCard: React.FC<{
       </div>
     )}
   </section>
-);
+  );
+};
 
 export const PlaygroundPage: React.FC<{ onReady: () => void; isActive?: boolean }> = ({
   onReady,
