@@ -5,6 +5,7 @@ import {
   ChevronDown,
   ChevronUp,
   CircleAlert,
+  Download,
   FlaskConical,
   Loader2,
   Music,
@@ -133,6 +134,14 @@ const ResultCard: React.FC<{
     responseRef.current?.scrollTo({ top: 0 });
   }, [result?.response]);
 
+  const imageMatch = result?.response
+    ? /!\[[^\]]*\]\((data:image\/[a-z0-9.+-]+;base64,[^)]+)\)/i.exec(result.response)
+    : null;
+  const imageSrc = imageMatch?.[1];
+  const imageExtension = imageSrc
+    ? (/^data:image\/([a-z0-9.+-]+)/i.exec(imageSrc)?.[1] || 'png').replace('jpeg', 'jpg')
+    : 'png';
+
   return (
   <section className="min-h-72 rounded-2xl border border-[#EAE5DE] bg-white shadow-soft overflow-hidden">
     <div className="flex items-center justify-between gap-4 px-5 py-4 border-b border-[#F0ECE6]">
@@ -146,7 +155,7 @@ const ResultCard: React.FC<{
         ) : result?.ok ? (
           <span className="flex items-center gap-1.5 text-xs text-[#4E7B62]"><Check className="w-3.5 h-3.5" /> Complete</span>
         ) : null}
-        {result?.response && !loading && (
+        {result?.response && !loading && !imageSrc && (
           <div className="flex items-center gap-0.5">
             <button
               type="button"
@@ -177,6 +186,27 @@ const ResultCard: React.FC<{
           <div className="h-3 rounded bg-[#F2ECE4] w-full" />
           <div className="h-3 rounded bg-[#F2ECE4] w-11/12" />
           <div className="h-3 rounded bg-[#F2ECE4] w-4/5" />
+        </div>
+      ) : imageSrc ? (
+        <div className="space-y-3">
+          <div className="max-h-[60vh] overflow-auto rounded-lg border border-[#F0ECE6] bg-[#FDFCF9] p-2">
+            <img
+              src={imageSrc}
+              alt="Generated image"
+              className="mx-auto max-h-[56vh] w-auto rounded-md"
+            />
+          </div>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <span className="text-xs text-[#8D867D]">Generated image</span>
+            <a
+              href={imageSrc}
+              download={`generated-image.${imageExtension}`}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-[#EAE5DE] bg-white px-3 py-1.5 text-xs font-medium text-[#504C46] transition-colors hover:border-[#C25938]/40 hover:text-[#C25938]"
+            >
+              <Download className="w-3.5 h-3.5" />
+              Download
+            </a>
+          </div>
         </div>
       ) : result?.response ? (
         <>

@@ -1723,6 +1723,7 @@ export async function createServer(): Promise<{
     { id: 'gemini-3-flash', name: 'Gemini 3 Flash', provider: 'Google Gemini', family: 'gemini', contextLength: 1048576, maxOutputTokens: 65535 },
     { id: 'gemini-3.1-pro', name: 'Gemini 3.1 Pro', provider: 'Google Gemini', family: 'gemini', contextLength: 1048576, maxOutputTokens: 65535 },
     { id: 'gemini-3.1-flash-lite', name: 'Gemini 3.1 Flash Lite', provider: 'Google Gemini', family: 'gemini', contextLength: 1048576, maxOutputTokens: 65535 },
+    { id: 'gemini-3.1-flash-image', name: 'Gemini 3.1 Flash (Image)', provider: 'Google Gemini', family: 'gemini-image', contextLength: 1048576, maxOutputTokens: 65535 },
     { id: 'gemini-3.5-flash-lite', name: 'Gemini 3.5 Flash Lite', provider: 'Google Gemini', family: 'gemini', contextLength: 1048576, maxOutputTokens: 65535 },
     { id: 'gemini-3-pro-image', name: 'Gemini 3 Pro Image', provider: 'Google Gemini', family: 'gemini-image', contextLength: 1048576, maxOutputTokens: 65535 },
     { id: 'gemini-3.8-flash-high', name: 'Gemini 3.8 Flash High', provider: 'Google Gemini', family: 'gemini', contextLength: 1048576, maxOutputTokens: 65535 },
@@ -1739,6 +1740,7 @@ export async function createServer(): Promise<{
   // completion requests. Expose only aliases verified against the live API.
   const WEBSITE_MODEL_ALIASES = new Set([
     'gemini-3.1-flash-lite',
+    'gemini-3.1-flash-image',
     'gemini-3.5-flash-lite',
     'gemini-3.8-flash-high',
   ]);
@@ -1968,6 +1970,7 @@ export async function createServer(): Promise<{
       : 1024;
     const { port: gatewayPort, apiKey } = resolveGateway();
     const startedAt = Date.now();
+    const isImageModel = /image/i.test(model.trim());
     const effectivePrompt =
       promptText ||
       (media?.kind === 'video'
@@ -2005,9 +2008,11 @@ export async function createServer(): Promise<{
     try {
       const response = await axios.post(
         `http://127.0.0.1:${gatewayPort}/v1/chat/completions`,
-        { model: model.trim(), messages, temperature: safeTemperature, max_tokens: safeMaxTokens },
+        isImageModel
+          ? { model: model.trim(), messages }
+          : { model: model.trim(), messages, temperature: safeTemperature, max_tokens: safeMaxTokens },
         {
-          timeout: media ? 180000 : 30000,
+          timeout: media || isImageModel ? 180000 : 30000,
           headers: {
             'Content-Type': 'application/json',
             ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),

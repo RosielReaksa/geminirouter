@@ -23,13 +23,12 @@
     }
 
     # =========================================================================
-    # 1. Long media uploads: /v1/audio/* & /v1/media/*
-    # These must reach the bridge (port 3000), which streams the upload to disk,
-    # chunks it with FFmpeg and calls the core once per chunk. The core cannot
-    # accept a 1-2 hour recording in one request.
+    # 1. Long media and image generation: /v1/audio/*, /v1/media/*, /v1/images/*
+    # These reach the bridge (port 3000). Media is streamed and chunked; image
+    # generation is forwarded to the core through the normal lease path.
     # =========================================================================
     @media {
-        path /v1/audio/* /v1/media/*
+        path /v1/audio/* /v1/media/* /v1/images/*
     }
 
     handle @media {

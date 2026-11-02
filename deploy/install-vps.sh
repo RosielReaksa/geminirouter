@@ -186,7 +186,7 @@ ${USER_DOMAIN} {
     # Audio uploads (10-20 minute windows) go to the bridge, which streams and
     # transcodes them before calling the core.
     @media {
-        path /v1/audio/* /v1/media/*
+        path /v1/audio/* /v1/media/* /v1/images/*
     }
 
     handle @media {

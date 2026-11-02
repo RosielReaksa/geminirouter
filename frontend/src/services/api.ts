@@ -417,7 +417,7 @@ export class ApiClient {
     const { response, data } = await this.fetchJson<PlaygroundResult & { error?: string }>('/api/playground', {
       method: 'POST',
       body: JSON.stringify(input),
-    }, input.media ? 180000 : 45000);
+    }, input.media || /image/i.test(input.model) ? 180000 : 45000);
     if (response.status === 401) {
       window.dispatchEvent(new CustomEvent('geminirouter:unauthorized'));
     }

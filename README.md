@@ -20,6 +20,10 @@ responses.
 See the [audio/video API guide](docs/MEDIA_API.md) for request examples, size
 limits, and current output limitations.
 
+Image generation is available at `POST /v1/images/generations` using
+`gemini-3.1-flash-image`; the Playground renders the generated image and offers
+a download button. See the [image API guide](docs/IMAGE_API.md).
+
 ### Key Highlights
 - **100% Native & Lightweight**: Zero Docker overhead. Runs directly via standard Node.js (v22/v24), managed with systemd or PM2, consuming less than 150MB of RAM.
 - **OpenAI & Anthropic Compatible**: Drop-in base URL replacement for Claude Code, Codex CLI, Cursor, Aider, OpenCode, LibreChat, and standard OpenAI SDKs.
