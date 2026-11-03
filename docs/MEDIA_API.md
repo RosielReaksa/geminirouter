@@ -385,8 +385,8 @@ well past the estimate, so use it to set client timeouts, not to abort work.
 
 | Model | 60 s clip | 120 s clip | 300 s clip |
 |---|---:|---:|---:|
-| `gemini-3.8-flash-high` | ~71 s | ~113 s | ~575 s (3 parallel chunks) |
-| `gemini-3.5-flash-lite` | ~25 s | ~45 s | ~65 s (5 parallel chunks) |
+| `gemini-3.8-flash-high` | ~71 s | ~113 s | 125–575 s (3 parallel chunks, pool-dependent) |
+| `gemini-3.5-flash-lite` | ~25 s | ~45 s | ~26–65 s (5 chunks, 4 workers) |
 
 For latency-sensitive work prefer `gemini-3.5-flash-lite`; when the 3.8 script
 quality is required, send 120-second chunks from the client or let the endpoint

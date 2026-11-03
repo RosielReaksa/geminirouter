@@ -533,3 +533,28 @@ helper (`3` chunks → 3 workers, caps at 4, long-window models stay at 1) and t
 estimate factors, and the 130 s lite route run asserts `concurrency: 3` plus
 `timings.estimated_ms: 39000`. The 65 s route run pins `concurrency: 1` to prove
 an explicit value is never overridden.
+
+### 15.4 Deployment and live verification
+
+Deployed as `20261103-140056` (server + frontend, backup
+`/opt/geminirouter/.deploy-backups/20261103-140056`), bridge `active`,
+`NRestarts=0`, live bundle `index-CRYuj1aE.js`, CSS `index-DKl6l1hE.css`.
+
+| Request | Result |
+|---|---|
+| 300 s, `gemini-3.5-flash-lite`, no `concurrency` | 200 in **26.2 s**, 73 segments (12/13/15/16/17), `concurrency: 4`, `chunk_seconds: 60`, `estimated_ms: 90029`, last segment `05:00.1`, coverage 1.193 |
+| 300 s, `gemini-3.8-flash-high`, no `concurrency` | 200 in **125.1 s**, 78 segments (41/24/13), `concurrency: 3`, `chunk_seconds: 120`, `estimated_ms: 660211`, last segment `04:59.8`, coverage 1.175 |
+| `gemini-3.5-flash-lite` chat ping | 200, `content: "chat-ok"` in 3.1 s |
+| `GET /v1/models` | `gemini-3.5-flash-lite` and `gemini-3.8-flash-high` listed; no `gemini-3.8-flash-tiered` |
+
+Bridge logs confirm the new path: `media: dubbing concurrency raised for
+short-window model` with `{chunkCount: 5, concurrency: 4}` for lite and
+`{chunkCount: 3, concurrency: 3}` for the 3.8 request. The 3.8 request was split
+into 120 s + 120 s + 60 s and started all three chunks at once.
+
+Wall-clock variance on 3.8 is real: the same 300 s clip took 575 s with explicit
+`concurrency=3` during the earlier verification round and 125 s with the new
+default on a warmer pool. `estimated_ms` deliberately quotes the slow end
+(2.2× duration) because it exists to size client timeouts; treat any figure at or
+above ~125 s for 300 s of 3.8 as normal.
+

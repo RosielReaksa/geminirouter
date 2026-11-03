@@ -409,6 +409,18 @@ after another and the strict retry can double a chunk. The same request with
 | Docs | `docs/MEDIA_API.md`, `docs/DUBBING_CHANGELOG.md` §15, website dubbing section |
 
 Client guidance: for 3.8 production dubbing keep the direct `:generateContent`
-path with 120 s chunks; through the router, 300 s 3.8 is now accepted but needs
-about ten minutes, while `gemini-3.5-flash-lite` returns the same clip in about a
-minute. Chunked progress or a job id stays an optional follow-up.
+path with 120 s chunks; through the router, 300 s 3.8 is now accepted and runs
+its chunks in parallel, while `gemini-3.5-flash-lite` returns the same clip in
+about half a minute. Chunked progress or a job id stays an optional follow-up.
+
+Live check on build `20261103-140056` (300 s fixture, no `concurrency` field):
+
+| Model | Result |
+|---|---|
+| `gemini-3.5-flash-lite` | 200 in **26.2 s**, 73 segments, `concurrency: 4`, `estimated_ms: 90029` |
+| `gemini-3.8-flash-high` | 200 in **125.1 s**, 78 segments, `concurrency: 3`, `estimated_ms: 660211` |
+
+Both answers cover the whole clip (last segment `05:00.1` / `04:59.8`) with the
+7-field contract intact and no empty `khmer_dubbing` values. The 3.8 estimate is
+deliberately pessimistic: earlier measurements on a colder pool put the same
+request at 575 s.
