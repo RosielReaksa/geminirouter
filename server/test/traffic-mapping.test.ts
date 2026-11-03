@@ -32,7 +32,7 @@ test('retired model ids in the core audit become the canonical id', () => {
       {
         id: 'r2',
         timestamp: 1793705001000,
-        model: 'gemini-3.8-flash-high',
+        model: 'gemini-3.8-flash-low',
         physicalModel: 'gemini-3.8-flash-low',
         attributedAccountId: 'acc-1',
         status: 200,
@@ -46,8 +46,8 @@ test('retired model ids in the core audit become the canonical id', () => {
   assert.equal(records[0].modelRouted, 'gemini-3.8-flash-high');
   assert.equal(records[0].backingAccountEmail, 'one@gmail.com');
   assert.equal(records[0].totalTokens, 15);
-  assert.equal(records[1].modelRequested, 'gemini-3.8-flash-high');
-  assert.equal(records[1].modelRouted, 'gemini-3.8-flash-high');
+  assert.equal(records[1].modelRequested, 'gemini-3.8-flash-low');
+  assert.equal(records[1].modelRouted, 'gemini-3.8-flash-low');
 });
 
 test('unrelated model ids and empty audits pass through unchanged', () => {

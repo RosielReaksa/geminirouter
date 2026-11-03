@@ -6,17 +6,19 @@ import {
   canonicalizeModelIds,
 } from '../src/modelIds.js';
 
-test('retired 3.8 aliases collapse to gemini-3.8-flash-high', () => {
+test('the retired tiered id maps to gemini-3.8-flash-high', () => {
   assert.equal(canonicalModelId('gemini-3.8-flash-tiered'), 'gemini-3.8-flash-high');
-  assert.equal(canonicalModelId('gemini-3.8-flash-low'), 'gemini-3.8-flash-high');
   assert.equal(canonicalModelId('gemini-3.8-flash-high'), 'gemini-3.8-flash-high');
+  assert.equal(canonicalModelId('gemini-3.8-flash-low'), 'gemini-3.8-flash-low');
 });
 
 test('other model families keep their exact ids', () => {
   for (const id of [
+    'gemini-3.8-flash-low',
     'gemini-3.5-flash-low',
     'gemini-3.5-flash-high',
     'gemini-3.6-flash-tiered',
+    'gemini-3.7-flash-tiered',
     'gemini-3.1-flash-lite',
     'claude-opus-4-6-thinking',
     'gpt-oss-120b-medium',
@@ -33,7 +35,7 @@ test('canonicalizeModelIds renames, de-duplicates and preserves order', () => {
       'gemini-3.8-flash-high',
       'gemini-3.8-flash-low',
     ]),
-    ['gemini-3.8-flash-high', 'gemini-3.1-flash-lite'],
+    ['gemini-3.8-flash-high', 'gemini-3.1-flash-lite', 'gemini-3.8-flash-low'],
   );
 });
 
@@ -47,7 +49,7 @@ test('canonicalizeModelEntries renames entries and drops duplicates', () => {
 
   assert.deepEqual(
     entries.map((entry) => entry.id),
-    ['gemini-3.8-flash-high', 'gemini-3.1-flash-lite'],
+    ['gemini-3.8-flash-high', 'gemini-3.8-flash-low', 'gemini-3.1-flash-lite'],
   );
   assert.equal(entries[0].owned_by, 'antigravity');
 });

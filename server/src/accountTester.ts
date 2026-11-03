@@ -86,7 +86,7 @@ export class AccountTester {
    */
   async testAndRefreshAccount(
     account: GoogleAccount,
-    model: string = 'gemini-3.8-flash-high',
+    model: string = 'gemini-3.8-flash-low',
     refreshQuota = true,
   ): Promise<AccountTestResult> {
     const { port, apiKey } = this.resolveGateway();
@@ -258,7 +258,7 @@ export class AccountTester {
   /**
    * Test and refresh all accounts in the pool sequentially.
    */
-  async testAndRefreshAll(model: string = 'gemini-3.8-flash-high'): Promise<AccountTestResult[]> {
+  async testAndRefreshAll(model: string = 'gemini-3.8-flash-low'): Promise<AccountTestResult[]> {
     const accounts = this.store.getAccounts();
     const results: AccountTestResult[] = [];
 

@@ -148,7 +148,7 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
           'Content-Type': 'application/json',
           ...authApi.headers(),
         },
-        body: JSON.stringify({ model: 'gemini-3.8-flash-high' }),
+        body: JSON.stringify({ model: 'gemini-3.8-flash-low' }),
       });
       const data = await res.json().catch(() => ({}));
       if (res.status === 401) {
