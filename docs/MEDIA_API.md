@@ -298,6 +298,12 @@ The route reuses the transcription upload parsers: multipart `file`,
 - `temperature` — default `0`; `concurrency` — 1–4 chunks in parallel;
   `response_format` — `json` (default) or `array`.
 
+Reasoning models (the `gemini-3.8` family and any id containing `high`,
+`thinking`, `reasoner` or `pro`) spend output tokens on a thinking pass before
+the JSON answer. They are capped at **120 seconds per chunk** and always get at
+least **40,960** output tokens, because their earlier 300-second answers returned
+a single line. Other models keep the requested chunk size and the duration table.
+
 ### Output contract
 
 Each segment has exactly these fields:
@@ -332,8 +338,14 @@ The default `json` response wraps the merged segments with metadata:
       "vocal_timbre": "young and bright", "character_role": "younger sister",
       "original_transcript": "你来了", "khmer_dubbing": "អ្នកមកហើយ ចាស" }
   ],
+  "coverage": {
+    "speech_seconds": 332.8,
+    "covered_seconds": 318.4,
+    "ratio": 0.957
+  },
   "chunks": [
     { "index": 0, "start_seconds": 0, "end_seconds": 300, "segment_count": 24,
+      "speech_seconds": 271.2, "covered_seconds": 260.4, "thought_characters": 0,
       "max_output_tokens": 24576, "model": "gemini-3.5-flash-lite",
       "usage": { "promptTokens": 0, "completionTokens": 0, "totalTokens": 0 } }
   ],
@@ -348,13 +360,14 @@ With `response_format=array`, the body is only the segment array.
 
 | Chunk duration | `maxOutputTokens` |
 |---|---|
-| ≤ 55 s | 8,192 |
 | ≤ 120 s | 8,192 |
 | ≤ 240 s | 16,384 |
 | ≤ 300 s | 24,576 |
 | ≤ 600 s | 40,960 |
-| ≤ 900 s | 65,535 |
-| ≤ 1800 s | 65,535 |
+| > 600 s | 65,535 |
+
+Reasoning models always receive at least 40,960 tokens, even for a 60- or
+120-second chunk.
 
 A response that stops at the cap (`finishReason: "MAX_TOKENS"`) fails the whole
 request with `model_output_truncated`; the server never returns a silently
@@ -365,6 +378,51 @@ once without the schema, keeping `responseMimeType: application/json` and the
 prompt contract. If a chunk still fails after retries, the error includes
 `details.completed_chunks` and `details.partial_segments` so successful work is
 not lost.
+
+### Completeness validation
+
+Thinking parts (`parts[].thought: true`) are never mixed into the answer. The
+server parses only the model's final JSON, and when an answer contains several
+arrays it uses the largest/last one, so an example draft cannot become the
+script.
+
+For every chunk the server also runs FFmpeg `silencedetect` to measure audible
+speech, then compares it with the time covered by the returned segments. When
+the answer is empty, a single line for a long conversation, or covers less than
+35% of the audible speech, the chunk is retried once with an explicit
+completeness prompt. If the retry is still incomplete, the request fails instead
+of silently dropping dialogue:
+
+```json
+{
+  "error": {
+    "message": "Chunk 1 returned 1 segment(s) covering 0.2s of 3.1s of audible speech (7%). ...",
+    "type": "media_error",
+    "code": "partial_script",
+    "details": {
+      "chunkIndex": 0,
+      "segmentCount": 1,
+      "coveredSeconds": 0.2,
+      "speechSeconds": 3.1,
+      "durationSeconds": 3.1,
+      "coverageRatio": 0.065,
+      "thoughtCharacters": 0
+    }
+  }
+}
+```
+
+`empty_model_response` is used when the model returned no answer at all.
+Silent or unmeasurable chunks are accepted with an empty segment list; the
+`coverage` block reports `speech_seconds: null` when FFmpeg could not measure
+the chunk.
+
+Completeness is checked per chunk. The default model `gemini-3.5-flash-lite`
+stops early on long windows: on a 300 s chunk it returned 20 segments covering
+26% of the audible speech, so the request now fails with `partial_script` instead
+of returning a truncated script. `gemini-3.8-flash-high` handled the same 300 s
+clip in three 120 s chunks and returned 82 segments. Pick the model per clip
+length, or set `chunk_seconds=120` and spot-check the result.
 
 ### Examples
 

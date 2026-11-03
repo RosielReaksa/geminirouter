@@ -2,7 +2,7 @@
 
 **Date:** 2026-11-03
 **Scope:** `geminirouter` gateway (`server/`), public website (`frontend/`), VPS deployment
-**Commits:** `fba3d22` (feature), `d21e3d4` (pitch removal)
+**Commits:** `fba3d22` (feature), `d21e3d4` (pitch removal), `3432d1d` (tiered retirement); the completeness/shutdown fix round is recorded in §14
 **Production:** <https://framecall.site> — `/opt/geminirouter`, systemd `geminirouter-bridge`
 
 ---
@@ -172,12 +172,15 @@ Returns only the segment array — no metadata envelope.
 
 | Chunk duration | Cap |
 |---|---|
-| ≤ 55 s | 8,192 |
 | ≤ 120 s | 8,192 |
 | ≤ 240 s | 16,384 |
 | ≤ 300 s | 24,576 |
 | ≤ 600 s | 40,960 |
 | > 600 s (incl. 1800 s) | 65,535 |
+
+Reasoning models (`gemini-3.8` family, ids with `high` / `thinking` /
+`reasoner` / `pro`) are capped at 120 s per chunk and always receive at least
+40,960 tokens.
 
 A `finishReason` of `length` / `max_tokens` fails the request with
 `model_output_truncated`; the server never returns a silently shortened script.
@@ -194,6 +197,9 @@ A `finishReason` of `length` / `max_tokens` fails the request with
 | HTTP 401 from core | `upstream_auth_failed` (401) — no retry |
 | Truncated output | `model_output_truncated` (502) — no partial script returned |
 | Empty content | Retried; `empty_model_response` (502) when exhausted |
+| Empty / single-line / low-coverage script on audible speech | One strict retry with `DUBBING_COMPLETENESS_RETRY_PROMPT`; then `partial_script` (502) with `coverageRatio`, `speechSeconds`, `segmentCount` |
+| Model thoughts contain a draft JSON array | Thoughts are excluded from the answer; the largest/last JSON array in the real answer is used |
+| Incomplete script on a silent or unmeasurable chunk | Accepted; `coverage.speech_seconds` is `null` when FFmpeg cannot measure |
 | Generic model failure sentence | Retried up to 2 attempts; `model_failure_text` (502) |
 | Non-JSON / unparseable output | Retried; `invalid_model_json` (502) |
 | A chunk still fails | Error `details.completed_chunks` + `details.partial_segments` so finished work is not lost |
@@ -336,14 +342,13 @@ curl -X POST "https://framecall.site/v1/audio/dubbing" \
 
 ## 12. Known limitations / follow-ups
 
-1. **Model can return `[]` on valid speech.** One live JSON-mode run on a 9.6 s
-   English clip with `source_language=zh` returned `segment_count: 0` and
-   `completionTokens: 1` (the model answered an empty array). The same clip
-   returned 3 segments in array mode. The built-in prompt is Chinese→Khmer, so a
-   mismatched source hint can make the model skip the audio. Suggested fix:
-   treat an empty array on non-silent audio as retryable, or add a prompt hint
-   when the audio language may differ from `source_language`. Not implemented
-   yet.
+1. **Model could return `[]` on valid speech — fixed.** One live JSON-mode run on
+   a 9.6 s English clip with `source_language=zh` returned `segment_count: 0`.
+   The server now measures audible speech with `silencedetect`, rejects empty /
+   single-line / low-coverage answers on audible chunks, retries once with a
+   completeness prompt, and fails with `partial_script` instead of returning a
+   near-empty script. Reasoning-model thoughts are no longer merged into the
+   answer.
 2. **No speaker diarization IDs.** Segments carry `speaker_gender` and
    `character_role`, but no stable speaker index. Similar voices can be
    relabeled between chunks.
@@ -372,3 +377,93 @@ sudo systemctl restart geminirouter-bridge
 To roll back only the pitch removal, use backup `20261103-105635` for
 `server/dist` and the `20261103-104737` or `20261103-104441` frontend tree
 depending on whether the docs section should remain.
+
+---
+
+## 14. Defect fix round — single-segment answers and empty 502s
+
+**Date:** 2026-11-03
+**Backup:** `/opt/geminirouter/.deploy-backups/20261103-114543`
+**Deployed:** bridge restarted `2026-11-03 11:46:04 UTC`, `NRestarts=0`
+
+### 14.1 Reported defects
+
+| # | Symptom | Trigger |
+|---|---|---|
+| A | HTTP 200 but the script had a single segment | 60 s and 120 s clips on `gemini-3.8-flash-high` |
+| B | HTTP 502 with an empty body | 300 s clip on `gemini-3.8-flash-high` |
+
+### 14.2 Root causes
+
+- **A — thoughts parsed as the answer.** Gemini 3.8 returns `thought: true`
+  parts, and those thoughts usually contain a draft example such as
+  `[{"khmer_dubbing":"បាទ"}]`. The old code concatenated thought and answer text
+  and then took the *first* balanced JSON array, so the draft replaced the real
+  script. The model had actually written the full script.
+- **B — the request was killed by our own deploy.** `forceCloseConnections: true`
+  plus `TimeoutStopSec=20s` terminated the in-flight 300 s request while the new
+  process was starting, so Caddy saw a closed connection and produced
+  `Content-Length: 0`. `NRestarts` stayed `0`, which is why the restart was not
+  obvious.
+
+### 14.3 Fixes
+
+| Area | Change |
+|---|---|
+| Answer extraction | `geminiResponseAnswer()` drops `thought: true` parts, counts them as `thought_characters`, and falls back to the chat-completions shape |
+| JSON recovery | `parseDubbingPayload()` scans every balanced array/object and keeps the largest (then last) one, so an example draft cannot win |
+| Completeness | Per-chunk FFmpeg `silencedetect` measures audible speech; `dubbingCoverageVerdict()` rejects empty, single-line, and < 35 % coverage answers |
+| Recovery | One strict retry with `DUBBING_COMPLETENESS_RETRY_PROMPT`; a second failure returns `partial_script` (502) with `coverageRatio`, `speechSeconds`, `segmentCount`, `thoughtCharacters` |
+| Reasoning models | 120 s per-chunk window and a 40,960-token floor for `gemini-3.8`, `high`, `thinking`, `reasoner`, `pro` |
+| Prompt | Contract now states that one element per utterance is mandatory and that a single segment for a conversation is an error |
+| Shutdown | `forceCloseConnections: 'idle'`, SIGTERM/SIGINT drain (`SHUTDOWN_GRACE_MS`, default 240 s), `TimeoutStopSec=300s`, `kill_timeout: 300000` |
+| Errors | Global Fastify error handler and per-chunk JSON envelopes; no route can answer 502 with an empty body |
+| Workers | `Promise.allSettled` worker loop plus process-level `unhandledRejection` / `uncaughtException` logging |
+| Model ids | Dubbing canonicalises the id, so `gemini-3.8-flash-tiered` → `gemini-3.8-flash-high` |
+
+### 14.4 Tests
+
+`pnpm --dir server test` → **105/105 passing**. New cases cover reasoning
+caps/floor, thought exclusion, largest-array parsing, silence maths, coverage
+verdicts, a thought-part route run, the strict-retry success path, and the
+`partial_script` envelope (empty body is asserted against). Frontend build
+clean: `index-Bns_y1OQ.js`.
+
+### 14.5 Live verification
+
+Production, synthetic English TTS clips (12 lines / 24 lines / ~66 lines):
+
+| Request | Result |
+|---|---|
+| 60 s, `gemini-3.8-flash-high` | 200 in 63 s, 12 segments, coverage ratio 1.226; a repeat run returned 22 segments, `X-Geminirouter-Segments: 22` |
+| 120 s, `gemini-3.8-flash-high` | 200 in 128 s, 24 segments, ratio 1.155 |
+| 300 s, `gemini-3.8-flash-high` | 200 in 616 s, **82 segments** in 3 × 120 s chunks (35/34/13), ratio 1.216 |
+| 300 s, `gemini-3.5-flash-high` | 502 `upstream_unavailable` — core answered **HTTP 503 “All accounts failed or unhealthy”** for the 3.5 high/low/medium pools (verified with a plain `/v1/chat/completions` ping), so the ≥ 80 target could not be re-checked this round |
+| 300 s, `gemini-3.5-flash-lite` (default window) | 502 `partial_script`: 20 segments covering 43.4 s of 169.6 s audible speech (26 %), first attempt 28 % |
+| 300 s, `gemini-3.5-flash-lite`, `chunk_seconds=120` | 200, 51 segments, but inspection shows chunk 1 stopped at `01:09` and chunk 2 repeated earlier lines — lite is not a safe long-clip model |
+
+Service checks after the deploy:
+
+| Check | Result |
+|---|---|
+| `systemctl show -p NRestarts` | `0` |
+| `TimeoutStopUSec` / `KillSignal` | `5min` / `SIGTERM` (drop-in) |
+| 502 log lines since deploy | 3 dubbing failures, all JSON with `error.code` (`partial_script`, 2 × `upstream_unavailable`) |
+| `Content-Length: 0` responses | none |
+| Unhandled route errors | `0` |
+| `X-Geminirouter-Segments` vs `segments.length` | equal on every 200 |
+
+Docs site redeployed afterwards: backup `20261103-122456`, live asset
+`index-N7Rm0l1a.js` (CSS `index-DKl6l1hE.css`), bridge untouched
+(`NRestarts=0`).
+
+### 14.6 Follow-ups
+
+- `gemini-3.5-flash-lite` remains the dubbing default but cannot produce a
+  complete script for long windows; 300 s requests now fail loudly instead of
+  returning a truncated script. Use `gemini-3.8-flash-high` (or
+  `chunk_seconds=120` with a spot check) for long clips.
+- The 35 % per-chunk coverage floor is deliberately lenient; a chunk can still
+  lose dialogue between 35 % and ~75 % coverage. Tightening it needs a corpus of
+  real footage because music and overlapping speech depress the measured ratio.
+- 3.5 high/low/medium verification is pending account-pool recovery.

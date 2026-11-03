@@ -28,6 +28,8 @@ module.exports = {
       autorestart: true,
       watch: false,
       max_memory_restart: '1G',
+      // Give in-flight dubbing requests time to answer before killing them.
+      kill_timeout: 300000,
       env: {
         NODE_ENV: 'production',
         PORT: 3000,

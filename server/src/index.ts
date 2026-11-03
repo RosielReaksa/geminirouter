@@ -106,7 +106,10 @@ export async function createServer(): Promise<{
       level: process.env.LOG_LEVEL || 'info',
     },
     bodyLimit: 10 * 1024 * 1024, // 10MB
-    forceCloseConnections: true,
+    // "idle" closes keep-alive sockets on shutdown but lets in-flight requests
+    // (including multi-minute dubbing jobs) finish. `true` would destroy them
+    // and Caddy would answer the client with an empty 502.
+    forceCloseConnections: 'idle',
   });
 
   const coreClient = new CoreClient();
@@ -2213,6 +2216,32 @@ export async function createServer(): Promise<{
     };
   });
 
+  // Every uncaught route error must leave as the documented JSON envelope.
+  // Media routes return their own envelope; this catches anything else instead
+  // of letting Fastify close the socket without a body.
+  app.setErrorHandler((error, request, reply) => {
+    const statusCode =
+      typeof (error as any)?.statusCode === 'number' && (error as any).statusCode >= 400
+        ? (error as any).statusCode
+        : 500;
+    const message =
+      statusCode >= 500 ? 'Internal server error.' : (error as Error)?.message || 'Request failed.';
+    if (statusCode >= 500) {
+      request.log.error({ err: error }, 'unhandled route error');
+    } else {
+      request.log.warn({ err: error }, 'route rejected the request');
+    }
+    if (reply.raw.headersSent) return;
+    return reply.code(statusCode).send({
+      error: {
+        message,
+        type: statusCode >= 500 ? 'server_error' : 'invalid_request_error',
+        code: statusCode >= 500 ? 'internal_error' : 'invalid_request',
+        ...(statusCode >= 500 ? {} : { details: { reason: (error as Error)?.message } }),
+      },
+    });
+  });
+
   // Fallback for SPA routing if dist index.html exists
   if (hasFrontendDist) {
     app.setNotFoundHandler(async (request, reply) => {
@@ -2271,6 +2300,41 @@ async function main() {
     app.log.error(err);
     process.exit(1);
   }
+
+  const shutdownGraceMs = Math.max(
+    5_000,
+    Math.min(60 * 60 * 1000, Number.parseInt(process.env.SHUTDOWN_GRACE_MS || '240000', 10) || 240_000),
+  );
+  let closing = false;
+  const shutdown = async (signal: string, exitCode = 0) => {
+    if (closing) return;
+    closing = true;
+    app.log.warn({ signal, shutdownGraceMs }, 'shutting down: draining in-flight requests');
+    // Drain: stop accepting, close idle keep-alive sockets, and let running
+    // requests (long media jobs included) write their real response.
+    const forceExit = setTimeout(() => {
+      app.log.warn({ signal }, 'shutdown grace period expired; exiting now');
+      process.exit(exitCode);
+    }, shutdownGraceMs);
+    forceExit.unref?.();
+    try {
+      await app.close();
+    } catch (error) {
+      app.log.error({ err: error }, 'error while closing the server');
+    }
+    clearTimeout(forceExit);
+    process.exit(exitCode);
+  };
+
+  process.once('SIGTERM', () => void shutdown('SIGTERM'));
+  process.once('SIGINT', () => void shutdown('SIGINT'));
+  process.on('unhandledRejection', (reason) => {
+    app.log.error({ err: reason }, 'unhandled promise rejection (request kept alive)');
+  });
+  process.on('uncaughtException', (error) => {
+    app.log.fatal({ err: error }, 'uncaught exception; draining before restart');
+    void shutdown('uncaughtException', 1);
+  });
 }
 
 if (process.argv[1] && (process.argv[1].endsWith('index.ts') || process.argv[1].endsWith('index.js'))) {

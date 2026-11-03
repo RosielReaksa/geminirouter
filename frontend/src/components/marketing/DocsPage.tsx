@@ -298,15 +298,21 @@ for (const line of segments) {
                   and a 5-minute chunk. Override them with <code>chunk_seconds</code> (up to 1800)
                   and <code>model</code>; a caller <code>prompt</code> replaces the built-in
                   instructions, but the JSON timing contract is always appended. Output budget
-                  follows the chunk length: 5 min → 8192 tokens, 10 min → 24576, 15 min → 65535.
+                  follows the chunk length: 2 min → 8,192 tokens, 5 min → 24,576, 10 min+ → 65,535.
+                  Reasoning models such as <code>gemini-3.8-flash-high</code> use 120-second chunks
+                  with a 40,960-token floor so their thinking pass cannot truncate the script.
                 </p>
                 <p>
                   Timestamps are <code>MM:SS.S</code> and already shifted to the recording start,
                   so chunk offsets can be used directly. Khmer politeness particles are kept per
                   speaker: male <span className="text-[#4A453E] font-medium">បាទ</span>, female{' '}
-                  <span className="text-[#4A453E] font-medium">ចាស</span>. Use{' '}
-                  <code>response_format=json</code> when you also need chunk boundaries, token
-                  usage, and per-chunk timings.
+                  <span className="text-[#4A453E] font-medium">ចាស</span>. Each chunk&apos;s audible
+                  speech is measured; an empty or implausibly short script is retried once and then
+                  rejected with a JSON <code>partial_script</code> error instead of silently dropping
+                  dialogue. The <code>gemini-3.5-flash-lite</code> default stops early on 5-minute
+                  windows, so use <code>gemini-3.8-flash-high</code> for long clips. Use{' '}
+                  <code>response_format=json</code> when you also need the{' '}
+                  <code>coverage</code> block, chunk boundaries, token usage, and per-chunk timings.
                 </p>
               </div>
               <Code

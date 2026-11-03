@@ -16,11 +16,18 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import type { GoogleAccount, LocalStateStore } from '../src/store.js';
 import {
+  DUBBING_COMPLETENESS_RETRY_PROMPT,
   buildChunkPrompt,
   buildDubbingPrompt,
+  dubbingChunkSecondsForModel,
+  dubbingCoverageVerdict,
+  dubbingCoveredSeconds,
   dubbingMaxOutputTokens,
+  dubbingSpeechSecondsFromSilences,
   formatDubbingTimestamp,
+  geminiResponseAnswer,
   isModelFailureText,
+  isReasoningDubbingModel,
   languageLabel,
   normalizeDubbingSegment,
   parseDubbingPayload,
@@ -81,6 +88,13 @@ let nextCustomReply: string | null = null;
 let nextDubbingReply: string | null = null;
 let nextFinishReason: string | null = null;
 
+/** Scripted generateContent answers, consumed in order before the default reply. */
+interface ScriptedDubbingReply {
+  text?: string;
+  parts?: Array<Record<string, unknown>>;
+}
+const scriptedDubbingReplies: ScriptedDubbingReply[] = [];
+
 function defaultDubbingReply(index: number): string {
   // Timestamps are intentionally chunk-local; the bridge must add the offset.
   const start = index === 1 ? '00:01.0' : '00:00.5';
@@ -129,7 +143,9 @@ const upstream = http.createServer((request, response) => {
         return;
       }
 
-      const content = nextDubbingReply ?? defaultDubbingReply(index);
+      const scripted = scriptedDubbingReplies.shift();
+      const content = scripted?.text ?? nextDubbingReply ?? defaultDubbingReply(index);
+      const parts = scripted?.parts ?? [{ text: content }];
       nextDubbingReply = null;
       response.writeHead(200, {
         'Content-Type': 'application/json',
@@ -140,7 +156,7 @@ const upstream = http.createServer((request, response) => {
           candidates: [
             {
               finishReason: 'STOP',
-              content: { role: 'model', parts: [{ text: content }] },
+              content: { role: 'model', parts },
             },
           ],
           usageMetadata: {
@@ -248,6 +264,35 @@ function makeWav(seconds: number): Buffer {
   buffer.writeUInt32LE(dataSize, 40);
   return buffer;
 }
+
+/** Valid PCM WAV with a steady tone, so `silencedetect` measures real speech. */
+function makeToneWav(seconds: number, frequency = 440, amplitude = 0.25): Buffer {
+  const sampleRate = 16000;
+  const channels = 1;
+  const bitsPerSample = 16;
+  const samples = Math.floor(seconds * sampleRate);
+  const dataSize = samples * channels * (bitsPerSample / 8);
+  const buffer = Buffer.alloc(44 + dataSize);
+  buffer.write('RIFF', 0, 'ascii');
+  buffer.writeUInt32LE(36 + dataSize, 4);
+  buffer.write('WAVE', 8, 'ascii');
+  buffer.write('fmt ', 12, 'ascii');
+  buffer.writeUInt32LE(16, 16);
+  buffer.writeUInt16LE(1, 20);
+  buffer.writeUInt16LE(channels, 22);
+  buffer.writeUInt32LE(sampleRate, 24);
+  buffer.writeUInt32LE(sampleRate * channels * (bitsPerSample / 8), 28);
+  buffer.writeUInt16LE(channels * (bitsPerSample / 8), 32);
+  buffer.writeUInt16LE(bitsPerSample, 34);
+  buffer.write('data', 36, 'ascii');
+  buffer.writeUInt32LE(dataSize, 40);
+  for (let sample = 0; sample < samples; sample++) {
+    const value = Math.sin((2 * Math.PI * frequency * sample) / sampleRate) * amplitude;
+    buffer.writeInt16LE(Math.round(value * 32767), 44 + sample * 2);
+  }
+  return buffer;
+}
+
 
 function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
   return { Authorization: 'Bearer sk-media-test', ...extra };
@@ -628,6 +673,155 @@ test('dubbing output caps follow the duration table', () => {
   assert.equal(dubbingMaxOutputTokens(1800), 65535);
 });
 
+test('dubbing reasoning models get a token floor and a 120-second chunk window', () => {
+  assert.equal(isReasoningDubbingModel('gemini-3.8-flash-high'), true);
+  assert.equal(isReasoningDubbingModel('gemini-3.8-flash-low'), true);
+  assert.equal(isReasoningDubbingModel('gemini-3.5-pro'), true);
+  assert.equal(isReasoningDubbingModel('gemini-3.5-flash-lite'), false);
+
+  assert.equal(dubbingMaxOutputTokens(120, 'gemini-3.8-flash-high'), 40960);
+  assert.equal(dubbingMaxOutputTokens(300, 'gemini-3.8-flash-high'), 40960);
+  assert.equal(dubbingMaxOutputTokens(601, 'gemini-3.8-flash-high'), 65535);
+  assert.equal(dubbingMaxOutputTokens(300, 'gemini-3.5-flash-lite'), 24576);
+
+  assert.equal(dubbingChunkSecondsForModel('gemini-3.8-flash-high', 300), 120);
+  assert.equal(dubbingChunkSecondsForModel('gemini-3.5-flash-lite', 300), 300);
+  assert.equal(dubbingChunkSecondsForModel('gemini-3.5-flash-lite', 1800), 1800);
+  assert.equal(dubbingChunkSecondsForModel('gemini-3.5-flash-lite', 10), 60);
+});
+
+test('gemini answer extraction excludes thought parts and counts them', () => {
+  const thought =
+    'I should return a list.\nExample draft:\n[{"khmer_dubbing":"បាទ"}]\nNow I will answer.';
+  const answer = geminiResponseAnswer({
+    candidates: [
+      {
+        content: {
+          parts: [
+            { thought: true, text: thought },
+            { text: '[{"khmer_dubbing":"ចាស"},{"khmer_dubbing":"បាទ"}]' },
+            { thoughtSignature: 'sig', text: '' },
+          ],
+        },
+      },
+    ],
+  });
+  assert.equal(answer.text, '[{"khmer_dubbing":"ចាស"},{"khmer_dubbing":"បាទ"}]');
+  assert.equal(answer.thoughtCharacters, thought.length);
+
+  const thoughtOnly = geminiResponseAnswer({
+    candidates: [{ content: { parts: [{ thought: true, text: 'still thinking' }] } }],
+  });
+  assert.equal(thoughtOnly.text, '');
+  assert.equal(thoughtOnly.thoughtCharacters, 'still thinking'.length);
+
+  const chatShape = geminiResponseAnswer({
+    choices: [{ message: { content: 'plain answer' } }],
+  });
+  assert.equal(chatShape.text, 'plain answer');
+});
+
+test('dubbing JSON parser prefers the last complete script over an example', () => {
+  const parsed = parseDubbingPayload(
+    'Example: [{"khmer_dubbing":"បាទ"}]\n' +
+      'Script: [{"khmer_dubbing":"ចាស"},{"khmer_dubbing":"បាទ"},{"khmer_dubbing":"សួស្តី"}]',
+  );
+  assert.equal(parsed?.length, 3);
+  assert.equal(parsed?.[2].khmer_dubbing, 'សួស្តី');
+});
+
+test('dubbing coverage maths unions intervals and measures silence', () => {
+  assert.equal(
+    dubbingCoveredSeconds(
+      [
+        { startSeconds: 0, endSeconds: 5 },
+        { startSeconds: 3, endSeconds: 8 },
+      ],
+      0,
+      10,
+    ),
+    8,
+  );
+  assert.equal(
+    dubbingCoveredSeconds(
+      [
+        { startSeconds: -5, endSeconds: 2 },
+        { startSeconds: 9, endSeconds: 20 },
+      ],
+      0,
+      10,
+    ),
+    3,
+  );
+  assert.equal(dubbingCoveredSeconds([], 0, 10), 0);
+
+  assert.equal(
+    dubbingSpeechSecondsFromSilences(10, 'silence_start: 0\nsilence_end: 2.5\n'),
+    7.5,
+  );
+  assert.equal(dubbingSpeechSecondsFromSilences(10, 'silence_start: 8\n'), 8);
+  assert.equal(dubbingSpeechSecondsFromSilences(10, ''), 10);
+  assert.equal(dubbingSpeechSecondsFromSilences(0, 'silence_start: 0\n'), 0);
+  assert.equal(
+    dubbingSpeechSecondsFromSilences(3, 'silence_start: 0\nsilence_end: 99\n'),
+    0,
+  );
+});
+
+test('dubbing coverage verdict rejects empty, single and low-coverage scripts', () => {
+  const good = dubbingCoverageVerdict({
+    segmentCount: 4,
+    coveredSeconds: 40,
+    speechSeconds: 50,
+    durationSeconds: 60,
+  });
+  assert.equal(good.ok, true);
+  assert.equal(good.ratio, 0.8);
+
+  assert.equal(
+    dubbingCoverageVerdict({
+      segmentCount: 0,
+      coveredSeconds: 0,
+      speechSeconds: 50,
+      durationSeconds: 60,
+    }).reason,
+    'empty_script',
+  );
+  assert.equal(
+    dubbingCoverageVerdict({
+      segmentCount: 1,
+      coveredSeconds: 2,
+      speechSeconds: 50,
+      durationSeconds: 60,
+    }).reason,
+    'single_segment',
+  );
+  assert.equal(
+    dubbingCoverageVerdict({
+      segmentCount: 2,
+      coveredSeconds: 10,
+      speechSeconds: 50,
+      durationSeconds: 60,
+    }).reason,
+    'low_coverage',
+  );
+
+  // A silent chunk and an unmeasurable chunk must not be rejected.
+  assert.equal(
+    dubbingCoverageVerdict({
+      segmentCount: 0,
+      coveredSeconds: 0,
+      speechSeconds: 1,
+      durationSeconds: 60,
+    }).ok,
+    true,
+  );
+  assert.equal(
+    dubbingCoverageVerdict({ segmentCount: 0, coveredSeconds: 0, durationSeconds: 60 }).ok,
+    true,
+  );
+});
+
 test('dubbing timestamps parse and format on the MM:SS.S contract', () => {
   assert.equal(parseDubbingTimestamp('01:02.5'), 62.5);
   assert.equal(parseDubbingTimestamp('1:02:03.4'), 3723.4);
@@ -718,6 +912,10 @@ test('dubbing prompt keeps the caller prompt, contract and chunk context', () =>
   assert.match(prompt, /សួស្តី/);
   assert.match(prompt, /do not repeat these lines/i);
   assert.match(prompt, /MM:SS\.S/);
+  assert.match(prompt, /If speech is present, return every utterance/);
+  assert.match(prompt, /single segment for a clip that contains a conversation, is an error/);
+  assert.match(DUBBING_COMPLETENESS_RETRY_PROMPT, /RETRY - INCOMPLETE ANSWER/);
+  assert.match(DUBBING_COMPLETENESS_RETRY_PROMPT, /Do not summarize and do not stop early/);
 });
 
 test(
@@ -822,6 +1020,187 @@ test(
     assert.ok(geminiRequests[0].generationConfig.responseSchema);
     assert.equal(geminiRequests[1].generationConfig.responseSchema, undefined);
     assert.equal(geminiRequests[1].generationConfig.maxOutputTokens, 8192);
+  },
+);
+
+test(
+  'dubbing ignores draft JSON in thought parts and returns the real script',
+  { skip: !hasFfmpeg },
+  async () => {
+    geminiRequests.length = 0;
+    scriptedDubbingReplies.length = 0;
+
+    const draft =
+      'I will return this shape:\n[{"start":"00:00.0","end":"00:01.0","khmer_dubbing":"បាទ"}]';
+    const answer = [
+      {
+        start: '00:00.0',
+        end: '00:00.5',
+        speaker_gender: 'female',
+        vocal_timbre: 'young',
+        character_role: 'younger sister',
+        original_transcript: 'answer one',
+        khmer_dubbing: 'ចាស មួយ',
+      },
+      {
+        start: '00:00.6',
+        end: '00:01.0',
+        speaker_gender: 'male',
+        vocal_timbre: 'deep',
+        character_role: 'brother',
+        original_transcript: 'answer two',
+        khmer_dubbing: 'បាទ ពីរ',
+      },
+      {
+        start: '00:01.1',
+        end: '00:01.8',
+        speaker_gender: 'female',
+        vocal_timbre: 'young',
+        character_role: 'younger sister',
+        original_transcript: 'answer three',
+        khmer_dubbing: 'ចាស បី',
+      },
+    ];
+    scriptedDubbingReplies.push({
+      parts: [{ thought: true, text: draft }, { text: JSON.stringify(answer) }],
+    });
+
+    const form = new FormData();
+    form.append('file', new Blob([makeWav(2)], { type: 'audio/wav' }), 'thoughts.wav');
+    form.append('model', 'gemini-3.8-flash-high');
+    form.append('chunk_seconds', '60');
+
+    const response = await fetch(`http://127.0.0.1:${bridgePort}/v1/audio/dubbing`, {
+      method: 'POST',
+      headers: authHeaders(),
+      body: form,
+    });
+
+    const rawBody = await response.text();
+    assert.equal(response.status, 200, rawBody);
+    const body: any = JSON.parse(rawBody);
+    assert.equal(body.segment_count, 3, 'the thought draft must not replace the answer');
+    assert.deepEqual(
+      body.segments.map((segment: any) => segment.original_transcript),
+      ['answer one', 'answer two', 'answer three'],
+    );
+    assert.equal(body.chunks[0].thought_characters, draft.length);
+    assert.equal(
+      response.headers.get('x-geminirouter-segments'),
+      String(body.segments.length),
+    );
+    assert.ok(
+      geminiRequests[0].contents[0].parts[0].text?.includes('OUTPUT CONTRACT'),
+      'the dubbing prompt must still reach the model',
+    );
+  },
+);
+
+test(
+  'dubbing retries an implausible script once with the completeness prompt',
+  { skip: !hasFfmpeg },
+  async () => {
+    geminiRequests.length = 0;
+    scriptedDubbingReplies.length = 0;
+
+    const shortReply = JSON.stringify([
+      {
+        start: '00:00.0',
+        end: '00:00.2',
+        speaker_gender: 'female',
+        character_role: 'narrator',
+        original_transcript: 'only the first words',
+        khmer_dubbing: 'ចាស',
+      },
+    ]);
+    const completeReply = JSON.stringify([
+      {
+        start: '00:00.0',
+        end: '00:02.6',
+        speaker_gender: 'female',
+        character_role: 'narrator',
+        original_transcript: 'the whole conversation',
+        khmer_dubbing: 'ចាស ខ្ញុំបានលឺគ្រប់យ៉ាង',
+      },
+    ]);
+    scriptedDubbingReplies.push({ text: shortReply }, { text: completeReply });
+
+    const form = new FormData();
+    form.append('file', new Blob([makeToneWav(3)], { type: 'audio/wav' }), 'tone.wav');
+    form.append('model', 'gemini-3.5-flash-lite');
+    form.append('chunk_seconds', '60');
+
+    const response = await fetch(`http://127.0.0.1:${bridgePort}/v1/audio/dubbing`, {
+      method: 'POST',
+      headers: authHeaders(),
+      body: form,
+    });
+
+    const rawBody = await response.text();
+    assert.equal(response.status, 200, rawBody);
+    const body: any = JSON.parse(rawBody);
+    assert.equal(body.segment_count, 1);
+    assert.equal(geminiRequests.length, 2, 'one strict retry after the incomplete answer');
+    assert.match(
+      geminiRequests[1].contents[0].parts[0].text || '',
+      /RETRY - INCOMPLETE ANSWER/,
+    );
+    assert.match(
+      geminiRequests[0].contents[0].parts[0].text || '',
+      /OUTPUT CONTRACT/,
+      'the first attempt must use the normal prompt',
+    );
+    assert.ok(body.coverage.speech_seconds >= 2, `speech was not measured: ${rawBody}`);
+    assert.ok(body.coverage.ratio >= 0.35, `coverage was too low: ${rawBody}`);
+    assert.equal(
+      response.headers.get('x-geminirouter-segments'),
+      String(body.segments.length),
+    );
+  },
+);
+
+test(
+  'dubbing fails with a JSON partial_script envelope instead of dropping dialogue',
+  { skip: !hasFfmpeg },
+  async () => {
+    geminiRequests.length = 0;
+    scriptedDubbingReplies.length = 0;
+
+    const shortReply = JSON.stringify([
+      {
+        start: '00:00.0',
+        end: '00:00.2',
+        speaker_gender: 'male',
+        character_role: 'narrator',
+        original_transcript: 'only one line',
+        khmer_dubbing: 'បាទ',
+      },
+    ]);
+    scriptedDubbingReplies.push({ text: shortReply }, { text: shortReply });
+
+    const form = new FormData();
+    form.append('file', new Blob([makeToneWav(3)], { type: 'audio/wav' }), 'tone.wav');
+    form.append('model', 'gemini-3.5-flash-lite');
+    form.append('chunk_seconds', '60');
+
+    const response = await fetch(`http://127.0.0.1:${bridgePort}/v1/audio/dubbing`, {
+      method: 'POST',
+      headers: authHeaders(),
+      body: form,
+    });
+
+    const rawBody = await response.text();
+    assert.equal(response.status, 502, rawBody);
+    assert.ok(rawBody.length > 0, 'an error response must never be empty');
+    assert.match(response.headers.get('content-type') || '', /application\/json/);
+    const body: any = JSON.parse(rawBody);
+    assert.equal(body.error.code, 'partial_script');
+    assert.ok(body.error.message.length > 0);
+    assert.equal(body.error.type, 'media_error');
+    assert.equal(body.error.details.chunkIndex, 0);
+    assert.equal(body.error.details.segmentCount, 1);
+    assert.ok(body.error.details.speechSeconds >= 2);
+    assert.equal(geminiRequests.length, 2, 'the strict retry runs once, then the request fails');
   },
 );
 

@@ -20,7 +20,11 @@ RestartSec=5s
 
 # Resource and security limits
 LimitNOFILE=65535
-TimeoutStopSec=20s
+# Long media jobs (dubbing can run for minutes) must finish their response
+# instead of dying on a deploy and leaving Caddy to send an empty 502.
+TimeoutStopSec=300s
+KillSignal=SIGTERM
+Environment=SHUTDOWN_GRACE_MS=240000
 KillMode=mixed
 
 # Security hardening

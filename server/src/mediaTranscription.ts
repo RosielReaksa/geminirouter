@@ -7,6 +7,7 @@ import type { Readable } from 'node:stream';
 import Busboy from 'busboy';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { safeEqual } from './auth.js';
+import { canonicalModelId } from './modelIds.js';
 
 /**
  * Long-audio transcription, translation and timed dubbing.
@@ -46,6 +47,23 @@ export const MEDIA_LANGUAGES_PATH = '/v1/audio/languages';
 /** Default dubbing window. Five minutes fits the 24,576-token cap. */
 const DUBBING_DEFAULT_CHUNK_SECONDS = 300;
 const DUBBING_MAX_CHUNK_SECONDS = 1800;
+
+/**
+ * Reasoning models (the 3.8 family) spend output tokens on thoughts and are
+ * only reliable at short windows. The client-side dubber gets clean output from
+ * the direct generateContent path at 120 s and drops lines at 300 s, so the
+ * endpoint caps those models at 120 s per chunk and gives them a larger output
+ * budget than the plain duration table.
+ */
+const DUBBING_REASONING_CHUNK_SECONDS = 120;
+const DUBBING_REASONING_TOKEN_FLOOR = 40960;
+
+/** A chunk with less audible speech than this is allowed to return no lines. */
+const DUBBING_MIN_SPEECH_SECONDS = 2;
+/** Fraction of the measured speech time that the dubbing script must cover. */
+const DUBBING_MIN_SPEECH_COVERAGE = 0.35;
+/** A single line cannot plausibly cover this much audible speech. */
+const DUBBING_SINGLE_SEGMENT_SPEECH_SECONDS = 8;
 
 // Extra upload paths that need the streaming body parser but are not public
 // API model routes. The playground uses this for large files.
@@ -160,6 +178,12 @@ interface DubbingChunkResult {
   model: string;
   maxOutputTokens: number;
   usage: { promptTokens: number; completionTokens: number; totalTokens: number };
+  /** Audible speech measured in the chunk, when FFmpeg could measure it. */
+  speechSeconds?: number;
+  /** Seconds of speech covered by the returned segments. */
+  coveredSeconds: number;
+  /** Portion of the model answer that was thinking, for diagnostics. */
+  thoughtCharacters: number;
 }
 
 interface DubbingOptions {
@@ -1776,7 +1800,21 @@ Timing rules:
 - One element per utterance. Split on pauses and speaker changes; do not merge them.
 - "end" must be greater than "start" and must not exceed the audio duration.
 - Omit music, noise and stage directions.
+Completeness rules:
+- If speech is present, return every utterance. An empty array, or a single segment for a clip that contains a conversation, is an error.
+- Do not stop after the first line. Keep going until the end of the audio.
 If there is no audible speech, return [].`;
+
+/**
+ * Appended to the prompt for one retry when the model returned an empty or
+ * implausibly short script. It states the failure explicitly because the model
+ * tends to answer the first line and stop.
+ */
+export const DUBBING_COMPLETENESS_RETRY_PROMPT = `RETRY - INCOMPLETE ANSWER
+Your previous answer for this audio was missing almost all of the dialogue.
+The audio contains a conversation. You must return every utterance in chronological order, from the first line to the end of the audio.
+An empty array or a single segment is not an acceptable answer here. Do not summarize and do not stop early.`;
+
 
 const DUBBING_SEGMENT_PROPERTIES = {
   start: { type: 'STRING', description: 'Utterance start as MM:SS.S from the start of this audio part.' },
@@ -1799,17 +1837,39 @@ export const DUBBING_RESPONSE_SCHEMA = {
 };
 
 /**
- * Output-token budget for one dubbing chunk, from the caller's duration table.
- * A chunk is capped by the first threshold that it fits into.
+ * True for models that emit a thinking pass before the JSON answer. Their
+ * thoughts consume the output budget and they degrade on long audio windows.
  */
-export function dubbingMaxOutputTokens(durationSeconds: number): number {
+export function isReasoningDubbingModel(model: string): boolean {
+  return /(^|[-_/])3\.8|(^|[-_/])(high|thinking|reasoner|pro)([-_/]|$)/i.test(model.trim());
+}
+
+/** Per-chunk audio window for a model: reasoning models get shorter chunks. */
+export function dubbingChunkSecondsForModel(model: string, requestedSeconds: number): number {
+  const cap = isReasoningDubbingModel(model)
+    ? DUBBING_REASONING_CHUNK_SECONDS
+    : DUBBING_MAX_CHUNK_SECONDS;
+  return Math.max(60, Math.min(requestedSeconds, cap));
+}
+
+/**
+ * Output-token budget for one dubbing chunk, from the caller's duration table.
+ * A chunk is capped by the first threshold that it fits into. Reasoning models
+ * get a floor that leaves room for thoughts plus the JSON answer.
+ */
+export function dubbingMaxOutputTokens(durationSeconds: number, model?: string): number {
   const safe = Number.isFinite(durationSeconds) ? Math.max(0, durationSeconds) : 0;
-  if (safe <= 55) return 8192;
-  if (safe <= 120) return 8192;
-  if (safe <= 240) return 16384;
-  if (safe <= 300) return 24576;
-  if (safe <= 600) return 40960;
-  return 65535;
+  let budget: number;
+  if (safe <= 120) budget = 8192;
+  else if (safe <= 240) budget = 16384;
+  else if (safe <= 300) budget = 24576;
+  else if (safe <= 600) budget = 40960;
+  else budget = 65535;
+
+  if (model && isReasoningDubbingModel(model)) {
+    budget = Math.max(budget, DUBBING_REASONING_TOKEN_FLOOR);
+  }
+  return Math.min(65535, budget);
 }
 
 /** Parse "MM:SS.S", "HH:MM:SS.S", or a plain number of seconds. */
@@ -1847,13 +1907,17 @@ export function formatDubbingTimestamp(seconds: number): string {
   return `${String(minutes).padStart(2, '0')}:${secs.toFixed(1).padStart(4, '0')}`;
 }
 
-function extractBalancedJson(text: string, open: string, close: string): string | undefined {
-  const start = text.indexOf(open);
-  if (start === -1) return undefined;
+/**
+ * Yield every top-level balanced `open`/`close` span in the text. A model
+ * answer can contain an example array first and the real array second, so all
+ * spans are needed to pick the largest one.
+ */
+function* balancedJsonSlices(text: string, open: string, close: string): Generator<string> {
   let depth = 0;
+  let start = -1;
   let inString = false;
   let escaped = false;
-  for (let index = start; index < text.length; index++) {
+  for (let index = 0; index < text.length; index++) {
     const char = text[index];
     if (inString) {
       if (escaped) escaped = false;
@@ -1865,13 +1929,18 @@ function extractBalancedJson(text: string, open: string, close: string): string 
       inString = true;
       continue;
     }
-    if (char === open) depth++;
-    else if (char === close) {
+    if (char === open) {
+      if (depth === 0) start = index;
+      depth++;
+    } else if (char === close) {
+      if (depth === 0) continue;
       depth--;
-      if (depth === 0) return text.slice(start, index + 1);
+      if (depth === 0 && start >= 0) {
+        yield text.slice(start, index + 1);
+        start = -1;
+      }
     }
   }
-  return undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1894,7 +1963,8 @@ function coerceDubbingArray(parsed: unknown): Record<string, unknown>[] | null {
 /**
  * Extract the segment array from a model answer that may contain Markdown
  * fences, a short preamble, or a wrapper object. Returns null when no JSON
- * array can be recovered.
+ * array can be recovered. When the answer contains more than one JSON array
+ * (for example an example followed by the real script) the largest one wins.
  */
 export function parseDubbingPayload(text: string): Record<string, unknown>[] | null {
   const trimmed = text.trim();
@@ -1905,28 +1975,37 @@ export function parseDubbingPayload(text: string): Record<string, unknown>[] | n
     .trim();
 
   const candidates = [withoutFence, trimmed];
+  let best: Record<string, unknown>[] | null = null;
+  const consider = (value: unknown) => {
+    const coerced = coerceDubbingArray(value);
+    if (!coerced) return;
+    // Prefer the largest array; on a tie prefer the later one, because a model
+    // often drafts an example first and writes the real script last.
+    if (!best || coerced.length >= best.length) best = coerced;
+  };
+
   for (const candidate of candidates) {
     try {
+      // A whole-answer parse is authoritative, even when the array is empty.
       const coerced = coerceDubbingArray(JSON.parse(candidate));
       if (coerced) return coerced;
     } catch {
-      /* try a balanced slice below */
+      /* try balanced slices below */
     }
     for (const [open, close] of [
       ['[', ']'],
       ['{', '}'],
     ] as const) {
-      const slice = extractBalancedJson(candidate, open, close);
-      if (!slice) continue;
-      try {
-        const coerced = coerceDubbingArray(JSON.parse(slice));
-        if (coerced) return coerced;
-      } catch {
-        /* keep trying */
+      for (const slice of balancedJsonSlices(candidate, open, close)) {
+        try {
+          consider(JSON.parse(slice));
+        } catch {
+          /* keep trying */
+        }
       }
     }
   }
-  return null;
+  return best;
 }
 
 function firstString(record: Record<string, unknown>, keys: string[]): string {
@@ -2019,9 +2098,165 @@ export function normalizeDubbingSegment(
   };
 }
 
+export interface DubbingCoverageVerdict {
+  ok: boolean;
+  reason?: 'empty_script' | 'single_segment' | 'low_coverage';
+  coveredSeconds: number;
+  speechSeconds?: number;
+  ratio?: number;
+}
+
+/** Union of the segment intervals, clamped to the chunk window. */
+export function dubbingCoveredSeconds(
+  segments: Array<{ startSeconds: number; endSeconds: number }>,
+  startSeconds: number,
+  endSeconds: number,
+): number {
+  const ranges = segments
+    .map(
+      (segment) =>
+        [
+          Math.max(startSeconds, segment.startSeconds),
+          Math.min(endSeconds, segment.endSeconds),
+        ] as const,
+    )
+    .filter(([start, end]) => end > start)
+    .sort((a, b) => a[0] - b[0]);
+
+  let total = 0;
+  let currentStart: number | null = null;
+  let currentEnd = 0;
+  for (const [start, end] of ranges) {
+    if (currentStart === null) {
+      currentStart = start;
+      currentEnd = end;
+      continue;
+    }
+    if (start > currentEnd) {
+      total += currentEnd - currentStart;
+      currentStart = start;
+      currentEnd = end;
+    } else {
+      currentEnd = Math.max(currentEnd, end);
+    }
+  }
+  if (currentStart !== null) total += currentEnd - currentStart;
+  return Math.max(0, total);
+}
+
+/**
+ * Audible speech time from the `silencedetect` filter log.
+ * Silence spans outside the file are clamped, so a fully silent chunk yields 0.
+ */
+export function dubbingSpeechSecondsFromSilences(
+  durationSeconds: number,
+  ffmpegLog: string,
+): number {
+  const duration = Number.isFinite(durationSeconds) ? Math.max(0, durationSeconds) : 0;
+  if (duration === 0) return 0;
+
+  const events: Array<{ type: 'start' | 'end'; time: number }> = [];
+  const pattern = /silence_(start|end):\s*(-?\d+(?:\.\d+)?)/g;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(ffmpegLog)) !== null) {
+    events.push({ type: match[1] as 'start' | 'end', time: Number(match[2]) });
+  }
+
+  let silenceSeconds = 0;
+  let openStart: number | null = null;
+  for (const event of events) {
+    if (event.type === 'start') {
+      openStart = Math.max(0, event.time);
+      continue;
+    }
+    if (openStart === null) continue;
+    silenceSeconds += Math.max(0, Math.min(duration, event.time) - openStart);
+    openStart = null;
+  }
+  if (openStart !== null) silenceSeconds += Math.max(0, duration - openStart);
+
+  return Math.max(0, Math.min(duration, duration - silenceSeconds));
+}
+
+/**
+ * Decide whether a chunk answer is complete enough to trust. Empty or
+ * single-line answers for a chunk that clearly contains a conversation are
+ * rejected so the request can retry instead of returning 2% of the dialogue.
+ */
+export function dubbingCoverageVerdict(input: {
+  segmentCount: number;
+  coveredSeconds: number;
+  speechSeconds?: number;
+  durationSeconds: number;
+}): DubbingCoverageVerdict {
+  const duration = Math.max(0, input.durationSeconds);
+  const coveredSeconds = Math.max(0, Math.min(duration, input.coveredSeconds));
+  const speechSeconds =
+    input.speechSeconds === undefined
+      ? undefined
+      : Math.max(0, Math.min(duration, input.speechSeconds));
+  const ratio =
+    speechSeconds && speechSeconds > 0 ? coveredSeconds / speechSeconds : undefined;
+
+  const base: DubbingCoverageVerdict = {
+    ok: true,
+    coveredSeconds: Number(coveredSeconds.toFixed(2)),
+    ...(speechSeconds === undefined ? {} : { speechSeconds: Number(speechSeconds.toFixed(2)) }),
+    ...(ratio === undefined ? {} : { ratio: Number(ratio.toFixed(3)) }),
+  };
+
+  // Without a reliable speech measurement, an empty answer may be a silent
+  // chunk, so only reject answers we can prove are incomplete.
+  if (speechSeconds === undefined || speechSeconds < DUBBING_MIN_SPEECH_SECONDS) {
+    return base;
+  }
+  if (input.segmentCount === 0) {
+    return { ...base, ok: false, reason: 'empty_script' };
+  }
+  if (coveredSeconds <= 0) {
+    return { ...base, ok: false, reason: 'low_coverage' };
+  }
+  if (
+    input.segmentCount === 1 &&
+    speechSeconds >= DUBBING_SINGLE_SEGMENT_SPEECH_SECONDS
+  ) {
+    return { ...base, ok: false, reason: 'single_segment' };
+  }
+  if ((ratio ?? 0) < DUBBING_MIN_SPEECH_COVERAGE) {
+    return { ...base, ok: false, reason: 'low_coverage' };
+  }
+  return base;
+}
+
+/** Run `silencedetect` over one chunk and return the audible speech seconds. */
+async function measureSpeechSeconds(
+  filePath: string,
+  durationSeconds: number,
+  config: MediaConfig,
+  signal: AbortSignal,
+): Promise<number> {
+  const { stderr } = await runCaptureWithStderr(
+    config.ffmpegPath,
+    [
+      '-hide_banner',
+      '-nostats',
+      '-v',
+      'info',
+      '-i',
+      filePath,
+      '-af',
+      'silencedetect=noise=-30dB:d=0.7',
+      '-f',
+      'null',
+      '-',
+    ],
+    AbortSignal.any([signal, AbortSignal.timeout(120_000)]),
+  );
+  return dubbingSpeechSecondsFromSilences(durationSeconds, stderr);
+}
+
 /** `prompt` overrides the built-in instructions; the output contract is always appended. */
-export function buildDubbingPrompt(options: {
-  prompt?: string;
+export function buildDubbingPrompt(options: {  prompt?: string;
   index: number;
   count: number;
   previousSegments?: Array<{
@@ -2061,8 +2296,11 @@ export function buildDubbingPrompt(options: {
 }
 
 function parseDubbingOptions(fields: Record<string, string>, config: MediaConfig): DubbingOptions {
-  const model = (fields.model || process.env.MEDIA_DEFAULT_MODEL || 'gemini-3.5-flash-lite').trim();
-  if (!model) throw new MediaError(400, 'model_required', 'A non-empty "model" is required.');
+  const requestedModel = (fields.model || process.env.MEDIA_DEFAULT_MODEL || 'gemini-3.5-flash-lite').trim();
+  if (!requestedModel) throw new MediaError(400, 'model_required', 'A non-empty "model" is required.');
+  // Retired aliases (for example gemini-3.8-flash-tiered) are mapped before the
+  // model id reaches the core, exactly like /v1/chat/completions requests.
+  const model = canonicalModelId(requestedModel);
 
   const prompt = (fields.prompt || fields.instructions || '').trim();
   if (prompt.length > 50_000) {
@@ -2163,7 +2401,25 @@ async function handleAudioDubbing(
       60,
       Math.floor((14 * 1024 * 1024 * 8) / (config.audioBitrateKbps * 1000)),
     );
-    const effectiveChunkSeconds = Math.min(options.chunkSeconds, maxSecondsBySize);
+    const effectiveChunkSeconds = Math.min(
+      dubbingChunkSecondsForModel(options.model, options.chunkSeconds),
+      maxSecondsBySize,
+    );
+    if (effectiveChunkSeconds < options.chunkSeconds) {
+      request.log.info(
+        {
+          media: {
+            model: options.model,
+            requestedChunkSeconds: options.chunkSeconds,
+            chunkSeconds: effectiveChunkSeconds,
+            reason: isReasoningDubbingModel(options.model)
+              ? 'reasoning model window'
+              : 'upload size limit',
+          },
+        },
+        'media: dubbing chunk window reduced',
+      );
+    }
 
     if (deps.ensureAccounts) {
       try {
@@ -2212,7 +2468,11 @@ async function handleAudioDubbing(
         media: {
           durationSeconds: Number(probe.durationSeconds.toFixed(2)),
           chunkCount: chunks.length,
+          chunkSeconds: effectiveChunkSeconds,
           segmentCount: response.segment_count,
+          speechSeconds: response.coverage.speech_seconds,
+          coveredSeconds: response.coverage.covered_seconds,
+          coverageRatio: response.coverage.ratio,
           uploadBytes: resolved.sizeBytes,
           model: options.model,
           sourceLanguage: options.sourceLanguage,
@@ -2284,7 +2544,19 @@ async function dubChunks(
         previousSegments,
       });
       const maxOutputTokens =
-        options.maxTokens ?? dubbingMaxOutputTokens(chunk.durationSeconds);
+        options.maxTokens ?? dubbingMaxOutputTokens(chunk.durationSeconds, options.model);
+
+      // Measure audible speech once per chunk so an empty or single-line answer
+      // can be told apart from a chunk that is genuinely silent.
+      const speechSeconds = await measureSpeechSeconds(
+        chunk.filePath,
+        chunk.durationSeconds,
+        config,
+        signal,
+      ).catch((error) => {
+        log.warn({ err: error, media: { chunk: index + 1 } }, 'media: speech detection failed');
+        return undefined;
+      });
 
       log.info(
         {
@@ -2294,8 +2566,11 @@ async function dubChunks(
             startSeconds: Number(chunk.startSeconds.toFixed(2)),
             endSeconds: Number(chunk.endSeconds.toFixed(2)),
             durationSeconds: Number(chunk.durationSeconds.toFixed(2)),
+            speechSeconds:
+              speechSeconds === undefined ? null : Number(speechSeconds.toFixed(2)),
             sizeBytes: chunk.sizeBytes,
             maxOutputTokens,
+            model: options.model,
           },
         },
         'media: dubbing chunk',
@@ -2309,13 +2584,18 @@ async function dubChunks(
         config,
         deps,
         signal,
+        speechSeconds,
+        log,
       );
     }
   };
 
-  try {
-    await Promise.all(Array.from({ length: workerCount }, () => worker()));
-  } catch (error) {
+  const settled = await Promise.allSettled(Array.from({ length: workerCount }, () => worker()));
+  const failure = settled.find(
+    (entry): entry is PromiseRejectedResult => entry.status === 'rejected',
+  );
+  if (failure) {
+    const error = failure.reason;
     if (error instanceof MediaError) {
       const completed = results
         .filter((result): result is DubbingChunkResult => Boolean(result))
@@ -2337,16 +2617,33 @@ async function dubChunks(
   return results;
 }
 
-function geminiResponseText(data: any): string {
+/**
+ * Model answer text plus the number of characters spent on thinking. Thoughts
+ * are never concatenated with the answer: reasoning models often draft an
+ * example JSON array there, and mixing it in produced one-segment scripts.
+ */
+export function geminiResponseAnswer(data: any): { text: string; thoughtCharacters: number } {
   const parts = data?.candidates?.[0]?.content?.parts;
+  let thoughtCharacters = 0;
   if (Array.isArray(parts)) {
-    const text = parts
-      .map((part: any) => (typeof part === 'string' ? part : part?.text || ''))
-      .join('')
-      .trim();
-    if (text) return text;
+    const answer: string[] = [];
+    for (const part of parts) {
+      if (typeof part === 'string') {
+        answer.push(part);
+        continue;
+      }
+      if (!part || typeof part !== 'object') continue;
+      const text = typeof part.text === 'string' ? part.text : '';
+      if (part.thought === true) {
+        thoughtCharacters += text.length;
+        continue;
+      }
+      if (text) answer.push(text);
+    }
+    const text = answer.join('').trim();
+    if (text) return { text, thoughtCharacters };
   }
-  return completionText(data);
+  return { text: completionText(data), thoughtCharacters };
 }
 
 function usageFromResponse(data: any): UsageTotals {
@@ -2383,6 +2680,8 @@ async function dubChunkWithRetry(
   config: MediaConfig,
   deps: MediaRouteDeps,
   signal: AbortSignal,
+  speechSeconds: number | undefined,
+  log: FastifyRequest['log'],
 ): Promise<DubbingChunkResult> {
   const audioBase64 = fs.readFileSync(chunk.filePath).toString('base64');
   const url = `${deps.getInternalBaseUrl()}/v1beta/models/${encodeURIComponent(
@@ -2391,9 +2690,12 @@ async function dubChunkWithRetry(
 
   let schemaEnabled = true;
   let lastError: MediaError | null = null;
+  let activePrompt = prompt;
+  let completenessRetried = false;
   const attempts = config.maxRetries + 1;
+  let maxAttempts = attempts;
 
-  for (let attempt = 0; attempt < attempts; attempt++) {
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
     if (signal.aborted) throw abortError(signal);
 
     const payload = {
@@ -2401,7 +2703,7 @@ async function dubChunkWithRetry(
         {
           role: 'user',
           parts: [
-            { text: prompt },
+            { text: activePrompt },
             { inline_data: { mime_type: 'audio/mp3', data: audioBase64 } },
           ],
         },
@@ -2478,16 +2780,36 @@ async function dubChunkWithRetry(
 
       const data: any = await response.json().catch(() => null);
       const finishReason = completionFinishReason(data);
+      const usage = usageFromResponse(data);
+      const { text: content, thoughtCharacters } = geminiResponseAnswer(data);
+
+      log.info(
+        {
+          media: {
+            chunk: chunk.index + 1,
+            finishReason: finishReason ?? null,
+            thoughtCharacters,
+            answerCharacters: content.length,
+            usage,
+          },
+        },
+        'media: dubbing model answer',
+      );
+
       if (finishReason === 'length' || finishReason === 'max_tokens') {
         throw new MediaError(
           502,
           'model_output_truncated',
           `Chunk ${chunk.index + 1} hit the ${maxOutputTokens}-token output cap before finishing, so its dubbing script would be incomplete. Lower chunk_seconds or raise max_tokens.`,
-          { chunkIndex: chunk.index, finishReason, maxTokens: maxOutputTokens },
+          {
+            chunkIndex: chunk.index,
+            finishReason,
+            maxTokens: maxOutputTokens,
+            thoughtCharacters,
+          },
         );
       }
 
-      const content = geminiResponseText(data);
       if (!content || isModelFailureText(content)) {
         const failed = Boolean(content);
         lastError = new MediaError(
@@ -2496,7 +2818,11 @@ async function dubChunkWithRetry(
           failed
             ? `Chunk ${chunk.index + 1} returned a model failure message instead of a dubbing script. Try a simpler prompt or a different model.`
             : `Chunk ${chunk.index + 1} returned an empty model response.`,
-          { chunkIndex: chunk.index, ...(failed ? { model_text: content.slice(0, 1000) } : {}) },
+          {
+            chunkIndex: chunk.index,
+            thoughtCharacters,
+            ...(failed ? { model_text: content.slice(0, 1000) } : {}),
+          },
         );
         const retryBudget = failed ? 2 : attempts;
         if (attempt + 1 < retryBudget) {
@@ -2512,7 +2838,7 @@ async function dubChunkWithRetry(
           502,
           'invalid_model_json',
           `Chunk ${chunk.index + 1} did not return a JSON array of dubbing segments. Retrying with a shorter prompt may help, or choose a model with reliable JSON output.`,
-          { chunkIndex: chunk.index, model_text: content.slice(0, 2000) },
+          { chunkIndex: chunk.index, model_text: content.slice(0, 2000), thoughtCharacters },
         );
         if (attempt < attempts - 1) {
           await sleepWithSignal(backoffMs(attempt), signal);
@@ -2535,6 +2861,55 @@ async function dubChunkWithRetry(
       }
       segments.sort((a, b) => a.startSeconds - b.startSeconds || a.endSeconds - b.endSeconds);
 
+      const coveredSeconds = dubbingCoveredSeconds(
+        segments,
+        chunk.startSeconds,
+        chunk.endSeconds,
+      );
+      const verdict = dubbingCoverageVerdict({
+        segmentCount: segments.length,
+        coveredSeconds,
+        speechSeconds,
+        durationSeconds: chunk.durationSeconds,
+      });
+
+      if (!verdict.ok) {
+        const details = {
+          chunkIndex: chunk.index,
+          segmentCount: segments.length,
+          coveredSeconds: verdict.coveredSeconds,
+          speechSeconds: verdict.speechSeconds ?? null,
+          durationSeconds: Number(chunk.durationSeconds.toFixed(2)),
+          coverageRatio: verdict.ratio ?? null,
+          thoughtCharacters,
+        };
+
+        // One explicit retry with the completeness prompt. It does not consume
+        // the transient-failure budget, because the transport was healthy.
+        if (!completenessRetried && !signal.aborted) {
+          completenessRetried = true;
+          maxAttempts = Math.max(maxAttempts, attempt + 2);
+          activePrompt = `${prompt}\n\n${DUBBING_COMPLETENESS_RETRY_PROMPT}`;
+          log.warn(
+            { media: { chunk: chunk.index + 1, ...details, reason: verdict.reason } },
+            'media: dubbing answer rejected as incomplete; retrying with the completeness prompt',
+          );
+          await sleepWithSignal(250, signal);
+          continue;
+        }
+
+        const reason = verdict.reason ?? 'low_coverage';
+        lastError = new MediaError(
+           502,
+          reason === 'empty_script' ? 'empty_model_response' : 'partial_script',
+          `Chunk ${chunk.index + 1} returned ${segments.length} segment(s) covering ${verdict.coveredSeconds}s of ${verdict.speechSeconds ?? 0}s of audible speech (${Math.round(
+            (verdict.ratio ?? 0) * 100,
+          )}%). The script is incomplete, so the request is failed instead of silently dropping dialogue. Try a smaller chunk_seconds or a different model.`,
+          details,
+        );
+        throw lastError;
+      }
+
       return {
         index: chunk.index,
         startSeconds: chunk.startSeconds,
@@ -2544,7 +2919,10 @@ async function dubChunkWithRetry(
         content,
         model: typeof data?.model === 'string' ? data.model : options.model,
         maxOutputTokens,
-        usage: usageFromResponse(data),
+        usage,
+        speechSeconds: verdict.speechSeconds,
+        coveredSeconds: verdict.coveredSeconds,
+        thoughtCharacters,
       };
     } catch (error) {
       if (error instanceof MediaError) {
@@ -2552,7 +2930,8 @@ async function dubChunkWithRetry(
           error.code === 'upstream_auth_failed' ||
           error.code === 'model_rejected_media' ||
           error.code === 'model_output_truncated' ||
-          error.code === 'schema_rejected'
+          error.code === 'schema_rejected' ||
+          error.code === 'partial_script'
         ) {
           throw error;
         }
@@ -2605,6 +2984,17 @@ function buildDubbingResponse(input: {
   );
   const droppedSegments = ordered.reduce((sum, result) => sum + result.droppedSegments, 0);
 
+  const speechSeconds = ordered.reduce<number | undefined>(
+    (sum, result) =>
+      result.speechSeconds === undefined
+        ? sum
+        : (sum ?? 0) + result.speechSeconds,
+    undefined,
+  );
+  const coveredSeconds = ordered.reduce((sum, result) => sum + result.coveredSeconds, 0);
+  const coverageRatio =
+    speechSeconds && speechSeconds > 0 ? coveredSeconds / speechSeconds : undefined;
+
   return {
     id: `dub_${crypto.randomUUID()}`,
     object: 'audio.dubbing',
@@ -2617,11 +3007,23 @@ function buildDubbingResponse(input: {
     chunk_seconds: options.chunkSeconds,
     segment_count: segments.length,
     segments,
+    coverage: {
+      speech_seconds:
+        speechSeconds === undefined ? null : Number(speechSeconds.toFixed(3)),
+      covered_seconds: Number(coveredSeconds.toFixed(3)),
+      ratio: coverageRatio === undefined ? null : Number(coverageRatio.toFixed(3)),
+    },
     chunks: ordered.map((result) => ({
       index: result.index,
       start_seconds: Number(result.startSeconds.toFixed(3)),
       end_seconds: Number(result.endSeconds.toFixed(3)),
       segment_count: result.segments.length,
+      speech_seconds:
+        result.speechSeconds === undefined
+          ? null
+          : Number(result.speechSeconds.toFixed(3)),
+      covered_seconds: Number(result.coveredSeconds.toFixed(3)),
+      thought_characters: result.thoughtCharacters,
       max_output_tokens: result.maxOutputTokens,
       model: result.model,
       usage: result.usage,
@@ -2806,8 +3208,17 @@ function runProcess(command: string, args: string[], signal: AbortSignal): Promi
   });
 }
 
-function runCapture(command: string, args: string[], signal: AbortSignal): Promise<string> {
-  return new Promise<string>((resolve, reject) => {
+async function runCapture(command: string, args: string[], signal: AbortSignal): Promise<string> {
+  const { stdout } = await runCaptureWithStderr(command, args, signal);
+  return stdout;
+}
+
+function runCaptureWithStderr(
+  command: string,
+  args: string[],
+  signal: AbortSignal,
+): Promise<{ stdout: string; stderr: string }> {
+  return new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
     if (signal.aborted) {
       reject(abortError(signal));
       return;
@@ -2820,12 +3231,12 @@ function runCapture(command: string, args: string[], signal: AbortSignal): Promi
     let stderr = '';
     let settled = false;
 
-    const finish = (error?: Error, output?: string) => {
+    const finish = (error?: Error, output?: { stdout: string; stderr: string }) => {
       if (settled) return;
       settled = true;
       signal.removeEventListener('abort', onAbort);
       if (error) reject(error);
-      else resolve(output || '');
+      else resolve(output || { stdout: '', stderr: '' });
     };
 
     const onAbort = () => {
@@ -2845,7 +3256,7 @@ function runCapture(command: string, args: string[], signal: AbortSignal): Promi
       }
     });
     child.stderr?.on('data', (chunk: Buffer | string) => {
-      stderr = (stderr + chunk.toString()).slice(-4000);
+      stderr = (stderr + chunk.toString()).slice(-64_000);
     });
     child.on('error', (error: any) => {
       if (error?.code === 'ENOENT') {
@@ -2861,7 +3272,7 @@ function runCapture(command: string, args: string[], signal: AbortSignal): Promi
       finish(new MediaError(500, 'media_tool_failed', `${command} could not start: ${error?.message || error}`));
     });
     child.on('close', (code) => {
-      if (code === 0) finish(undefined, stdout);
+      if (code === 0) finish(undefined, { stdout, stderr });
       else {
         finish(
           new MediaError(
