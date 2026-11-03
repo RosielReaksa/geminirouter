@@ -485,6 +485,7 @@ note, bridge restarted clean (`NRestarts=0`). Earlier frontend-only deploy:
 **Date:** 2026-11-03
 **Trigger:** external verification of `20261103-124415` (60/120/300 s matrix on
 `gemini-3.8-flash-high` plus a lite regression).
+**Full write-up:** [`docs/DUBBING_CONCURRENCY_REPORT.md`](./DUBBING_CONCURRENCY_REPORT.md)
 
 The verification round confirmed that defect A (single-segment answers) and
 defect B (empty 502s) are fixed: 60 s → 27 segments, 120 s → 44 segments, 300 s

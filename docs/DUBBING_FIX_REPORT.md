@@ -393,6 +393,8 @@ The graceful drain drop-in is independent of the code and can stay installed.
 
 ## 14. Follow-up: concurrency default and wall-clock estimate
 
+**Full write-up:** [`docs/DUBBING_CONCURRENCY_REPORT.md`](./DUBBING_CONCURRENCY_REPORT.md)
+
 The verification round against build `20261103-124415` confirmed defect A
 (60 s → 27 segments, 120 s → 44) and defect B (no empty 502s) as fixed, and found
 one remaining problem: a 300 s `gemini-3.8-flash-high` request with the default
