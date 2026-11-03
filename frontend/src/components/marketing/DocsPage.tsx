@@ -314,6 +314,15 @@ for (const line of segments) {
                   dubbing rule only. Use <code>response_format=json</code> when you also need the{' '}
                   <code>coverage</code> block, chunk boundaries, token usage, and per-chunk timings.
                 </p>
+                <p>
+                  <code>concurrency</code> defaults to one worker per chunk (max 4) for the short-window
+                  models, so a 5-minute 3.8 request runs its three 120-second chunks in parallel instead
+                  of serialising them. The JSON response echoes <code>concurrency</code> and quotes
+                  <code>timings.estimated_ms</code> — roughly 2.2× the audio duration for reasoning
+                  models, 0.3× for lite, 1× otherwise. Treat it as a planning figure for client
+                  timeouts: a 5-minute clip on <code>gemini-3.8-flash-high</code> needs about ten
+                  minutes, while <code>gemini-3.5-flash-lite</code> returns it in about a minute.
+                </p>
               </div>
               <Code
                 title="video · server-side JavaScript"

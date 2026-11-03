@@ -388,3 +388,27 @@ The graceful drain drop-in is independent of the code and can stay installed.
 | `3432d1d` | retire only `gemini-3.8-flash-tiered` |
 | `8ca9700` | exclude thoughts, validate completeness, graceful drain |
 | `5136481` | run `-lite` models on 60-second chunks |
+
+---
+
+## 14. Follow-up: concurrency default and wall-clock estimate
+
+The verification round against build `20261103-124415` confirmed defect A
+(60 s → 27 segments, 120 s → 44) and defect B (no empty 502s) as fixed, and found
+one remaining problem: a 300 s `gemini-3.8-flash-high` request with the default
+`concurrency` did not answer within 1,200 s, because three 120 s chunks ran one
+after another and the strict retry can double a chunk. The same request with
+`concurrency=3` returned 90 segments in 575 s.
+
+| Item | Change |
+|---|---|
+| `defaultDubbingConcurrency(model, chunkCount)` | `-lite` and reasoning models default to `min(4, chunkCount)` workers; long-window models stay at 1 |
+| Explicit `concurrency` | never overridden (`DubbingOptions.concurrencyExplicit`) |
+| Response metadata | `concurrency` added alongside `chunk_count` / `chunk_seconds` |
+| `timings.estimated_ms` | `2.2×` duration (reasoning), `0.3×` (lite), `1×` (other), for client timeout planning |
+| Docs | `docs/MEDIA_API.md`, `docs/DUBBING_CHANGELOG.md` §15, website dubbing section |
+
+Client guidance: for 3.8 production dubbing keep the direct `:generateContent`
+path with 120 s chunks; through the router, 300 s 3.8 is now accepted but needs
+about ten minutes, while `gemini-3.5-flash-lite` returns the same clip in about a
+minute. Chunked progress or a job id stays an optional follow-up.

@@ -196,6 +196,8 @@ interface DubbingOptions {
   maxTokens?: number;
   temperature: number;
   concurrency: number;
+  /** True when the caller sent an explicit `concurrency` value. */
+  concurrencyExplicit: boolean;
   responseFormat: 'json' | 'array';
 }
 
@@ -1876,6 +1878,30 @@ export function dubbingChunkSecondsForModel(model: string, requestedSeconds: num
 }
 
 /**
+ * Default chunk concurrency for a dubbing request that did not set
+ * `concurrency`. Short-window models are slow per chunk, so run every chunk in
+ * parallel (up to 4): a 300 s reasoning request with concurrency 1 serialises
+ * three 120 s chunks and looks hung, while three parallel chunks answered in
+ * 575 s in production.
+ */
+export function defaultDubbingConcurrency(model: string, chunkCount: number): number {
+  if (!usesShortDubbingWindow(model)) return 1;
+  return Math.max(1, Math.min(4, Math.floor(chunkCount)));
+}
+
+/**
+ * Wall-clock planning estimate for a dubbing request, from production
+ * throughput. Reasoning models run at roughly 2.2x audio duration, lite models
+ * at 0.3x, and everything else at 1x. It is a planning figure, not a deadline:
+ * account-pool contention can push a request far past it.
+ */
+export function estimatedDubbingMs(durationSeconds: number, model: string): number {
+  const safe = Number.isFinite(durationSeconds) ? Math.max(0, durationSeconds) : 0;
+  const factor = isReasoningDubbingModel(model) ? 2.2 : isLiteDubbingModel(model) ? 0.3 : 1;
+  return Math.round(safe * factor * 1000);
+}
+
+/**
  * Output-token budget for one dubbing chunk, from the caller's duration table.
  * A chunk is capped by the first threshold that it fits into. Short-window
  * models get a floor that leaves room for thoughts plus the JSON answer.
@@ -2351,7 +2377,8 @@ function parseDubbingOptions(fields: Record<string, string>, config: MediaConfig
     : 0;
 
   const requestedConcurrency = Number.parseInt(fields.concurrency || '', 10);
-  const concurrency = Number.isFinite(requestedConcurrency)
+  const concurrencyExplicit = Number.isFinite(requestedConcurrency);
+  const concurrency = concurrencyExplicit
     ? Math.min(4, Math.max(1, requestedConcurrency))
     : 1;
 
@@ -2377,6 +2404,7 @@ function parseDubbingOptions(fields: Record<string, string>, config: MediaConfig
     maxTokens,
     temperature,
     concurrency,
+    concurrencyExplicit,
     responseFormat,
   };
 }
@@ -2474,6 +2502,25 @@ async function handleAudioDubbing(
       controller.signal,
     );
     const transcodeMs = Date.now() - transcodeStarted;
+
+    // Short-window models need parallel chunks by default: serial 120 s 3.8
+    // chunks can exceed every proxy timeout and look hung to the caller.
+    if (!options.concurrencyExplicit) {
+      const autoConcurrency = defaultDubbingConcurrency(options.model, chunks.length);
+      if (autoConcurrency !== options.concurrency) {
+        request.log.info(
+          {
+            media: {
+              model: options.model,
+              chunkCount: chunks.length,
+              concurrency: autoConcurrency,
+            },
+          },
+          'media: dubbing concurrency raised for short-window model',
+        );
+        options.concurrency = autoConcurrency;
+      }
+    }
 
     const modelStarted = Date.now();
     const results = await dubChunks(chunks, options, config, deps, controller.signal, request.log);
@@ -3029,6 +3076,7 @@ function buildDubbingResponse(input: {
     duration_seconds: Number(durationSeconds.toFixed(3)),
     chunk_count: chunks.length,
     chunk_seconds: options.chunkSeconds,
+    concurrency: options.concurrency,
     segment_count: segments.length,
     segments,
     coverage: {
@@ -3054,6 +3102,7 @@ function buildDubbingResponse(input: {
     })),
     usage,
     timings: {
+      estimated_ms: estimatedDubbingMs(durationSeconds, options.model),
       transcode_ms: timings.transcodeMs,
       model_ms: timings.modelMs,
       total_ms: timings.totalMs,

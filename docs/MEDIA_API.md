@@ -298,6 +298,13 @@ The route reuses the transcription upload parsers: multipart `file`,
 - `temperature` — default `0`; `concurrency` — 1–4 chunks in parallel;
   `response_format` — `json` (default) or `array`.
 
+When `concurrency` is omitted, short-window models (`-lite` and the reasoning
+family) run **one worker per chunk, up to 4**. Serial 120-second reasoning chunks
+made a 300-second request look hung: one worker did not answer in 20 minutes,
+while three parallel chunks returned a complete 90-segment script in 575 seconds.
+Long-window models keep the historical default of 1. Set `concurrency` explicitly
+to override; the effective value is echoed in the response.
+
 Reasoning models (the `gemini-3.8` family and any id containing `high`,
 `thinking`, `reasoner` or `pro`) spend output tokens on a thinking pass before
 the JSON answer. They are capped at **120 seconds per chunk** and always get at
@@ -340,6 +347,7 @@ The default `json` response wraps the merged segments with metadata:
   "duration_seconds": 3720.4,
   "chunk_count": 13,
   "chunk_seconds": 300,
+  "concurrency": 4,
   "segment_count": 284,
   "segments": [
     { "start": "00:12.4", "end": "00:16.8", "speaker_gender": "female",
@@ -358,11 +366,31 @@ The default `json` response wraps the merged segments with metadata:
       "usage": { "promptTokens": 0, "completionTokens": 0, "totalTokens": 0 } }
   ],
   "usage": { "promptTokens": 0, "completionTokens": 0, "totalTokens": 0 },
-  "timings": { "transcode_ms": 0, "model_ms": 0, "total_ms": 0 }
+  "timings": {
+    "estimated_ms": 93010,
+    "transcode_ms": 0,
+    "model_ms": 0,
+    "total_ms": 0
+  }
 }
 ```
 
 With `response_format=array`, the body is only the segment array.
+
+`timings.estimated_ms` is a wall-clock planning figure derived from production
+throughput, not a deadline: 2.2× audio duration for reasoning models, 0.3× for
+`-lite`, 1× for everything else. A 300-second `gemini-3.8-flash-high` request is
+therefore quoted around 11 minutes. Account-pool contention can push a request
+well past the estimate, so use it to set client timeouts, not to abort work.
+
+| Model | 60 s clip | 120 s clip | 300 s clip |
+|---|---:|---:|---:|
+| `gemini-3.8-flash-high` | ~71 s | ~113 s | ~575 s (3 parallel chunks) |
+| `gemini-3.5-flash-lite` | ~25 s | ~45 s | ~65 s (5 parallel chunks) |
+
+For latency-sensitive work prefer `gemini-3.5-flash-lite`; when the 3.8 script
+quality is required, send 120-second chunks from the client or let the endpoint
+split a 300-second clip and budget ~10 minutes.
 
 ### Duration-based output caps
 

@@ -19,11 +19,13 @@ import {
   DUBBING_COMPLETENESS_RETRY_PROMPT,
   buildChunkPrompt,
   buildDubbingPrompt,
+  defaultDubbingConcurrency,
   dubbingChunkSecondsForModel,
   dubbingCoverageVerdict,
   dubbingCoveredSeconds,
   dubbingMaxOutputTokens,
   dubbingSpeechSecondsFromSilences,
+  estimatedDubbingMs,
   formatDubbingTimestamp,
   geminiResponseAnswer,
   isModelFailureText,
@@ -706,6 +708,30 @@ test('dubbing reasoning models get a token floor and a 120-second chunk window',
   assert.equal(dubbingChunkSecondsForModel('gemini-3.6-flash', 1800), 1800);
 });
 
+test('short-window models default to one dubbing worker per chunk', () => {
+  // A serial 300 s reasoning request spent > 1200 s in the pool; three parallel
+  // 120 s chunks answered in 575 s.
+  assert.equal(defaultDubbingConcurrency('gemini-3.8-flash-high', 3), 3);
+  assert.equal(defaultDubbingConcurrency('gemini-3.8-flash-high', 1), 1);
+  assert.equal(defaultDubbingConcurrency('gemini-3.8-flash-high', 9), 4, 'the pool caps at 4 workers');
+  assert.equal(defaultDubbingConcurrency('gemini-3.5-flash-lite', 5), 4);
+  assert.equal(defaultDubbingConcurrency('gemini-3.5-flash-lite', 2), 2);
+  // Long-window models keep the historical single worker below 900 s windows.
+  assert.equal(defaultDubbingConcurrency('gemini-3.6-flash', 3), 1);
+  assert.equal(defaultDubbingConcurrency('gemini-3.5-flash', 2), 1);
+  assert.equal(defaultDubbingConcurrency('gemini-3.8-flash-high', 0), 1);
+});
+
+test('dubbing wall-clock estimates follow the measured per-model throughput', () => {
+  assert.equal(estimatedDubbingMs(300, 'gemini-3.8-flash-high'), 660000);
+  assert.equal(estimatedDubbingMs(120, 'gemini-3.8-flash-high'), 264000);
+  assert.equal(estimatedDubbingMs(300, 'gemini-3.5-flash-lite'), 90000);
+  assert.equal(estimatedDubbingMs(300, 'gemini-3.6-flash'), 300000);
+  assert.equal(estimatedDubbingMs(0, 'gemini-3.8-flash-high'), 0);
+  assert.equal(estimatedDubbingMs(Number.NaN, 'gemini-3.5-flash-lite'), 0);
+  assert.equal(estimatedDubbingMs(-15, 'gemini-3.5-flash-lite'), 0);
+});
+
 test('gemini answer extraction excludes thought parts and counts them', () => {
   const thought =
     'I should return a list.\nExample draft:\n[{"khmer_dubbing":"បាទ"}]\nNow I will answer.';
@@ -946,6 +972,7 @@ test(
     form.append('file', new Blob([makeWav(65)], { type: 'audio/wav' }), 'dubbing.wav');
     form.append('model', 'gemini-3.5-flash-lite');
     form.append('chunk_seconds', '60');
+    form.append('concurrency', '1');
     form.append('source_language', 'zh');
     form.append('target_language', 'km');
 
@@ -961,6 +988,7 @@ test(
 
     assert.equal(body.object, 'audio.dubbing');
     assert.equal(body.chunk_count, 2, 'a 65-second recording must be split at 60 seconds');
+    assert.equal(body.concurrency, 1, 'an explicit concurrency must be kept');
     assert.equal(body.segment_count, 2);
     assert.equal(body.source_language, 'Chinese');
     assert.equal(body.target_language, 'Khmer');
@@ -1031,6 +1059,13 @@ test(
     assert.equal(body.model, 'gemini-3.5-flash-lite');
     assert.equal(body.chunk_seconds, 60, 'lite must not be left with a 300-second window');
     assert.equal(body.chunk_count, 3, 'a 130-second recording splits into 60 s + 60 s + 10 s');
+    assert.equal(
+      body.concurrency,
+      3,
+      'short-window models default to one worker per chunk (max 4)',
+    );
+    assert.ok(body.timings.estimated_ms > 0, 'timings must carry a planning estimate');
+    assert.equal(body.timings.estimated_ms, 39000, '130 s lite at 0.3x audio duration');
     assert.ok(body.chunks[0].end_seconds <= 61, JSON.stringify(body.chunks[0]));
     assert.equal(body.chunks[0].max_output_tokens, 40960);
     assert.equal(body.chunks[2].max_output_tokens, 40960);

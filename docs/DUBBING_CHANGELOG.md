@@ -479,3 +479,57 @@ note, bridge restarted clean (`NRestarts=0`). Earlier frontend-only deploy:
   tail check plus a corpus of real footage, because music and overlapping speech
   depress or inflate the measured ratio.
 - 3.5 high/low/medium verification is pending account-pool recovery.
+
+## 15. Concurrency default and wall-clock estimate
+
+**Date:** 2026-11-03
+**Trigger:** external verification of `20261103-124415` (60/120/300 s matrix on
+`gemini-3.8-flash-high` plus a lite regression).
+
+The verification round confirmed that defect A (single-segment answers) and
+defect B (empty 502s) are fixed: 60 s → 27 segments, 120 s → 44 segments, 300 s
+lite → 83 segments, no empty body. It found one remaining problem: a 300 s
+`gemini-3.8-flash-high` request with the default `concurrency` never answered
+within 1,200 s, because three 120 s chunks ran sequentially and the strict
+completeness retry can double a chunk's time. The same request with
+`concurrency=3` returned 90 segments in 575 s.
+
+### 15.1 Change
+
+| Item | Before | After |
+|---|---|---|
+| Default `concurrency` for `-lite` / reasoning models | 1 (serial chunks) | one worker per chunk, capped at 4 |
+| Default `concurrency` for long-window models | 1 | 1 (unchanged) |
+| Explicit `concurrency` | honoured | honoured (`concurrencyExplicit`) |
+| Response metadata | `chunk_count`, `chunk_seconds` | plus `concurrency` and `timings.estimated_ms` |
+
+`defaultDubbingConcurrency(model, chunkCount)` returns `min(4, chunkCount)` for
+short-window models and 1 otherwise. It runs after `splitAudio`, and the bridge
+logs `media: dubbing concurrency raised for short-window model` when it raises
+the worker count.
+
+`estimatedDubbingMs(durationSeconds, model)` quotes a planning figure from
+production throughput: **2.2×** audio duration for reasoning models, **0.3×** for
+`-lite`, **1×** for everything else. It is exposed per response as
+`timings.estimated_ms`; it is not a deadline or a timeout.
+
+### 15.2 Client expectations
+
+| Use case | Path |
+|---|---|
+| Production dubbing, best script quality | direct `:generateContent` with 120 s chunks (the dubber path: 30-minute episode → 504 cues in 6 m 50 s) |
+| Router endpoint, speed matters | `gemini-3.5-flash-lite`, 300 s → 83 segments in 65 s |
+| Router endpoint, 3.8 required | 300 s is accepted but budget ~10 min; or send 120 s chunks with `concurrency=3` |
+
+Client timeouts should be derived from `timings.estimated_ms` with a wide margin,
+or fixed at 15 minutes for long clips. A 10-minute request still sends no bytes
+until the script is complete; chunked progress or a job id remains an optional
+follow-up.
+
+### 15.3 Tests
+
+`pnpm --dir server test` → **108/108 passing**. New cases pin the auto-concurrency
+helper (`3` chunks → 3 workers, caps at 4, long-window models stay at 1) and the
+estimate factors, and the 130 s lite route run asserts `concurrency: 3` plus
+`timings.estimated_ms: 39000`. The 65 s route run pins `concurrency: 1` to prove
+an explicit value is never overridden.
