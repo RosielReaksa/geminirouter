@@ -386,6 +386,7 @@ depending on whether the docs section should remain.
 **Date:** 2026-11-03
 **Backup:** `/opt/geminirouter/.deploy-backups/20261103-114543`
 **Deployed:** bridge restarted `2026-11-03 11:46:04 UTC`, `NRestarts=0`
+**Full write-up:** [`docs/DUBBING_FIX_REPORT.md`](./DUBBING_FIX_REPORT.md)
 
 ### 14.1 Reported defects
 
