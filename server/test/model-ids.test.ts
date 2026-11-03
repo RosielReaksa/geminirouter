@@ -4,6 +4,8 @@ import {
   canonicalModelId,
   canonicalizeModelEntries,
   canonicalizeModelIds,
+  includeVerifiedWebsiteModels,
+  VERIFIED_WEBSITE_MODEL_IDS,
 } from '../src/modelIds.js';
 
 test('the retired tiered id maps to gemini-3.8-flash-high', () => {
@@ -52,4 +54,52 @@ test('canonicalizeModelEntries renames entries and drops duplicates', () => {
     ['gemini-3.8-flash-high', 'gemini-3.8-flash-low', 'gemini-3.1-flash-lite'],
   );
   assert.equal(entries[0].owned_by, 'antigravity');
+});
+
+test('the website list adds verified ids the core omits without dropping live ones', () => {
+  const live = [
+    'claude-opus-4-6-thinking',
+    'gemini-3.1-flash-lite',
+    'gemini-3.5-flash-lite',
+    'gemini-3.6-flash',
+    'gpt-oss-120b-medium',
+  ];
+
+  const merged = includeVerifiedWebsiteModels(live);
+
+  // Live ids keep their positions, so the Models page order is unchanged.
+  assert.deepEqual(merged.slice(0, live.length), live);
+  // Every verified alias is present exactly once.
+  for (const id of VERIFIED_WEBSITE_MODEL_IDS) {
+    assert.equal(merged.filter((value) => value === id).length, 1, `${id} appears once`);
+  }
+  // Ids that already exist upstream are not appended a second time.
+  assert.equal(new Set(merged).size, merged.length);
+  assert.ok(!merged.includes('claude-haiku-4-5'));
+  assert.ok(!merged.includes('claude-opus-4-5'));
+
+  // The verified-but-unlisted Claude ids are what makes the extra models usable.
+  for (const id of [
+    'claude-sonnet-4-6',
+    'claude-opus-4-6',
+    'claude-sonnet-4-5',
+    'claude-sonnet-4-5-thinking',
+    'claude-opus-4-5-thinking',
+    'claude-haiku-4-5-20251001',
+  ]) {
+    assert.ok(merged.includes(id), `${id} is offered`);
+  }
+});
+
+test('the website list rewrites the retired tiered id instead of exposing it', () => {
+  const merged = includeVerifiedWebsiteModels(['gemini-3.8-flash-tiered', 'gemini-3.8-flash-low']);
+
+  assert.ok(merged.includes('gemini-3.8-flash-high'));
+  assert.ok(merged.includes('gemini-3.8-flash-low'));
+  assert.ok(!merged.includes('gemini-3.8-flash-tiered'));
+  assert.equal(merged.filter((value) => value === 'gemini-3.8-flash-high').length, 1);
+});
+
+test('the website list still returns the verified ids when the gateway sends nothing', () => {
+  assert.deepEqual(includeVerifiedWebsiteModels([]), [...VERIFIED_WEBSITE_MODEL_IDS]);
 });

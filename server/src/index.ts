@@ -21,7 +21,11 @@ import { derivePoolState, bridgeToCoreProxy, coreProxyToBridge } from './pool-st
 import { readCoreProxyConfig, applyCoreProxyConfig } from './coreConfig.js';
 import { ConcurrencyLeaseManager } from './leaseManager.js';
 import { handleV1ProxyRequest } from './v1Proxy.js';
-import { canonicalModelId, canonicalizeModelEntries, canonicalizeModelIds } from './modelIds.js';
+import {
+  canonicalModelId,
+  canonicalizeModelEntries,
+  includeVerifiedWebsiteModels,
+} from './modelIds.js';
 import { mapCoreTrafficItems as mapCoreTrafficItemsFromCore } from './trafficMapping.js';
 import { AccountTester, type AccountTestResult } from './accountTester.js';
 import {
@@ -379,7 +383,7 @@ export async function createServer(): Promise<{
       });
       const ids: string[] = (res.data?.data || []).map((m: any) => m.id).filter(Boolean);
       if (ids.length > 0) {
-        const websiteIds = canonicalizeModelIds(includeWebsiteModelAliases(ids));
+        const websiteIds = includeVerifiedWebsiteModels(ids);
         return {
           source: 'gateway',
           online: true,
@@ -1755,23 +1759,17 @@ export async function createServer(): Promise<{
     { id: 'claude-opus-4-5', name: 'Claude 4.5 Opus', provider: 'Anthropic Claude', family: 'claude', contextLength: 200000, maxOutputTokens: 65535 },
     { id: 'claude-opus-4-5-thinking', name: 'Claude 4.5 Opus (Thinking)', provider: 'Anthropic Claude', family: 'claude', contextLength: 200000, maxOutputTokens: 65535 },
     { id: 'claude-opus-4-6', name: 'Claude 4.6 Opus', provider: 'Anthropic Claude', family: 'claude', contextLength: 200000, maxOutputTokens: 65535 },
+    { id: 'claude-sonnet-4-6-thinking', name: 'Claude 4.6 Sonnet (Thinking)', provider: 'Anthropic Claude', family: 'claude', contextLength: 200000, maxOutputTokens: 65535 },
+    { id: 'claude-opus-4-6-thinking', name: 'Claude 4.6 Opus (Thinking)', provider: 'Anthropic Claude', family: 'claude', contextLength: 200000, maxOutputTokens: 65535 },
+    { id: 'claude-haiku-4-5-20251001', name: 'Claude 4.5 Haiku', provider: 'Anthropic Claude', family: 'claude', contextLength: 200000, maxOutputTokens: 65535 },
+    { id: 'claude-sonnet-5-5-high', name: 'Claude 5.5 Sonnet (High)', provider: 'Anthropic Claude', family: 'claude', contextLength: 200000, maxOutputTokens: 65535 },
+    { id: 'claude-sonnet-5-5-medium', name: 'Claude 5.5 Sonnet (Medium)', provider: 'Anthropic Claude', family: 'claude', contextLength: 200000, maxOutputTokens: 65535 },
+    { id: 'claude-sonnet-5-5-low', name: 'Claude 5.5 Sonnet (Low)', provider: 'Anthropic Claude', family: 'claude', contextLength: 200000, maxOutputTokens: 65535 },
+    { id: 'claude-opus-5-5-high', name: 'Claude 5.5 Opus (High)', provider: 'Anthropic Claude', family: 'claude', contextLength: 200000, maxOutputTokens: 65535 },
+    { id: 'claude-opus-5-5-medium', name: 'Claude 5.5 Opus (Medium)', provider: 'Anthropic Claude', family: 'claude', contextLength: 200000, maxOutputTokens: 65535 },
+    { id: 'claude-opus-5-5-low', name: 'Claude 5.5 Opus (Low)', provider: 'Anthropic Claude', family: 'claude', contextLength: 200000, maxOutputTokens: 65535 },
     { id: 'gpt-oss-120b', name: 'GPT OSS 120B', provider: 'OpenAI-compatible', family: 'gpt-oss', contextLength: 131072, maxOutputTokens: 65535 },
   ];
-
-  // The current gateway model list may omit aliases that still accept real
-  // completion requests. Expose only aliases verified against the live API.
-  const WEBSITE_MODEL_ALIASES = new Set([
-    'gemini-3.1-flash-lite',
-    'gemini-3.1-flash-image',
-    'gemini-3.5-flash-lite',
-    'gemini-3.8-flash-high',
-  ]);
-  function includeWebsiteModelAliases(gatewayIds: string[]): string[] {
-    const verifiedIds = MODEL_CATALOG
-      .filter((model) => WEBSITE_MODEL_ALIASES.has(model.id))
-      .map((model) => model.id);
-    return [...new Set([...gatewayIds, ...verifiedIds])];
-  }
 
   app.get('/api/models', async () => {
     const { port: gatewayPort, apiKey, source: keySource } = resolveGateway();
@@ -1787,7 +1785,7 @@ export async function createServer(): Promise<{
       });
       const liveIds: Array<string> = (res.data?.data || []).map((m: any) => m.id).filter(Boolean);
       if (liveIds.length > 0) {
-        const websiteIds = canonicalizeModelIds(includeWebsiteModelAliases(liveIds));
+        const websiteIds = includeVerifiedWebsiteModels(liveIds);
         const models = websiteIds.map((id) => {
           const meta = MODEL_CATALOG.find((c) => c.id === id);
           const isClaude = id.includes('claude');

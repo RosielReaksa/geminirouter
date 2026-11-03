@@ -29,6 +29,14 @@ const STARTER_PROMPTS = [
 const formatTokens = (value?: number) =>
   typeof value === 'number' ? value.toLocaleString() : '—';
 
+/**
+ * Dropdown label. Models whose last probe failed are still selectable: the probe
+ * result is a stale snapshot, and the model may answer now. The suffix warns
+ * without hiding it.
+ */
+const modelOptionLabel = (item: ModelInfo): string =>
+  item.availability?.ok === false ? `${item.name} — last check failed` : item.name;
+
 const MAX_AUDIO_BYTES = 15 * 1024 * 1024;
 const MAX_VIDEO_BYTES = 20 * 1024 * 1024;
 const MAX_LARGE_MEDIA_BYTES = 2 * 1024 * 1024 * 1024;
@@ -282,18 +290,24 @@ export const PlaygroundPage: React.FC<{ onReady: () => void; isActive?: boolean 
     let active = true;
     api.getModels().then(({ data }) => {
       if (!active) return;
-      const available = (data.models || []).filter((item) => item.availability?.ok !== false);
-      setModels(available);
+      // Show every model the website knows about. The bridge adds ids the core
+      // omits from /v1/models, and a stale failed probe must not hide a model
+      // that still answers. Usable models sort first, last-failed ones last.
+      const all = data.models || [];
+      const usable = all.filter((item) => item.availability?.ok !== false);
+      const lastCheckFailed = all.filter((item) => item.availability?.ok === false);
+      const ordered = [...usable, ...lastCheckFailed];
+      setModels(ordered);
       const preferred = ['gemini-3.5-flash-lite', 'gemini-3.1-flash-lite', 'gemini-2.5-flash-lite'];
       const first =
         preferred
-          .map((id) => available.find((item) => item.id === id))
+          .map((id) => usable.find((item) => item.id === id))
           .find((item) => Boolean(item)) ||
-        available.find((item) => item.id.includes('gemini')) ||
-        available[0];
+        usable.find((item) => item.id.includes('gemini')) ||
+        usable[0];
       const savedModel = saved?.model;
       const nextModel =
-        savedModel && available.some((item) => item.id === savedModel)
+        savedModel && ordered.some((item) => item.id === savedModel)
           ? savedModel
           : first?.id || '';
       setModel(nextModel);
@@ -302,9 +316,11 @@ export const PlaygroundPage: React.FC<{ onReady: () => void; isActive?: boolean 
       const nextCompare =
         savedCompare &&
         savedCompare !== nextModel &&
-        available.some((item) => item.id === savedCompare)
+        ordered.some((item) => item.id === savedCompare)
           ? savedCompare
-          : available.find((item) => item.id !== nextModel)?.id || '';
+          : usable.find((item) => item.id !== nextModel)?.id ||
+            ordered.find((item) => item.id !== nextModel)?.id ||
+            '';
       setCompareModel(nextCompare);
     }).catch(() => {
       if (active) setModels([]);
@@ -640,7 +656,7 @@ export const PlaygroundPage: React.FC<{ onReady: () => void; isActive?: boolean 
               <select id="playground-model" value={model} onChange={(event) => setModel(event.target.value)} disabled={modelsLoading || models.length === 0} className="w-full rounded-xl border border-[#EAE5DE] bg-white px-3 py-2.5 text-sm focus:outline-none focus:border-[#C25938]">
                 {modelsLoading && <option value="">Loading models…</option>}
                 {!modelsLoading && models.length === 0 && <option value="">No models available</option>}
-                {models.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+                {models.map((item) => <option key={item.id} value={item.id}>{modelOptionLabel(item)}</option>)}
               </select>
             </div>
 
@@ -653,7 +669,7 @@ export const PlaygroundPage: React.FC<{ onReady: () => void; isActive?: boolean 
               <div>
                 <label htmlFor="playground-compare-model" className="block text-xs font-semibold text-[#504C46] mb-2">Compare with</label>
                 <select id="playground-compare-model" value={compareModel} onChange={(event) => setCompareModel(event.target.value)} className="w-full rounded-xl border border-[#EAE5DE] bg-white px-3 py-2.5 text-sm focus:outline-none focus:border-[#C25938]">
-                  {compareOptions.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+                  {compareOptions.map((item) => <option key={item.id} value={item.id}>{modelOptionLabel(item)}</option>)}
                 </select>
               </div>
             )}

@@ -54,3 +54,36 @@ export function canonicalizeModelEntries<T extends { id?: unknown }>(entries: T[
   }
   return result;
 }
+
+/**
+ * Model ids that the website dropdown may offer even when the core omits them
+ * from `/v1/models`. Every entry was verified against the live gateway with a
+ * real chat completion before being added; ids whose pool answered 503 (for
+ * example the bare `claude-haiku-4-5` alias) are deliberately absent.
+ *
+ * These are website-only aliases: `/v1/models` still mirrors the core list, so
+ * public API clients keep the exact catalogue the core advertises.
+ */
+export const VERIFIED_WEBSITE_MODEL_IDS: readonly string[] = [
+  // Aliases the gateway accepts but sometimes omits from its own listing.
+  'gemini-3.1-flash-lite',
+  'gemini-3.1-flash-image',
+  'gemini-3.5-flash-lite',
+  'gemini-3.8-flash-high',
+  // Claude models the core knows and serves but does not list.
+  'claude-sonnet-4-6',
+  'claude-opus-4-6',
+  'claude-sonnet-4-5',
+  'claude-sonnet-4-5-thinking',
+  'claude-opus-4-5-thinking',
+  'claude-haiku-4-5-20251001',
+];
+
+/**
+ * Merge the core's live listing with the verified website aliases. Core order is
+ * preserved, aliases are appended, retired ids are rewritten and duplicates
+ * collapse, so the website dropdown and the Models page show one canonical list.
+ */
+export function includeVerifiedWebsiteModels(gatewayIds: string[]): string[] {
+  return canonicalizeModelIds([...gatewayIds, ...VERIFIED_WEBSITE_MODEL_IDS]);
+}
