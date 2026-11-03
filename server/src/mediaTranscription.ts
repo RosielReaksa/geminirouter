@@ -9,7 +9,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { safeEqual } from './auth.js';
 
 /**
- * Long-audio transcription and translation.
+ * Long-audio transcription, translation and timed dubbing.
  *
  * The Antigravity core accepts at most 15 MiB of decoded audio per model
  * request, so a one- or two-hour recording cannot be sent as a single body.
@@ -20,6 +20,11 @@ import { safeEqual } from './auth.js';
  *
  * The caller's prompt is sent to every chunk, and the combined model output is
  * returned in one response.
+ *
+ * `/v1/audio/dubbing` uses the same split path but posts each chunk to the
+ * Gemini-native generateContent endpoint with a JSON response schema and a
+ * duration-based output cap, then shifts chunk-local timestamps onto the
+ * absolute recording timeline.
  */
 
 export const MEDIA_ROUTE_PATHS = [
@@ -28,7 +33,19 @@ export const MEDIA_ROUTE_PATHS = [
   '/v1/media/transcriptions',
 ] as const;
 
+/**
+ * Timed dubbing routes. These use the same upload/transcode/chunk pipeline as
+ * transcription, but each chunk is sent to the Gemini-native generateContent
+ * endpoint with a JSON response schema and a duration-based output cap, and the
+ * returned timed segments are shifted onto the absolute recording timeline.
+ */
+export const DUBBING_ROUTE_PATHS = ['/v1/audio/dubbing', '/v1/media/dubbing'] as const;
+
 export const MEDIA_LANGUAGES_PATH = '/v1/audio/languages';
+
+/** Default dubbing window. Five minutes fits the 24,576-token cap. */
+const DUBBING_DEFAULT_CHUNK_SECONDS = 300;
+const DUBBING_MAX_CHUNK_SECONDS = 1800;
 
 // Extra upload paths that need the streaming body parser but are not public
 // API model routes. The playground uses this for large files.
@@ -113,6 +130,53 @@ interface ChunkResult {
   model: string;
   usage: { promptTokens: number; completionTokens: number; totalTokens: number };
 }
+
+export type DubbingSpeakerGender = 'male' | 'female';
+export type DubbingPitch = 'low' | 'high';
+
+/** One timed dubbing line in the public output contract. */
+export interface DubbingSegment {
+  start: string;
+  end: string;
+  speaker_gender: DubbingSpeakerGender;
+  pitch: DubbingPitch;
+  vocal_timbre: string;
+  character_role: string;
+  original_transcript: string;
+  khmer_dubbing: string;
+}
+
+interface DubbingSegmentInternal extends DubbingSegment {
+  /** Absolute seconds on the whole recording, used for sorting and merging. */
+  startSeconds: number;
+  endSeconds: number;
+}
+
+interface DubbingChunkResult {
+  index: number;
+  startSeconds: number;
+  endSeconds: number;
+  segments: DubbingSegmentInternal[];
+  droppedSegments: number;
+  content: string;
+  model: string;
+  maxOutputTokens: number;
+  usage: { promptTokens: number; completionTokens: number; totalTokens: number };
+}
+
+interface DubbingOptions {
+  model: string;
+  prompt?: string;
+  sourceLanguage: string;
+  targetLanguage: string;
+  chunkSeconds: number;
+  maxTokens?: number;
+  temperature: number;
+  concurrency: number;
+  responseFormat: 'json' | 'array';
+}
+
+type UsageTotals = { promptTokens: number; completionTokens: number; totalTokens: number };
 
 export class MediaError extends Error {
   readonly statusCode: number;
@@ -321,6 +385,7 @@ export function isMediaUploadPath(url: string | undefined): boolean {
   const pathname = url.split('?')[0];
   return (
     (MEDIA_ROUTE_PATHS as readonly string[]).includes(pathname) ||
+    (DUBBING_ROUTE_PATHS as readonly string[]).includes(pathname) ||
     EXTRA_MEDIA_UPLOAD_PATHS.includes(pathname)
   );
 }
@@ -388,6 +453,14 @@ export function registerMediaRoutes(app: FastifyInstance, deps: MediaRouteDeps):
         handleAudioTranscription(request, reply, deps, {
           forceTranslate: translationRoute,
         }),
+    );
+  }
+
+  for (const route of DUBBING_ROUTE_PATHS) {
+    app.post(
+      route,
+      { bodyLimit, onRequest: authHook },
+      async (request, reply) => handleAudioDubbing(request, reply, deps),
     );
   }
 }
@@ -1664,6 +1737,927 @@ function buildResponse(input: {
     },
   };
 }
+
+// ---------------------------------------------------------------------------
+// Timed dubbing (Chinese -> Khmer and any other pair)
+// ---------------------------------------------------------------------------
+
+const DUBBING_DEFAULT_PROMPT = `You are a professional Chinese-to-Khmer audiovisual translator and dubbing director.
+Listen to the supplied audio, transcribe every spoken line in the original language, and write a timed Khmer dubbing script that a TTS engine can perform.
+
+Translation rules:
+- Translate into natural, colloquial spoken Khmer for dubbing, not literary word-for-word Khmer.
+- Keep every Khmer line short enough to fit its time window.
+- Match the speaker's gender particle: male speakers use បាទ where appropriate; female speakers use ចាស.
+- Follow the real relationship in kinship terms: 小梨 is the younger sister (ប្អូនស្រី), never អ៊ុំស្រី.
+- Render 抢钱 as កាប់ថ្លៃ or ប្លន់លុយ according to context.
+- Render 桃子 as ផ្លែប៉េស.
+- Render 块/元 (money) as យ័ន or រៀល as appropriate, never បាត.
+- Keep personal and place names consistent across the whole recording.
+- Do not add, omit, summarize or censor content.
+
+Voice rules:
+- speaker_gender must be male or female.
+- pitch is low for deep, older or authoritative voices and high for young or light voices.
+- character_role must stay the same for the same character across lines (for example "younger sister", "boss", "mother").
+- Mention whispering, shouting or crying in vocal_timbre when audible.`;
+
+const DUBBING_OUTPUT_CONTRACT = `OUTPUT CONTRACT
+Return ONLY a JSON array. Do not wrap it in Markdown fences and do not add comments or prose.
+Every element must be an object with exactly these fields:
+{
+  "start": "MM:SS.S",
+  "end": "MM:SS.S",
+  "speaker_gender": "male" or "female",
+  "pitch": "low" or "high",
+  "vocal_timbre": "short voice description",
+  "character_role": "stable speaker role",
+  "original_transcript": "verbatim original-language line",
+  "khmer_dubbing": "natural spoken Khmer dub line"
+}
+Timing rules:
+- Timestamps are relative to the start of the supplied audio and begin at 00:00.0.
+- One element per utterance. Split on pauses and speaker changes; do not merge them.
+- "end" must be greater than "start" and must not exceed the audio duration.
+- Omit music, noise and stage directions.
+If there is no audible speech, return [].`;
+
+const DUBBING_SEGMENT_PROPERTIES = {
+  start: { type: 'STRING', description: 'Utterance start as MM:SS.S from the start of this audio part.' },
+  end: { type: 'STRING', description: 'Utterance end as MM:SS.S from the start of this audio part.' },
+  speaker_gender: { type: 'STRING', enum: ['male', 'female'] },
+  pitch: { type: 'STRING', enum: ['low', 'high'] },
+  vocal_timbre: { type: 'STRING', description: 'Short description of the voice quality.' },
+  character_role: { type: 'STRING', description: 'Stable role of the speaker in the scene.' },
+  original_transcript: { type: 'STRING', description: 'Verbatim original-language line.' },
+  khmer_dubbing: { type: 'STRING', description: 'Natural spoken Khmer dubbing line.' },
+};
+
+export const DUBBING_RESPONSE_SCHEMA = {
+  type: 'ARRAY',
+  items: {
+    type: 'OBJECT',
+    properties: DUBBING_SEGMENT_PROPERTIES,
+    required: Object.keys(DUBBING_SEGMENT_PROPERTIES),
+    propertyOrdering: Object.keys(DUBBING_SEGMENT_PROPERTIES),
+  },
+};
+
+/**
+ * Output-token budget for one dubbing chunk, from the caller's duration table.
+ * A chunk is capped by the first threshold that it fits into.
+ */
+export function dubbingMaxOutputTokens(durationSeconds: number): number {
+  const safe = Number.isFinite(durationSeconds) ? Math.max(0, durationSeconds) : 0;
+  if (safe <= 55) return 8192;
+  if (safe <= 120) return 8192;
+  if (safe <= 240) return 16384;
+  if (safe <= 300) return 24576;
+  if (safe <= 600) return 40960;
+  return 65535;
+}
+
+/** Parse "MM:SS.S", "HH:MM:SS.S", or a plain number of seconds. */
+export function parseDubbingTimestamp(value: unknown): number | undefined {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? Math.max(0, value) : undefined;
+  }
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+
+  const numeric = Number(trimmed);
+  if (Number.isFinite(numeric)) return Math.max(0, numeric);
+
+  const parts = trimmed.split(':').map((part) => part.trim());
+  if (parts.length < 2 || parts.length > 3 || parts.some((part) => part === '')) return undefined;
+  const seconds = Number(parts[parts.length - 1]);
+  const minutes = Number(parts[parts.length - 2]);
+  if (!Number.isFinite(seconds) || seconds < 0 || !Number.isFinite(minutes) || minutes < 0) {
+    return undefined;
+  }
+  if (parts.length === 2) return minutes * 60 + seconds;
+
+  const hours = Number(parts[0]);
+  if (!Number.isFinite(hours) || hours < 0) return undefined;
+  return hours * 3600 + minutes * 60 + seconds;
+}
+
+/** Format absolute seconds as the contract's MM:SS.S (minutes may exceed 59). */
+export function formatDubbingTimestamp(seconds: number): string {
+  const safe = Number.isFinite(seconds) ? Math.max(0, seconds) : 0;
+  const totalTenths = Math.round(safe * 10);
+  const minutes = Math.floor(totalTenths / 600);
+  const secs = (totalTenths % 600) / 10;
+  return `${String(minutes).padStart(2, '0')}:${secs.toFixed(1).padStart(4, '0')}`;
+}
+
+function extractBalancedJson(text: string, open: string, close: string): string | undefined {
+  const start = text.indexOf(open);
+  if (start === -1) return undefined;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < text.length; index++) {
+    const char = text[index];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === '\\') escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+    if (char === open) depth++;
+    else if (char === close) {
+      depth--;
+      if (depth === 0) return text.slice(start, index + 1);
+    }
+  }
+  return undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function coerceDubbingArray(parsed: unknown): Record<string, unknown>[] | null {
+  if (Array.isArray(parsed)) return parsed.filter(isRecord);
+  if (isRecord(parsed)) {
+    // A model may return a single segment object when the clip has one line.
+    if ('khmer_dubbing' in parsed || 'original_transcript' in parsed) return [parsed];
+    for (const key of ['segments', 'dubbing', 'lines', 'items', 'data', 'result']) {
+      const value = parsed[key];
+      if (Array.isArray(value)) return value.filter(isRecord);
+    }
+  }
+  return null;
+}
+
+/**
+ * Extract the segment array from a model answer that may contain Markdown
+ * fences, a short preamble, or a wrapper object. Returns null when no JSON
+ * array can be recovered.
+ */
+export function parseDubbingPayload(text: string): Record<string, unknown>[] | null {
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+  const withoutFence = trimmed
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/i, '')
+    .trim();
+
+  const candidates = [withoutFence, trimmed];
+  for (const candidate of candidates) {
+    try {
+      const coerced = coerceDubbingArray(JSON.parse(candidate));
+      if (coerced) return coerced;
+    } catch {
+      /* try a balanced slice below */
+    }
+    for (const [open, close] of [
+      ['[', ']'],
+      ['{', '}'],
+    ] as const) {
+      const slice = extractBalancedJson(candidate, open, close);
+      if (!slice) continue;
+      try {
+        const coerced = coerceDubbingArray(JSON.parse(slice));
+        if (coerced) return coerced;
+      } catch {
+        /* keep trying */
+      }
+    }
+  }
+  return null;
+}
+
+function firstString(record: Record<string, unknown>, keys: string[]): string {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return '';
+}
+
+function normalizeSpeakerGender(value: string, khmer: string): DubbingSpeakerGender {
+  const normalized = value.trim().toLowerCase();
+  if (['female', 'f', 'woman', 'girl', 'lady', '女', '女性', '女声'].includes(normalized)) {
+    return 'female';
+  }
+  if (['male', 'm', 'man', 'boy', 'guy', '男', '男性', '男声'].includes(normalized)) {
+    return 'male';
+  }
+  if (normalized.includes('female') || normalized.includes('woman') || normalized.includes('girl')) {
+    return 'female';
+  }
+  if (normalized.includes('male') || normalized.includes('man') || normalized.includes('boy')) {
+    return 'male';
+  }
+  if (khmer.includes('ចាស')) return 'female';
+  if (khmer.includes('បាទ')) return 'male';
+  return 'male';
+}
+
+function normalizePitch(value: string, gender: DubbingSpeakerGender): DubbingPitch {
+  const normalized = value.trim().toLowerCase();
+  if (['low', 'deep', 'lower', '低', '低沉', '低音'].includes(normalized)) return 'low';
+  if (['high', 'higher', '高', '高音', '尖'].includes(normalized)) return 'high';
+  if (normalized.includes('deep') || normalized.includes('low')) return 'low';
+  if (normalized.includes('high')) return 'high';
+  return gender === 'female' ? 'high' : 'low';
+}
+
+/**
+ * Validate one model segment, clamp its timing to the chunk, and shift it onto
+ * the absolute recording timeline. Segments without a Khmer line are dropped.
+ */
+export function normalizeDubbingSegment(
+  raw: Record<string, unknown>,
+  chunk: { startSeconds: number; endSeconds: number },
+  fallbackStartSeconds = 0,
+): DubbingSegmentInternal | undefined {
+  const original = firstString(raw, [
+    'original_transcript',
+    'originalTranscript',
+    'original',
+    'transcript',
+    'source_text',
+    'source',
+  ]);
+  const khmer = firstString(raw, [
+    'khmer_dubbing',
+    'khmerDubbing',
+    'khmer',
+    'dubbing',
+    'translation',
+    'translated_text',
+  ]);
+  if (!khmer) return undefined;
+
+  const chunkDuration = Math.max(0.1, chunk.endSeconds - chunk.startSeconds);
+  const parsedStart = parseDubbingTimestamp(
+    raw.start ?? raw.start_time ?? raw.startTime ?? raw.begin,
+  );
+  const parsedEnd = parseDubbingTimestamp(raw.end ?? raw.end_time ?? raw.endTime ?? raw.finish);
+
+  let localStart = parsedStart !== undefined ? parsedStart : fallbackStartSeconds;
+  localStart = Math.min(Math.max(0, localStart), Math.max(0, chunkDuration - 0.1));
+
+  let localEnd = parsedEnd !== undefined ? parsedEnd : localStart + 1;
+  if (localEnd <= localStart) localEnd = localStart + 0.5;
+  localEnd = Math.min(localEnd, chunkDuration);
+  if (localEnd <= localStart) return undefined;
+
+  const gender = normalizeSpeakerGender(
+    firstString(raw, ['speaker_gender', 'speakerGender', 'gender', 'sex']),
+    khmer,
+  );
+  const pitch = normalizePitch(firstString(raw, ['pitch', 'voice_pitch', 'voicePitch']), gender);
+  const timbre = firstString(raw, ['vocal_timbre', 'vocalTimbre', 'timbre', 'voice', 'voice_type', 'voiceType']);
+  const role = firstString(raw, ['character_role', 'characterRole', 'role', 'speaker', 'character']);
+
+  const startSeconds = chunk.startSeconds + localStart;
+  const endSeconds = chunk.startSeconds + localEnd;
+  return {
+    start: formatDubbingTimestamp(startSeconds),
+    end: formatDubbingTimestamp(endSeconds),
+    speaker_gender: gender,
+    pitch,
+    vocal_timbre: timbre || (gender === 'female' ? 'female voice' : 'male voice'),
+    character_role: role,
+    original_transcript: original,
+    khmer_dubbing: khmer,
+    startSeconds,
+    endSeconds,
+  };
+}
+
+/** `prompt` overrides the built-in instructions; the output contract is always appended. */
+export function buildDubbingPrompt(options: {
+  prompt?: string;
+  index: number;
+  count: number;
+  previousSegments?: Array<{
+    original_transcript: string;
+    khmer_dubbing: string;
+    character_role: string;
+  }>;
+}): string {
+  const parts: string[] = [options.prompt?.trim() || DUBBING_DEFAULT_PROMPT, DUBBING_OUTPUT_CONTRACT];
+
+  if (options.count > 1) {
+    parts.push(
+      `This audio is part ${options.index + 1} of ${options.count} of one continuous recording. ` +
+        'Transcribe only the speech in this part. Start timestamps at 00:00.0 for this part.',
+    );
+  }
+
+  const previous =
+    options.previousSegments?.filter(
+      (segment) => segment.original_transcript.trim() || segment.khmer_dubbing.trim(),
+    ) ?? [];
+  if (options.count > 1 && options.index > 0 && previous.length > 0) {
+    const tail = previous
+      .slice(-3)
+      .map(
+        (segment) =>
+          `- ${segment.character_role || 'speaker'} | ${segment.original_transcript} => ${segment.khmer_dubbing}`,
+      )
+      .join('\n');
+    parts.push(
+      `For continuity only, the previous part ended with:\n${tail}\n` +
+        'Match their names, roles and terminology, but do not repeat these lines.',
+    );
+  }
+
+  return parts.join('\n\n');
+}
+
+function parseDubbingOptions(fields: Record<string, string>, config: MediaConfig): DubbingOptions {
+  const model = (fields.model || process.env.MEDIA_DEFAULT_MODEL || 'gemini-3.5-flash-lite').trim();
+  if (!model) throw new MediaError(400, 'model_required', 'A non-empty "model" is required.');
+
+  const prompt = (fields.prompt || fields.instructions || '').trim();
+  if (prompt.length > 50_000) {
+    throw new MediaError(400, 'prompt_too_long', 'The prompt must be 50,000 characters or fewer.');
+  }
+
+  const sourceLanguage =
+    (fields.source_language || fields.sourceLanguage || fields.language || 'zh').trim() || 'zh';
+  const targetLanguage =
+    (fields.target_language || fields.targetLanguage || fields.dub_to || 'km').trim() || 'km';
+
+  const requestedChunkSeconds = Number.parseInt(fields.chunk_seconds || fields.chunkSeconds || '', 10);
+  const chunkSeconds = Number.isFinite(requestedChunkSeconds)
+    ? Math.min(DUBBING_MAX_CHUNK_SECONDS, Math.max(60, requestedChunkSeconds))
+    : Math.min(DUBBING_DEFAULT_CHUNK_SECONDS, DUBBING_MAX_CHUNK_SECONDS);
+
+  const requestedMaxTokens = Number.parseInt(fields.max_tokens || fields.maxTokens || '', 10);
+  const maxTokens = Number.isFinite(requestedMaxTokens)
+    ? Math.min(65535, Math.max(256, requestedMaxTokens))
+    : undefined;
+
+  const requestedTemperature = Number.parseFloat(fields.temperature || '');
+  const temperature = Number.isFinite(requestedTemperature)
+    ? Math.min(2, Math.max(0, requestedTemperature))
+    : 0;
+
+  const requestedConcurrency = Number.parseInt(fields.concurrency || '', 10);
+  const concurrency = Number.isFinite(requestedConcurrency)
+    ? Math.min(4, Math.max(1, requestedConcurrency))
+    : 1;
+
+  const requestedFormat = (fields.response_format || fields.responseFormat || 'json')
+    .trim()
+    .toLowerCase();
+  if (!['json', 'array', 'segments', 'raw'].includes(requestedFormat)) {
+    throw new MediaError(
+      400,
+      'invalid_response_format',
+      'response_format must be "json" (metadata + segments) or "array" (segments only).',
+    );
+  }
+  const responseFormat: 'json' | 'array' =
+    requestedFormat === 'json' ? 'json' : 'array';
+
+  return {
+    model,
+    prompt: prompt || undefined,
+    sourceLanguage,
+    targetLanguage,
+    chunkSeconds,
+    maxTokens,
+    temperature,
+    concurrency,
+    responseFormat,
+  };
+}
+
+async function handleAudioDubbing(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  deps: MediaRouteDeps,
+): Promise<void> {
+  const config = deps.config ?? readMediaConfig();
+  const upload = uploads.get(request);
+  uploads.delete(request);
+  let tempDir = upload?.tempDir;
+  let clientAborted = false;
+  let totalTimedOut = false;
+  const startedAt = Date.now();
+
+  const controller = new AbortController();
+  const totalTimer =
+    config.totalTimeoutMs > 0
+      ? setTimeout(() => {
+          totalTimedOut = true;
+          controller.abort();
+        }, config.totalTimeoutMs)
+      : null;
+
+  const onClose = () => {
+    if (!reply.raw.writableFinished) {
+      clientAborted = true;
+      controller.abort();
+    }
+  };
+  reply.raw.on('close', onClose);
+
+  try {
+    if (upload?.error) {
+      throw new MediaError(upload.error.statusCode, upload.error.code, upload.error.message);
+    }
+
+    const resolved = await resolveMediaInput(request, upload, config);
+    tempDir = resolved.tempDir;
+
+    const options = parseDubbingOptions(resolved.fields, config);
+    const maxSecondsBySize = Math.max(
+      60,
+      Math.floor((14 * 1024 * 1024 * 8) / (config.audioBitrateKbps * 1000)),
+    );
+    const effectiveChunkSeconds = Math.min(options.chunkSeconds, maxSecondsBySize);
+
+    if (deps.ensureAccounts) {
+      try {
+        await deps.ensureAccounts();
+      } catch (error) {
+        request.log.warn({ err: error }, 'media: could not refresh accounts before dubbing');
+      }
+    }
+
+    const probe = await probeAudio(resolved.filePath, config, controller.signal);
+    if (probe.durationSeconds > config.maxDurationSeconds) {
+      throw new MediaError(
+        422,
+        'duration_too_long',
+        `Audio is ${formatDuration(probe.durationSeconds)}; the configured maximum is ${formatDuration(
+          config.maxDurationSeconds,
+        )}. Split the recording into 10-20 minute parts and send each part as a separate request.`,
+      );
+    }
+
+    const transcodeStarted = Date.now();
+    const chunks = await splitAudio(
+      resolved.filePath,
+      resolved.tempDir,
+      probe.durationSeconds,
+      effectiveChunkSeconds,
+      config,
+      controller.signal,
+    );
+    const transcodeMs = Date.now() - transcodeStarted;
+
+    const modelStarted = Date.now();
+    const results = await dubChunks(chunks, options, config, deps, controller.signal, request.log);
+    const modelMs = Date.now() - modelStarted;
+
+    const response = buildDubbingResponse({
+      options: { ...options, chunkSeconds: effectiveChunkSeconds },
+      chunks,
+      results,
+      durationSeconds: probe.durationSeconds,
+      timings: { transcodeMs, modelMs, totalMs: Date.now() - startedAt },
+    });
+
+    request.log.info(
+      {
+        media: {
+          durationSeconds: Number(probe.durationSeconds.toFixed(2)),
+          chunkCount: chunks.length,
+          segmentCount: response.segment_count,
+          uploadBytes: resolved.sizeBytes,
+          model: options.model,
+          sourceLanguage: options.sourceLanguage,
+          targetLanguage: options.targetLanguage,
+          transcodeMs,
+          modelMs,
+        },
+      },
+      'media: dubbing completed',
+    );
+
+    reply.header('Cache-Control', 'no-store');
+    reply.header('X-Geminirouter-Model', options.model);
+    reply.header('X-Geminirouter-Chunks', String(chunks.length));
+    reply.header('X-Geminirouter-Segments', String(response.segment_count));
+    reply.header('X-Geminirouter-Duration-Seconds', probe.durationSeconds.toFixed(2));
+
+    if (options.responseFormat === 'array') {
+      return reply.send(response.segments);
+    }
+    return reply.send(response);
+  } catch (error) {
+    if (clientAborted) return;
+    const mediaError = toMediaError(error, totalTimedOut);
+    request.log.warn(
+      { media: { code: mediaError.code, statusCode: mediaError.statusCode }, err: mediaError.message },
+      'media: dubbing failed',
+    );
+    if (!reply.raw.headersSent) {
+      return reply.code(mediaError.statusCode).send({
+        error: {
+          message: mediaError.message,
+          type: mediaError.statusCode === 401 ? 'authentication_error' : 'media_error',
+          code: mediaError.code,
+          ...(mediaError.details ? { details: mediaError.details } : {}),
+        },
+      });
+    }
+  } finally {
+    if (totalTimer) clearTimeout(totalTimer);
+    reply.raw.off('close', onClose);
+    if (tempDir && !config.keepArtifacts) cleanupDir(tempDir);
+  }
+}
+
+async function dubChunks(
+  chunks: AudioChunk[],
+  options: DubbingOptions,
+  config: MediaConfig,
+  deps: MediaRouteDeps,
+  signal: AbortSignal,
+  log: FastifyRequest['log'],
+): Promise<DubbingChunkResult[]> {
+  const results: DubbingChunkResult[] = new Array(chunks.length);
+  const workerCount = Math.min(options.concurrency, chunks.length);
+  let nextIndex = 0;
+
+  const worker = async () => {
+    while (true) {
+      const index = nextIndex++;
+      if (index >= chunks.length) return;
+      const chunk = chunks[index];
+      const previousSegments =
+        options.concurrency === 1 && index > 0 ? results[index - 1]?.segments ?? [] : [];
+      const prompt = buildDubbingPrompt({
+        prompt: options.prompt,
+        index,
+        count: chunks.length,
+        previousSegments,
+      });
+      const maxOutputTokens =
+        options.maxTokens ?? dubbingMaxOutputTokens(chunk.durationSeconds);
+
+      log.info(
+        {
+          media: {
+            chunk: index + 1,
+            chunkCount: chunks.length,
+            startSeconds: Number(chunk.startSeconds.toFixed(2)),
+            endSeconds: Number(chunk.endSeconds.toFixed(2)),
+            durationSeconds: Number(chunk.durationSeconds.toFixed(2)),
+            sizeBytes: chunk.sizeBytes,
+            maxOutputTokens,
+          },
+        },
+        'media: dubbing chunk',
+      );
+
+      results[index] = await dubChunkWithRetry(
+        chunk,
+        prompt,
+        maxOutputTokens,
+        options,
+        config,
+        deps,
+        signal,
+      );
+    }
+  };
+
+  try {
+    await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  } catch (error) {
+    if (error instanceof MediaError) {
+      const completed = results
+        .filter((result): result is DubbingChunkResult => Boolean(result))
+        .sort((a, b) => a.index - b.index);
+      if (completed.length > 0) {
+        error.details = {
+          ...(error.details && typeof error.details === 'object' ? error.details : {}),
+          completed_chunks: completed.length,
+          partial_segments: completed
+            .flatMap((result) => result.segments)
+            .sort((a, b) => a.startSeconds - b.startSeconds)
+            .map(({ startSeconds, endSeconds, ...segment }) => segment),
+        };
+      }
+    }
+    throw error;
+  }
+
+  return results;
+}
+
+function geminiResponseText(data: any): string {
+  const parts = data?.candidates?.[0]?.content?.parts;
+  if (Array.isArray(parts)) {
+    const text = parts
+      .map((part: any) => (typeof part === 'string' ? part : part?.text || ''))
+      .join('')
+      .trim();
+    if (text) return text;
+  }
+  return completionText(data);
+}
+
+function usageFromResponse(data: any): UsageTotals {
+  const meta = data?.usageMetadata;
+  if (meta && typeof meta === 'object') {
+    const promptTokens = Number(meta.promptTokenCount) || 0;
+    const completionTokens =
+      (Number(meta.candidatesTokenCount) || 0) + (Number(meta.thoughtsTokenCount) || 0);
+    return {
+      promptTokens,
+      completionTokens,
+      totalTokens: Number(meta.totalTokenCount) || promptTokens + completionTokens,
+    };
+  }
+  const promptTokens = Number(data?.usage?.prompt_tokens) || 0;
+  const completionTokens = Number(data?.usage?.completion_tokens) || 0;
+  return {
+    promptTokens,
+    completionTokens,
+    totalTokens: Number(data?.usage?.total_tokens) || promptTokens + completionTokens,
+  };
+}
+
+function isSchemaRejection(status: number, message: string): boolean {
+  if (status !== 400) return false;
+  return /schema|response_?mime|response_?format|generation_?config/i.test(message);
+}
+
+async function dubChunkWithRetry(
+  chunk: AudioChunk,
+  prompt: string,
+  maxOutputTokens: number,
+  options: DubbingOptions,
+  config: MediaConfig,
+  deps: MediaRouteDeps,
+  signal: AbortSignal,
+): Promise<DubbingChunkResult> {
+  const audioBase64 = fs.readFileSync(chunk.filePath).toString('base64');
+  const url = `${deps.getInternalBaseUrl()}/v1beta/models/${encodeURIComponent(
+    options.model,
+  )}:generateContent`;
+
+  let schemaEnabled = true;
+  let lastError: MediaError | null = null;
+  const attempts = config.maxRetries + 1;
+
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    if (signal.aborted) throw abortError(signal);
+
+    const payload = {
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            { text: prompt },
+            { inline_data: { mime_type: 'audio/mp3', data: audioBase64 } },
+          ],
+        },
+      ],
+      generationConfig: {
+        temperature: options.temperature,
+        maxOutputTokens,
+        responseMimeType: 'application/json',
+        ...(schemaEnabled ? { responseSchema: DUBBING_RESPONSE_SCHEMA } : {}),
+      },
+    };
+
+    try {
+      const response = await fetchUpstreamWithKeys(
+        url,
+        payload,
+        deps.getGatewayApiKeys(),
+        signal,
+        config.chunkTimeoutMs,
+      );
+
+      if (!response.ok) {
+        const errorText = await response.text().catch(() => '');
+        const message = extractUpstreamError(errorText, response.status);
+
+        if (response.status === 401) {
+          throw new MediaError(
+            401,
+            'upstream_auth_failed',
+            `The core rejected all configured gateway API keys: ${message}`,
+          );
+        }
+        if (schemaEnabled && isSchemaRejection(response.status, message) && attempt < attempts - 1) {
+          schemaEnabled = false;
+          lastError = new MediaError(
+            422,
+            'schema_rejected',
+            `Chunk ${chunk.index + 1} was rejected with a response schema (HTTP ${
+              response.status
+            }): ${message}`,
+            { chunkIndex: chunk.index, upstreamStatus: response.status },
+          );
+          await sleepWithSignal(250, signal);
+          continue;
+        }
+        if ([400, 404, 413, 415, 422].includes(response.status)) {
+          throw new MediaError(
+            422,
+            'model_rejected_media',
+            `Chunk ${chunk.index + 1} was rejected by the model (HTTP ${response.status}): ${message}`,
+            { chunkIndex: chunk.index, upstreamStatus: response.status },
+          );
+        }
+        if ([403, 408, 429, 500, 502, 503, 504].includes(response.status)) {
+          lastError = new MediaError(
+            502,
+            'upstream_unavailable',
+            `Chunk ${chunk.index + 1} failed (HTTP ${response.status}): ${message}`,
+            { chunkIndex: chunk.index, upstreamStatus: response.status },
+          );
+          if (attempt < attempts - 1) {
+            await sleepWithSignal(backoffMs(attempt), signal);
+            continue;
+          }
+          throw lastError;
+        }
+        throw new MediaError(
+          502,
+          'upstream_error',
+          `Chunk ${chunk.index + 1} failed (HTTP ${response.status}): ${message}`,
+          { chunkIndex: chunk.index, upstreamStatus: response.status },
+        );
+      }
+
+      const data: any = await response.json().catch(() => null);
+      const finishReason = completionFinishReason(data);
+      if (finishReason === 'length' || finishReason === 'max_tokens') {
+        throw new MediaError(
+          502,
+          'model_output_truncated',
+          `Chunk ${chunk.index + 1} hit the ${maxOutputTokens}-token output cap before finishing, so its dubbing script would be incomplete. Lower chunk_seconds or raise max_tokens.`,
+          { chunkIndex: chunk.index, finishReason, maxTokens: maxOutputTokens },
+        );
+      }
+
+      const content = geminiResponseText(data);
+      if (!content || isModelFailureText(content)) {
+        const failed = Boolean(content);
+        lastError = new MediaError(
+          502,
+          failed ? 'model_failure_text' : 'empty_model_response',
+          failed
+            ? `Chunk ${chunk.index + 1} returned a model failure message instead of a dubbing script. Try a simpler prompt or a different model.`
+            : `Chunk ${chunk.index + 1} returned an empty model response.`,
+          { chunkIndex: chunk.index, ...(failed ? { model_text: content.slice(0, 1000) } : {}) },
+        );
+        const retryBudget = failed ? 2 : attempts;
+        if (attempt + 1 < retryBudget) {
+          await sleepWithSignal(backoffMs(attempt), signal);
+          continue;
+        }
+        throw lastError;
+      }
+
+      const rawSegments = parseDubbingPayload(content);
+      if (!rawSegments) {
+        lastError = new MediaError(
+          502,
+          'invalid_model_json',
+          `Chunk ${chunk.index + 1} did not return a JSON array of dubbing segments. Retrying with a shorter prompt may help, or choose a model with reliable JSON output.`,
+          { chunkIndex: chunk.index, model_text: content.slice(0, 2000) },
+        );
+        if (attempt < attempts - 1) {
+          await sleepWithSignal(backoffMs(attempt), signal);
+          continue;
+        }
+        throw lastError;
+      }
+
+      const segments: DubbingSegmentInternal[] = [];
+      let droppedSegments = 0;
+      let cursor = 0;
+      for (const raw of rawSegments) {
+        const segment = normalizeDubbingSegment(raw, chunk, cursor);
+        if (!segment) {
+          droppedSegments++;
+          continue;
+        }
+        segments.push(segment);
+        cursor = Math.max(cursor, segment.endSeconds - chunk.startSeconds);
+      }
+      segments.sort((a, b) => a.startSeconds - b.startSeconds || a.endSeconds - b.endSeconds);
+
+      return {
+        index: chunk.index,
+        startSeconds: chunk.startSeconds,
+        endSeconds: chunk.endSeconds,
+        segments,
+        droppedSegments,
+        content,
+        model: typeof data?.model === 'string' ? data.model : options.model,
+        maxOutputTokens,
+        usage: usageFromResponse(data),
+      };
+    } catch (error) {
+      if (error instanceof MediaError) {
+        if (
+          error.code === 'upstream_auth_failed' ||
+          error.code === 'model_rejected_media' ||
+          error.code === 'model_output_truncated' ||
+          error.code === 'schema_rejected'
+        ) {
+          throw error;
+        }
+        lastError = error;
+      } else if (isAbortError(error)) {
+        throw abortError(signal);
+      } else {
+        lastError = new MediaError(
+          502,
+          'chunk_request_failed',
+          `Chunk ${chunk.index + 1} request failed: ${(error as Error)?.message || String(error)}`,
+          { chunkIndex: chunk.index },
+        );
+      }
+
+      if (attempt < attempts - 1) {
+        await sleepWithSignal(backoffMs(attempt), signal);
+        continue;
+      }
+      throw lastError;
+    }
+  }
+
+  throw lastError ?? new MediaError(502, 'chunk_failed', 'The model request failed.');
+}
+
+function buildDubbingResponse(input: {
+  options: DubbingOptions;
+  chunks: AudioChunk[];
+  results: DubbingChunkResult[];
+  durationSeconds: number;
+  timings: { transcodeMs: number; modelMs: number; totalMs: number };
+}): Record<string, any> {
+  const { options, chunks, results, durationSeconds, timings } = input;
+  const ordered = [...results].sort((a, b) => a.index - b.index);
+  const merged = ordered
+    .flatMap((result) => result.segments)
+    .sort((a, b) => a.startSeconds - b.startSeconds || a.endSeconds - b.endSeconds);
+  const segments: DubbingSegment[] = merged.map(
+    ({ startSeconds, endSeconds, ...segment }) => segment,
+  );
+
+  const usage = ordered.reduce<UsageTotals>(
+    (sum, result) => ({
+      promptTokens: sum.promptTokens + result.usage.promptTokens,
+      completionTokens: sum.completionTokens + result.usage.completionTokens,
+      totalTokens: sum.totalTokens + result.usage.totalTokens,
+    }),
+    { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+  );
+  const droppedSegments = ordered.reduce((sum, result) => sum + result.droppedSegments, 0);
+
+  return {
+    id: `dub_${crypto.randomUUID()}`,
+    object: 'audio.dubbing',
+    created: Math.floor(Date.now() / 1000),
+    model: options.model,
+    source_language: languageLabel(options.sourceLanguage) || options.sourceLanguage,
+    target_language: languageLabel(options.targetLanguage) || options.targetLanguage,
+    duration_seconds: Number(durationSeconds.toFixed(3)),
+    chunk_count: chunks.length,
+    chunk_seconds: options.chunkSeconds,
+    segment_count: segments.length,
+    segments,
+    chunks: ordered.map((result) => ({
+      index: result.index,
+      start_seconds: Number(result.startSeconds.toFixed(3)),
+      end_seconds: Number(result.endSeconds.toFixed(3)),
+      segment_count: result.segments.length,
+      max_output_tokens: result.maxOutputTokens,
+      model: result.model,
+      usage: result.usage,
+    })),
+    usage,
+    timings: {
+      transcode_ms: timings.transcodeMs,
+      model_ms: timings.modelMs,
+      total_ms: timings.totalMs,
+    },
+    ...(droppedSegments > 0
+      ? {
+          warnings: [
+            `${droppedSegments} segment(s) were removed because they had no Khmer dub line or no valid timing.`,
+          ],
+        }
+      : {}),
+  };
+}
+
 
 /**
  * The core occasionally converts an upstream/tool failure into a normal 200

@@ -264,6 +264,132 @@ configs route `/v1/audio/*` to `127.0.0.1:3000` (bridge) and everything else
 under `/v1` to the core. If you use a custom reverse proxy, add the same rule and
 raise the request-body and response timeouts for this path.
 
+## Timed dubbing endpoint (Chinese → Khmer by default)
+
+`POST /v1/audio/dubbing` is the server-side dubbing pipeline. It accepts the
+same multipart, raw-binary, and JSON/base64 uploads as the transcription route,
+splits the recording into safe chunks, and sends each chunk to the
+Gemini-native `:generateContent` endpoint with `inline_data`, a JSON response
+schema, and a duration-based `maxOutputTokens` cap. The returned timed segments
+are shifted from chunk-local time onto the absolute recording timeline.
+
+| Route | Purpose |
+|---|---|
+| `POST /v1/audio/dubbing` | Timed, speaker-aware dubbing segments. |
+| `POST /v1/media/dubbing` | Alias of `/v1/audio/dubbing`. |
+
+### Request fields
+
+The route reuses the transcription upload parsers: multipart `file`,
+`Content-Type: audio/*` raw body with query metadata, or JSON with
+`audio_base64`. Options:
+
+- `prompt` — optional full dubbing instruction. When omitted, the server sends
+  a built-in Chinese→Khmer prompt covering gender particles (male `បាទ`, female
+  `ចាស`), kinship terms, and the money/fruit terminology rules. When supplied,
+  the caller's prompt is used and the JSON/timing output contract is appended.
+- `source_language` — default `zh`.
+- `target_language` — default `km`.
+- `model` — defaults to `MEDIA_DEFAULT_MODEL` or `gemini-3.5-flash-lite`.
+- `chunk_seconds` — 60–1800 seconds; default `300` (five minutes). The server
+  also shrinks it automatically if a chunk would exceed the core's audio limit.
+- `max_tokens` — optional override, 256–65,535. When omitted, each chunk uses
+  the duration table below.
+- `temperature` — default `0`; `concurrency` — 1–4 chunks in parallel;
+  `response_format` — `json` (default) or `array`.
+
+### Output contract
+
+Each segment has exactly these fields:
+
+```json
+{
+  "start": "00:12.4",
+  "end": "00:16.8",
+  "speaker_gender": "female",
+  "pitch": "high",
+  "vocal_timbre": "young and bright",
+  "character_role": "younger sister",
+  "original_transcript": "你来了",
+  "khmer_dubbing": "អ្នកមកហើយ ចាស"
+}
+```
+
+The default `json` response wraps the merged segments with metadata:
+
+```json
+{
+  "id": "dub_...",
+  "object": "audio.dubbing",
+  "model": "gemini-3.5-flash-lite",
+  "source_language": "Chinese",
+  "target_language": "Khmer",
+  "duration_seconds": 3720.4,
+  "chunk_count": 13,
+  "chunk_seconds": 300,
+  "segment_count": 284,
+  "segments": [
+    { "start": "00:12.4", "end": "00:16.8", "speaker_gender": "female", "pitch": "high",
+      "vocal_timbre": "young and bright", "character_role": "younger sister",
+      "original_transcript": "你来了", "khmer_dubbing": "អ្នកមកហើយ ចាស" }
+  ],
+  "chunks": [
+    { "index": 0, "start_seconds": 0, "end_seconds": 300, "segment_count": 24,
+      "max_output_tokens": 24576, "model": "gemini-3.5-flash-lite",
+      "usage": { "promptTokens": 0, "completionTokens": 0, "totalTokens": 0 } }
+  ],
+  "usage": { "promptTokens": 0, "completionTokens": 0, "totalTokens": 0 },
+  "timings": { "transcode_ms": 0, "model_ms": 0, "total_ms": 0 }
+}
+```
+
+With `response_format=array`, the body is only the segment array.
+
+### Duration-based output caps
+
+| Chunk duration | `maxOutputTokens` |
+|---|---|
+| ≤ 55 s | 8,192 |
+| ≤ 120 s | 8,192 |
+| ≤ 240 s | 16,384 |
+| ≤ 300 s | 24,576 |
+| ≤ 600 s | 40,960 |
+| ≤ 900 s | 65,535 |
+| ≤ 1800 s | 65,535 |
+
+A response that stops at the cap (`finishReason: "MAX_TOKENS"`) fails the whole
+request with `model_output_truncated`; the server never returns a silently
+shortened script. Use a shorter `chunk_seconds` or a larger `max_tokens`.
+
+If the selected model or core rejects `responseSchema`, the chunk is retried
+once without the schema, keeping `responseMimeType: application/json` and the
+prompt contract. If a chunk still fails after retries, the error includes
+`details.completed_chunks` and `details.partial_segments` so successful work is
+not lost.
+
+### Examples
+
+```sh
+# Default Chinese → Khmer dubbing with the built-in prompt.
+curl -X POST "$GEMINIROUTER_URL/v1/audio/dubbing" \
+  -H "Authorization: Bearer $GEMINIROUTER_API_KEY" \
+  -F "file=@episode.mp3" \
+  -F "model=gemini-3.5-flash-lite" \
+  -F "chunk_seconds=300"
+
+# The website's own prompt; the server still appends the JSON/timing contract.
+curl -X POST "$GEMINIROUTER_URL/v1/audio/dubbing?response_format=array&prompt=Translate%20this%20short%20drama%20into%20spoken%20Khmer%20for%20TTS." \
+  -H "Authorization: Bearer $GEMINIROUTER_API_KEY" \
+  -H "Content-Type: audio/mpeg" \
+  --data-binary @episode.mp3
+
+# JSON/base64 upload for smaller clips.
+curl -X POST "$GEMINIROUTER_URL/v1/audio/dubbing" \
+  -H "Authorization: Bearer $GEMINIROUTER_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gemini-3.5-flash-lite","audio_base64":"...","filename":"clip.mp3"}'
+```
+
 ## Video input
 
 Send video as a `video_url` block. For an uploaded file, the dubbing website's

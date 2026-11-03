@@ -17,8 +17,14 @@ import { spawnSync } from 'node:child_process';
 import type { GoogleAccount, LocalStateStore } from '../src/store.js';
 import {
   buildChunkPrompt,
+  buildDubbingPrompt,
+  dubbingMaxOutputTokens,
+  formatDubbingTimestamp,
   isModelFailureText,
   languageLabel,
+  normalizeDubbingSegment,
+  parseDubbingPayload,
+  parseDubbingTimestamp,
   readMediaConfig,
   splitStructuredOutput,
 } from '../src/mediaTranscription.js';
@@ -50,27 +56,106 @@ interface ModelRequest {
   }>;
 }
 
+interface GeminiRequest {
+  contents: Array<{
+    role: string;
+    parts: Array<{ text?: string; inline_data?: { mime_type: string; data: string } }>;
+  }>;
+  generationConfig: {
+    temperature?: number;
+    maxOutputTokens?: number;
+    responseMimeType?: string;
+    responseSchema?: { type?: string; items?: { type?: string } };
+  };
+}
+
 let bridgePort = 0;
 let store: LocalStateStore;
 let appInstance: Awaited<ReturnType<typeof createServer>>['app'];
 const modelRequests: ModelRequest[] = [];
+const geminiRequests: GeminiRequest[] = [];
 const modelAuthHeaders: Array<string | undefined> = [];
 let failNextModelRequest = false;
+let failNextDubbingSchema = false;
 let nextCustomReply: string | null = null;
+let nextDubbingReply: string | null = null;
 let nextFinishReason: string | null = null;
+
+function defaultDubbingReply(index: number): string {
+  // Timestamps are intentionally chunk-local; the bridge must add the offset.
+  const start = index === 1 ? '00:01.0' : '00:00.5';
+  const end = index === 1 ? '00:04.5' : '00:03.0';
+  return JSON.stringify([
+    {
+      start,
+      end,
+      speaker_gender: 'female',
+      pitch: 'high',
+      vocal_timbre: 'young and bright',
+      character_role: 'younger sister',
+      original_transcript: `小梨说第 ${index} 段`,
+      khmer_dubbing: `ប្អូនស្រីនិយាយភាគទី ${index} ចាស`,
+    },
+  ]);
+}
 
 const upstream = http.createServer((request, response) => {
   modelAuthHeaders.push(typeof request.headers.authorization === 'string' ? request.headers.authorization : undefined);
   let body = '';
   request.on('data', (chunk) => (body += chunk));
   request.on('end', () => {
-    let parsed: ModelRequest | null = null;
+    const isGenerateContent = /:generateContent(?:\?|$)/.test(request.url || '');
+    let parsed: any = null;
     try {
-      parsed = JSON.parse(body) as ModelRequest;
+      parsed = JSON.parse(body);
     } catch {
       parsed = null;
     }
-    if (parsed) modelRequests.push(parsed);
+
+    if (isGenerateContent) {
+      geminiRequests.push(parsed as GeminiRequest);
+      const index = geminiRequests.length;
+
+      if (failNextDubbingSchema) {
+        failNextDubbingSchema = false;
+        response.writeHead(400, {
+          'Content-Type': 'application/json',
+          'x-antigravity-account-id': 'media-acc-1',
+        });
+        response.end(
+          JSON.stringify({
+            error: { message: 'responseSchema is not supported for this model' },
+          }),
+        );
+        return;
+      }
+
+      const content = nextDubbingReply ?? defaultDubbingReply(index);
+      nextDubbingReply = null;
+      response.writeHead(200, {
+        'Content-Type': 'application/json',
+        'x-antigravity-account-id': 'media-acc-1',
+      });
+      response.end(
+        JSON.stringify({
+          candidates: [
+            {
+              finishReason: 'STOP',
+              content: { role: 'model', parts: [{ text: content }] },
+            },
+          ],
+          usageMetadata: {
+            promptTokenCount: 120,
+            candidatesTokenCount: 80,
+            totalTokenCount: 200,
+          },
+        }),
+      );
+      return;
+    }
+
+    const parsedModel = parsed as ModelRequest | null;
+    if (parsedModel) modelRequests.push(parsedModel);
     const index = modelRequests.length;
 
     if (failNextModelRequest) {
@@ -82,7 +167,7 @@ const upstream = http.createServer((request, response) => {
       response.end(
         JSON.stringify({
           id: `cmpl-media-failure-${index}`,
-          model: parsed?.model || 'gemini-3.5-flash-lite',
+          model: parsedModel?.model || 'gemini-3.5-flash-lite',
           choices: [
             {
               message: {
@@ -110,7 +195,7 @@ const upstream = http.createServer((request, response) => {
     response.end(
       JSON.stringify({
         id: `cmpl-media-${index}`,
-        model: parsed?.model || 'gemini-3.5-flash-lite',
+        model: parsedModel?.model || 'gemini-3.5-flash-lite',
         choices: [
           {
             finish_reason: finishReason,
@@ -527,4 +612,232 @@ test('a multipart request without a file returns a clear 400', async () => {
   assert.equal(response.status, 400);
   const body: any = await response.json();
   assert.equal(body.error.code, 'file_required');
+});
+
+test('dubbing output caps follow the duration table', () => {
+  assert.equal(dubbingMaxOutputTokens(30), 8192);
+  assert.equal(dubbingMaxOutputTokens(55), 8192);
+  assert.equal(dubbingMaxOutputTokens(56), 8192);
+  assert.equal(dubbingMaxOutputTokens(120), 8192);
+  assert.equal(dubbingMaxOutputTokens(121), 16384);
+  assert.equal(dubbingMaxOutputTokens(240), 16384);
+  assert.equal(dubbingMaxOutputTokens(241), 24576);
+  assert.equal(dubbingMaxOutputTokens(300), 24576);
+  assert.equal(dubbingMaxOutputTokens(301), 40960);
+  assert.equal(dubbingMaxOutputTokens(600), 40960);
+  assert.equal(dubbingMaxOutputTokens(601), 65535);
+  assert.equal(dubbingMaxOutputTokens(1800), 65535);
+});
+
+test('dubbing timestamps parse and format on the MM:SS.S contract', () => {
+  assert.equal(parseDubbingTimestamp('01:02.5'), 62.5);
+  assert.equal(parseDubbingTimestamp('1:02:03.4'), 3723.4);
+  assert.equal(parseDubbingTimestamp('12.5'), 12.5);
+  assert.equal(parseDubbingTimestamp(7), 7);
+  assert.equal(parseDubbingTimestamp('nope'), undefined);
+  assert.equal(parseDubbingTimestamp(''), undefined);
+  assert.equal(formatDubbingTimestamp(62.5), '01:02.5');
+  assert.equal(formatDubbingTimestamp(5), '00:05.0');
+  assert.equal(formatDubbingTimestamp(3723.4), '62:03.4');
+});
+
+test('dubbing JSON parser recovers arrays from fences and wrapper objects', () => {
+  const fenced = parseDubbingPayload('```json\n[{"khmer_dubbing":"សួស្តី"}]\n```');
+  assert.equal(fenced?.length, 1);
+  assert.equal(fenced?.[0].khmer_dubbing, 'សួស្តី');
+
+  const wrapped = parseDubbingPayload('Here you go: {"segments":[{"khmer_dubbing":"បាទ"}]}');
+  assert.equal(wrapped?.length, 1);
+  assert.equal(wrapped?.[0].khmer_dubbing, 'បាទ');
+
+  const commentary = parseDubbingPayload('The audio contains one line.\n[{"khmer_dubbing":"ចាស"}]\nDone.');
+  assert.equal(commentary?.length, 1);
+
+  const single = parseDubbingPayload('{"khmer_dubbing":"បាទ"}');
+  assert.equal(single?.length, 1);
+
+  assert.equal(parseDubbingPayload('not json'), null);
+});
+
+test('dubbing segments are clamped, defaulted and shifted to absolute time', () => {
+  const shifted = normalizeDubbingSegment(
+    {
+      start: '00:01.0',
+      end: '00:04.0',
+      speaker_gender: '女',
+      pitch: '高',
+      vocal_timbre: 'bright',
+      character_role: '小梨',
+      original_transcript: '你来了',
+      khmer_dubbing: 'អ្នកមកហើយ ចាស',
+    },
+    { startSeconds: 60, endSeconds: 120 },
+    0,
+  );
+  assert.ok(shifted);
+  assert.equal(shifted.start, '01:01.0');
+  assert.equal(shifted.end, '01:04.0');
+  assert.equal(shifted.startSeconds, 61);
+  assert.equal(shifted.endSeconds, 64);
+  assert.equal(shifted.speaker_gender, 'female');
+  assert.equal(shifted.pitch, 'high');
+
+  const clamped = normalizeDubbingSegment(
+    { start: '00:50.0', end: '00:70.0', khmer_dubbing: 'បាទ' },
+    { startSeconds: 0, endSeconds: 60 },
+  );
+  assert.ok(clamped);
+  assert.equal(clamped.end, '01:00.0');
+  assert.equal(clamped.speaker_gender, 'male');
+  assert.equal(clamped.pitch, 'low');
+
+  const inferredFemale = normalizeDubbingSegment(
+    { start: '00:00.0', end: '00:01.0', khmer_dubbing: 'ចាស ខ្ញុំទៅហើយ' },
+    { startSeconds: 0, endSeconds: 10 },
+  );
+  assert.equal(inferredFemale?.speaker_gender, 'female');
+
+  assert.equal(
+    normalizeDubbingSegment(
+      { start: '00:00.0', end: '00:01.0' },
+      { startSeconds: 0, endSeconds: 10 },
+    ),
+    undefined,
+    'a segment without a Khmer line must be dropped',
+  );
+});
+
+test('dubbing prompt keeps the caller prompt, contract and chunk context', () => {
+  const prompt = buildDubbingPrompt({
+    prompt: 'Custom dubbing rules.',
+    index: 1,
+    count: 2,
+    previousSegments: [
+      { original_transcript: '你好', khmer_dubbing: 'សួស្តី', character_role: 'sister' },
+    ],
+  });
+  assert.match(prompt, /Custom dubbing rules\./);
+  assert.match(prompt, /OUTPUT CONTRACT/);
+  assert.match(prompt, /part 2 of 2/);
+  assert.match(prompt, /សួស្តី/);
+  assert.match(prompt, /do not repeat these lines/i);
+  assert.match(prompt, /MM:SS\.S/);
+});
+
+test(
+  'dubbing route chunks audio, applies token caps and offsets timestamps',
+  { skip: !hasFfmpeg },
+  async () => {
+    geminiRequests.length = 0;
+    modelRequests.length = 0;
+    modelAuthHeaders.length = 0;
+
+    const form = new FormData();
+    form.append('file', new Blob([makeWav(65)], { type: 'audio/wav' }), 'dubbing.wav');
+    form.append('model', 'gemini-3.5-flash-lite');
+    form.append('chunk_seconds', '60');
+    form.append('source_language', 'zh');
+    form.append('target_language', 'km');
+
+    const response = await fetch(`http://127.0.0.1:${bridgePort}/v1/audio/dubbing`, {
+      method: 'POST',
+      headers: authHeaders(),
+      body: form,
+    });
+
+    const rawBody = await response.text();
+    assert.equal(response.status, 200, rawBody);
+    const body: any = JSON.parse(rawBody);
+
+    assert.equal(body.object, 'audio.dubbing');
+    assert.equal(body.chunk_count, 2, 'a 65-second recording must be split at 60 seconds');
+    assert.equal(body.segment_count, 2);
+    assert.equal(body.source_language, 'Chinese');
+    assert.equal(body.target_language, 'Khmer');
+    assert.equal(body.chunks[0].max_output_tokens, 8192);
+    assert.equal(body.chunks[1].max_output_tokens, 8192);
+    assert.equal(body.usage.totalTokens, 400);
+    assert.equal(modelRequests.length, 0, 'dubbing must use generateContent, not chat completions');
+    assert.equal(geminiRequests.length, 2, 'one generateContent request per chunk');
+
+    for (const geminiRequest of geminiRequests) {
+      assert.equal(geminiRequest.generationConfig.maxOutputTokens, 8192);
+      assert.equal(geminiRequest.generationConfig.responseMimeType, 'application/json');
+      assert.equal(geminiRequest.generationConfig.responseSchema?.type, 'ARRAY');
+      const parts = geminiRequest.contents[0].parts;
+      assert.match(parts[0].text || '', /OUTPUT CONTRACT/);
+      assert.equal(parts[1].inline_data?.mime_type, 'audio/mp3');
+      assert.ok(Buffer.from(parts[1].inline_data!.data, 'base64').length > 0);
+    }
+
+    const first = body.segments[0];
+    const second = body.segments[1];
+    assert.deepEqual(
+      Object.keys(first).sort(),
+      [
+        'character_role',
+        'end',
+        'khmer_dubbing',
+        'original_transcript',
+        'pitch',
+        'speaker_gender',
+        'start',
+        'vocal_timbre',
+      ].sort(),
+    );
+    assert.equal(first.start, '00:01.0');
+    assert.equal(first.end, '00:04.5');
+    assert.equal(first.speaker_gender, 'female');
+    assert.equal(first.pitch, 'high');
+    assert.equal(first.character_role, 'younger sister');
+    assert.match(first.khmer_dubbing, /ប្អូនស្រី/);
+
+    const secondStart = parseDubbingTimestamp(second.start);
+    const secondEnd = parseDubbingTimestamp(second.end);
+    assert.ok(secondStart !== undefined && secondStart >= 59, `second segment must be offset, got ${second.start}`);
+    assert.ok(secondStart !== undefined && secondStart < 62, `second segment offset is too large: ${second.start}`);
+    assert.ok(secondEnd !== undefined && secondStart !== undefined && secondEnd > secondStart);
+  },
+);
+
+test(
+  'dubbing array format returns bare segments and retries without a rejected schema',
+  { skip: !hasFfmpeg },
+  async () => {
+    geminiRequests.length = 0;
+    failNextDubbingSchema = true;
+
+    const response = await fetch(
+      `http://127.0.0.1:${bridgePort}/v1/audio/dubbing?model=gemini-3.5-flash-lite&response_format=array`,
+      {
+        method: 'POST',
+        headers: authHeaders({ 'Content-Type': 'audio/wav' }),
+        body: makeWav(2),
+      },
+    );
+
+    const rawBody = await response.text();
+    assert.equal(response.status, 200, rawBody);
+    const body: any = JSON.parse(rawBody);
+    assert.ok(Array.isArray(body), 'response_format=array must return only the segment array');
+    assert.equal(body.length, 1);
+    assert.match(body[0].khmer_dubbing, /ប្អូនស្រី/);
+    assert.equal(body[0].speaker_gender, 'female');
+
+    assert.equal(geminiRequests.length, 2, 'the schema rejection must trigger one fallback retry');
+    assert.ok(geminiRequests[0].generationConfig.responseSchema);
+    assert.equal(geminiRequests[1].generationConfig.responseSchema, undefined);
+    assert.equal(geminiRequests[1].generationConfig.maxOutputTokens, 8192);
+  },
+);
+
+test('dubbing requires an API key', async () => {
+  const before = geminiRequests.length;
+  const response = await fetch(`http://127.0.0.1:${bridgePort}/v1/audio/dubbing`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'audio/wav' },
+    body: makeWav(1),
+  });
+  assert.equal(response.status, 401);
+  assert.equal(geminiRequests.length, before);
 });

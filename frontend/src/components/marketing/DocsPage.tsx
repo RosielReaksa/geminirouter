@@ -160,6 +160,8 @@ export const DocsPage: React.FC = () => {
                       ['POST', '/v1/responses', 'OpenAI'],
                       ['POST', '/v1/messages', 'Anthropic'],
                       ['POST', '/v1beta/models/:model', 'Gemini'],
+                      ['POST', '/v1/audio/transcriptions', 'Media'],
+                      ['POST', '/v1/audio/dubbing', 'Media'],
                       ['GET', '/v1/models', 'OpenAI'],
                     ].map(([m, p, proto]) => (
                       <tr key={p + m}>
@@ -240,6 +242,74 @@ const response = await fetch("${origin}/v1/audio/transcriptions", {
 const result = await response.json();
 console.log(result.transcript, result.translation);`}
               />
+              <h3 className="mkt-display text-[20px] text-[#191714] mt-8 mb-2">
+                Timed dubbing · Chinese → Khmer
+              </h3>
+              <p className="text-[14px] leading-relaxed text-[#4A453E]">
+                <code className="px-1.5 py-0.5 rounded bg-[#F0EBE3] text-[12.5px] font-mono-code text-[#A8462A]">
+                  POST /v1/audio/dubbing
+                </code>{' '}
+                splits the recording, transcribes and translates each part, and returns dialogue
+                segments with absolute timestamps and a Khmer line for each one. It uses the same
+                upload path as transcriptions, so keep it on your server. The alias{' '}
+                <code className="px-1.5 py-0.5 rounded bg-[#F0EBE3] text-[12.5px] font-mono-code text-[#A8462A]">
+                  /v1/media/dubbing
+                </code>{' '}
+                behaves identically.
+              </p>
+              <Code
+                title="dubbing · server-side JavaScript"
+                code={`const form = new FormData();
+form.append("file", new Blob([await fs.readFile(audioPath)]), "episode.mp3");
+form.append("source_language", "zh");
+form.append("target_language", "km");
+form.append("response_format", "array"); // "json" adds chunk + usage metadata
+
+const response = await fetch("${origin}/v1/audio/dubbing", {
+  method: "POST",
+  headers: { Authorization: \`Bearer \${process.env.GEMINIROUTER_KEY}\` },
+  body: form,
+});
+
+// Bare contract array: start, end, speaker_gender, pitch, vocal_timbre,
+// character_role, original_transcript, khmer_dubbing.
+const segments = await response.json();
+for (const line of segments) {
+  schedule(line.start, line.end, line.speaker_gender, line.khmer_dubbing);
+}`}
+              />
+              <Code
+                title="response · one segment"
+                code={`[
+  {
+    "start": "00:00.1",
+    "end": "00:02.1",
+    "speaker_gender": "female",
+    "pitch": "high",
+    "vocal_timbre": "clear, friendly, welcoming voice",
+    "character_role": "narrator",
+    "original_transcript": "Hello and welcome to Duber.",
+    "khmer_dubbing": "សួស្តី និងសូមស្វាគមន៍មកកាន់ Duber។"
+  }
+]`}
+              />
+              <div className="rounded-xl border border-[#E4DED4] bg-[#FBF9F5] p-4 text-[12.5px] leading-relaxed text-[#7A736A] space-y-2">
+                <p>
+                  Defaults are <code>source_language=zh</code>, <code>target_language=km</code>,
+                  and a 5-minute chunk. Override them with <code>chunk_seconds</code> (up to 1800)
+                  and <code>model</code>; a caller <code>prompt</code> replaces the built-in
+                  instructions, but the JSON timing contract is always appended. Output budget
+                  follows the chunk length: 5 min → 8192 tokens, 10 min → 24576, 15 min → 65535.
+                </p>
+                <p>
+                  Timestamps are <code>MM:SS.S</code> and already shifted to the recording start,
+                  so chunk offsets can be used directly. Khmer politeness particles are kept per
+                  speaker: male <span className="text-[#4A453E] font-medium">បាទ</span>, female{' '}
+                  <span className="text-[#4A453E] font-medium">ចាស</span>. Use{' '}
+                  <code>response_format=json</code> when you also need chunk boundaries, token
+                  usage, and per-chunk timings.
+                </p>
+              </div>
               <Code
                 title="video · server-side JavaScript"
                 code={`const videoBase64 = (await fs.readFile(videoPath)).toString("base64");
@@ -271,8 +341,10 @@ const translatedDialogue = result.choices?.[0]?.message?.content;`}
                   request limit is 64 MiB.
                 </p>
                 <p>
-                  The model returns text such as a transcript or translation. Creating a finished
-                  dubbed video also needs speech generation and video/audio muxing in the dubbing app.
+                  Chat completions return text such as a transcript or translation.
+                  <code> /v1/audio/dubbing</code> returns the timed Khmer lines directly. Turning
+                  those lines into audible speech and muxing them back into the video still happens
+                  in the dubbing app.
                 </p>
               </div>
             </section>
