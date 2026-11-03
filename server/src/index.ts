@@ -22,6 +22,7 @@ import { readCoreProxyConfig, applyCoreProxyConfig } from './coreConfig.js';
 import { ConcurrencyLeaseManager } from './leaseManager.js';
 import { handleV1ProxyRequest } from './v1Proxy.js';
 import { canonicalModelId, canonicalizeModelEntries, canonicalizeModelIds } from './modelIds.js';
+import { mapCoreTrafficItems as mapCoreTrafficItemsFromCore } from './trafficMapping.js';
 import { AccountTester, type AccountTestResult } from './accountTester.js';
 import {
   isModelFailureText,
@@ -688,36 +689,8 @@ export async function createServer(): Promise<{
     Number.parseInt(process.env.STALE_IN_PROGRESS_MS || '300000', 10) || 300_000,
   );
 
-  const mapCoreTrafficItems = (items: any[], accounts: GoogleAccount[]): TrafficRecord[] => {
-    const emailsByAccountId = new Map(accounts.map((account) => [account.id, account.email]));
-    return items.map((item: any) => {
-      const routedModel = item.mappedModel || item.physicalModel || item.model || 'unknown';
-      const promptTokens = item.inputTokens ?? 0;
-      const completionTokens = item.outputTokens ?? 0;
-      const timestampMs =
-        typeof item.timestamp === 'number' ? item.timestamp : Date.parse(item.timestamp);
-      const stale =
-        item.outcome === 'in_progress' &&
-        Number.isFinite(timestampMs) &&
-        Date.now() - timestampMs > STALE_IN_PROGRESS_MS;
-      return {
-        id: item.id,
-        timestamp: new Date(timestampMs).toISOString(),
-        clientName: item.clientName || item.userAgent || item.protocol || 'HTTP Client',
-        clientIp: item.clientIp || '127.0.0.1',
-        modelRequested: item.model || routedModel,
-        modelRouted: routedModel,
-        backingAccountEmail:
-          emailsByAccountId.get(item.attributedAccountId) || item.attributedAccountId || 'unknown',
-        status: stale ? 0 : item.status ?? 0,
-        outcome: stale ? 'aborted' : item.outcome ?? undefined,
-        latencyMs: item.durationMs ?? 0,
-        promptTokens,
-        completionTokens,
-        totalTokens: promptTokens + completionTokens,
-      };
-    });
-  };
+  const mapCoreTrafficItems = (items: any[], accounts: GoogleAccount[]): TrafficRecord[] =>
+    mapCoreTrafficItemsFromCore(items, accounts, STALE_IN_PROGRESS_MS);
 
   // The core's audit/list RPC can become very slow when the audit database
   // grows (the payload tables are ~1 GB). Its HTTP audit endpoint is indexed

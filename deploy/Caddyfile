@@ -102,8 +102,11 @@
     # }
     # respond @unauthorized "Unauthorized: Invalid API Key" 401
 
+    # All OpenAI-compatible traffic goes through the bridge so request model
+    # ids are canonicalised (retired gemini-3.8 aliases are rewritten) and the
+    # dashboard traffic records match what the gateway exposes.
     handle @api {
-        reverse_proxy 127.0.0.1:8045 {
+        reverse_proxy 127.0.0.1:3000 {
             header_up Host {upstream_hostport}
             header_up X-Real-IP {remote_host}
             header_up X-Forwarded-For {remote_host}
