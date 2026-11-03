@@ -56,6 +56,7 @@ const DUBBING_MAX_CHUNK_SECONDS = 1800;
  * budget than the plain duration table.
  */
 const DUBBING_REASONING_CHUNK_SECONDS = 120;
+const DUBBING_LITE_CHUNK_SECONDS = 60;
 const DUBBING_REASONING_TOKEN_FLOOR = 40960;
 
 /** A chunk with less audible speech than this is allowed to return no lines. */
@@ -1844,18 +1845,40 @@ export function isReasoningDubbingModel(model: string): boolean {
   return /(^|[-_/])3\.8|(^|[-_/])(high|thinking|reasoner|pro)([-_/]|$)/i.test(model.trim());
 }
 
-/** Per-chunk audio window for a model: reasoning models get shorter chunks. */
+/** True for the small `-lite` models, which stop at the end of a script pass. */
+export function isLiteDubbingModel(model: string): boolean {
+  return /(^|[-_/])lite([-_/]|$)/i.test(model.trim());
+}
+
+/**
+ * True for dubbing models that need a short window. Besides the reasoning
+ * models this includes the `-lite` family: on a 300 s window lite answers with
+ * roughly the first minute only and then stops, so it must be chunked too.
+ * This is a dubbing-only rule; `/v1/chat/completions` traffic is untouched.
+ */
+export function usesShortDubbingWindow(model: string): boolean {
+  return isReasoningDubbingModel(model) || isLiteDubbingModel(model);
+}
+
+/**
+ * Per-chunk audio window for a model. Reasoning models get 120 s. Lite models
+ * get 60 s: on 120 s windows lite still stops at the end of the first complete
+ * script pass (`~01:09` on the 300 s fixture) and drops the rest of the window,
+ * while 60 s windows stay mid-pass and transcribe the whole chunk.
+ */
 export function dubbingChunkSecondsForModel(model: string, requestedSeconds: number): number {
-  const cap = isReasoningDubbingModel(model)
-    ? DUBBING_REASONING_CHUNK_SECONDS
-    : DUBBING_MAX_CHUNK_SECONDS;
+  const cap = isLiteDubbingModel(model)
+    ? DUBBING_LITE_CHUNK_SECONDS
+    : isReasoningDubbingModel(model)
+      ? DUBBING_REASONING_CHUNK_SECONDS
+      : DUBBING_MAX_CHUNK_SECONDS;
   return Math.max(60, Math.min(requestedSeconds, cap));
 }
 
 /**
  * Output-token budget for one dubbing chunk, from the caller's duration table.
- * A chunk is capped by the first threshold that it fits into. Reasoning models
- * get a floor that leaves room for thoughts plus the JSON answer.
+ * A chunk is capped by the first threshold that it fits into. Short-window
+ * models get a floor that leaves room for thoughts plus the JSON answer.
  */
 export function dubbingMaxOutputTokens(durationSeconds: number, model?: string): number {
   const safe = Number.isFinite(durationSeconds) ? Math.max(0, durationSeconds) : 0;
@@ -1866,7 +1889,7 @@ export function dubbingMaxOutputTokens(durationSeconds: number, model?: string):
   else if (safe <= 600) budget = 40960;
   else budget = 65535;
 
-  if (model && isReasoningDubbingModel(model)) {
+  if (model && usesShortDubbingWindow(model)) {
     budget = Math.max(budget, DUBBING_REASONING_TOKEN_FLOOR);
   }
   return Math.min(65535, budget);
@@ -2401,10 +2424,8 @@ async function handleAudioDubbing(
       60,
       Math.floor((14 * 1024 * 1024 * 8) / (config.audioBitrateKbps * 1000)),
     );
-    const effectiveChunkSeconds = Math.min(
-      dubbingChunkSecondsForModel(options.model, options.chunkSeconds),
-      maxSecondsBySize,
-    );
+    const modelChunkSeconds = dubbingChunkSecondsForModel(options.model, options.chunkSeconds);
+    const effectiveChunkSeconds = Math.min(modelChunkSeconds, maxSecondsBySize);
     if (effectiveChunkSeconds < options.chunkSeconds) {
       request.log.info(
         {
@@ -2412,9 +2433,12 @@ async function handleAudioDubbing(
             model: options.model,
             requestedChunkSeconds: options.chunkSeconds,
             chunkSeconds: effectiveChunkSeconds,
-            reason: isReasoningDubbingModel(options.model)
-              ? 'reasoning model window'
-              : 'upload size limit',
+            reason:
+              modelChunkSeconds < options.chunkSeconds
+                ? isReasoningDubbingModel(options.model)
+                  ? 'reasoning model window'
+                  : 'lite model window'
+                : 'upload size limit',
           },
         },
         'media: dubbing chunk window reduced',

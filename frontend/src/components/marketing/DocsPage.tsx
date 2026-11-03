@@ -299,8 +299,9 @@ for (const line of segments) {
                   and <code>model</code>; a caller <code>prompt</code> replaces the built-in
                   instructions, but the JSON timing contract is always appended. Output budget
                   follows the chunk length: 2 min → 8,192 tokens, 5 min → 24,576, 10 min+ → 65,535.
-                  Reasoning models such as <code>gemini-3.8-flash-high</code> use 120-second chunks
-                  with a 40,960-token floor so their thinking pass cannot truncate the script.
+                  Reasoning models such as <code>gemini-3.8-flash-high</code> use 120-second chunks;
+                  the <code>-lite</code> models use 60-second chunks. Both get a 40,960-token floor
+                  so a thinking pass or an early stop cannot truncate the script.
                 </p>
                 <p>
                   Timestamps are <code>MM:SS.S</code> and already shifted to the recording start,
@@ -309,9 +310,8 @@ for (const line of segments) {
                   <span className="text-[#4A453E] font-medium">ចាស</span>. Each chunk&apos;s audible
                   speech is measured; an empty or implausibly short script is retried once and then
                   rejected with a JSON <code>partial_script</code> error instead of silently dropping
-                  dialogue. The <code>gemini-3.5-flash-lite</code> default stops early on 5-minute
-                  windows, so use <code>gemini-3.8-flash-high</code> for long clips. Use{' '}
-                  <code>response_format=json</code> when you also need the{' '}
+                  dialogue. Each model id still works for normal chat: the shorter window is a
+                  dubbing rule only. Use <code>response_format=json</code> when you also need the{' '}
                   <code>coverage</code> block, chunk boundaries, token usage, and per-chunk timings.
                 </p>
               </div>

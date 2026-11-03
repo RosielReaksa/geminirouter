@@ -27,6 +27,7 @@ import {
   formatDubbingTimestamp,
   geminiResponseAnswer,
   isModelFailureText,
+  isLiteDubbingModel,
   isReasoningDubbingModel,
   languageLabel,
   normalizeDubbingSegment,
@@ -34,6 +35,7 @@ import {
   parseDubbingTimestamp,
   readMediaConfig,
   splitStructuredOutput,
+  usesShortDubbingWindow,
 } from '../src/mediaTranscription.js';
 
 const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'gr-media-test-'));
@@ -679,15 +681,29 @@ test('dubbing reasoning models get a token floor and a 120-second chunk window',
   assert.equal(isReasoningDubbingModel('gemini-3.5-pro'), true);
   assert.equal(isReasoningDubbingModel('gemini-3.5-flash-lite'), false);
 
+  // Lite needs the same short window, but it is not a reasoning model.
+  assert.equal(isLiteDubbingModel('gemini-3.5-flash-lite'), true);
+  assert.equal(isLiteDubbingModel('gemini-3.6-flash'), false);
+  assert.equal(usesShortDubbingWindow('gemini-3.5-flash-lite'), true);
+  assert.equal(usesShortDubbingWindow('gemini-3.1-flash-lite'), true);
+  assert.equal(usesShortDubbingWindow('gemini-3.6-flash'), false);
+  assert.equal(usesShortDubbingWindow('gemini-3.8-flash-high'), true);
+
   assert.equal(dubbingMaxOutputTokens(120, 'gemini-3.8-flash-high'), 40960);
   assert.equal(dubbingMaxOutputTokens(300, 'gemini-3.8-flash-high'), 40960);
   assert.equal(dubbingMaxOutputTokens(601, 'gemini-3.8-flash-high'), 65535);
-  assert.equal(dubbingMaxOutputTokens(300, 'gemini-3.5-flash-lite'), 24576);
+  assert.equal(dubbingMaxOutputTokens(300, 'gemini-3.5-flash-lite'), 40960);
+  assert.equal(dubbingMaxOutputTokens(60, 'gemini-3.5-flash-lite'), 40960);
+  assert.equal(dubbingMaxOutputTokens(60, 'gemini-3.6-flash'), 8192);
 
   assert.equal(dubbingChunkSecondsForModel('gemini-3.8-flash-high', 300), 120);
-  assert.equal(dubbingChunkSecondsForModel('gemini-3.5-flash-lite', 300), 300);
-  assert.equal(dubbingChunkSecondsForModel('gemini-3.5-flash-lite', 1800), 1800);
+  // Lite stops at the end of the first script pass, so it gets 60 s windows.
+  assert.equal(dubbingChunkSecondsForModel('gemini-3.5-flash-lite', 300), 60);
+  assert.equal(dubbingChunkSecondsForModel('gemini-3.5-flash-lite', 1800), 60);
+  assert.equal(dubbingChunkSecondsForModel('gemini-3.5-flash-lite', 180), 60);
+  assert.equal(dubbingChunkSecondsForModel('gemini-3.5-flash-lite', 90), 60);
   assert.equal(dubbingChunkSecondsForModel('gemini-3.5-flash-lite', 10), 60);
+  assert.equal(dubbingChunkSecondsForModel('gemini-3.6-flash', 1800), 1800);
 });
 
 test('gemini answer extraction excludes thought parts and counts them', () => {
@@ -948,14 +964,14 @@ test(
     assert.equal(body.segment_count, 2);
     assert.equal(body.source_language, 'Chinese');
     assert.equal(body.target_language, 'Khmer');
-    assert.equal(body.chunks[0].max_output_tokens, 8192);
-    assert.equal(body.chunks[1].max_output_tokens, 8192);
+    assert.equal(body.chunks[0].max_output_tokens, 40960);
+    assert.equal(body.chunks[1].max_output_tokens, 40960);
     assert.equal(body.usage.totalTokens, 400);
     assert.equal(modelRequests.length, 0, 'dubbing must use generateContent, not chat completions');
     assert.equal(geminiRequests.length, 2, 'one generateContent request per chunk');
 
     for (const geminiRequest of geminiRequests) {
-      assert.equal(geminiRequest.generationConfig.maxOutputTokens, 8192);
+      assert.equal(geminiRequest.generationConfig.maxOutputTokens, 40960);
       assert.equal(geminiRequest.generationConfig.responseMimeType, 'application/json');
       assert.equal(geminiRequest.generationConfig.responseSchema?.type, 'ARRAY');
       const parts = geminiRequest.contents[0].parts;
@@ -993,6 +1009,36 @@ test(
 );
 
 test(
+  'dubbing caps gemini-3.5-flash-lite at 60-second chunks and keeps its token floor',
+  { skip: !hasFfmpeg },
+  async () => {
+    geminiRequests.length = 0;
+
+    const form = new FormData();
+    form.append('file', new Blob([makeWav(130)], { type: 'audio/wav' }), 'lite-window.wav');
+    form.append('model', 'gemini-3.5-flash-lite');
+    form.append('chunk_seconds', '300');
+
+    const response = await fetch(`http://127.0.0.1:${bridgePort}/v1/audio/dubbing`, {
+      method: 'POST',
+      headers: authHeaders(),
+      body: form,
+    });
+
+    const rawBody = await response.text();
+    assert.equal(response.status, 200, rawBody);
+    const body: any = JSON.parse(rawBody);
+    assert.equal(body.model, 'gemini-3.5-flash-lite');
+    assert.equal(body.chunk_seconds, 60, 'lite must not be left with a 300-second window');
+    assert.equal(body.chunk_count, 3, 'a 130-second recording splits into 60 s + 60 s + 10 s');
+    assert.ok(body.chunks[0].end_seconds <= 61, JSON.stringify(body.chunks[0]));
+    assert.equal(body.chunks[0].max_output_tokens, 40960);
+    assert.equal(body.chunks[2].max_output_tokens, 40960);
+    assert.equal(geminiRequests.length, 3);
+  },
+);
+
+test(
   'dubbing array format returns bare segments and retries without a rejected schema',
   { skip: !hasFfmpeg },
   async () => {
@@ -1019,7 +1065,7 @@ test(
     assert.equal(geminiRequests.length, 2, 'the schema rejection must trigger one fallback retry');
     assert.ok(geminiRequests[0].generationConfig.responseSchema);
     assert.equal(geminiRequests[1].generationConfig.responseSchema, undefined);
-    assert.equal(geminiRequests[1].generationConfig.maxOutputTokens, 8192);
+    assert.equal(geminiRequests[1].generationConfig.maxOutputTokens, 40960);
   },
 );
 

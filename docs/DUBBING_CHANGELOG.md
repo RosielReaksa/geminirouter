@@ -179,8 +179,9 @@ Returns only the segment array — no metadata envelope.
 | > 600 s (incl. 1800 s) | 65,535 |
 
 Reasoning models (`gemini-3.8` family, ids with `high` / `thinking` /
-`reasoner` / `pro`) are capped at 120 s per chunk and always receive at least
-40,960 tokens.
+`reasoner` / `pro`) and the `-lite` models use short dubbing windows (120 s and
+60 s), always with at least 40,960 tokens. This cap applies to dubbing only; the
+model ids stay unchanged for `/v1/chat/completions`.
 
 A `finishReason` of `length` / `max_tokens` fails the request with
 `model_output_truncated`; the server never returns a silently shortened script.
@@ -414,7 +415,7 @@ depending on whether the docs section should remain.
 | JSON recovery | `parseDubbingPayload()` scans every balanced array/object and keeps the largest (then last) one, so an example draft cannot win |
 | Completeness | Per-chunk FFmpeg `silencedetect` measures audible speech; `dubbingCoverageVerdict()` rejects empty, single-line, and < 35 % coverage answers |
 | Recovery | One strict retry with `DUBBING_COMPLETENESS_RETRY_PROMPT`; a second failure returns `partial_script` (502) with `coverageRatio`, `speechSeconds`, `segmentCount`, `thoughtCharacters` |
-| Reasoning models | 120 s per-chunk window and a 40,960-token floor for `gemini-3.8`, `high`, `thinking`, `reasoner`, `pro` |
+| Reasoning + lite models | Short per-chunk windows with a 40,960-token floor: 120 s for `gemini-3.8`, `high`, `thinking`, `reasoner`, `pro`; 60 s for `-lite`; chat requests are untouched |
 | Prompt | Contract now states that one element per utterance is mandatory and that a single segment for a conversation is an error |
 | Shutdown | `forceCloseConnections: 'idle'`, SIGTERM/SIGINT drain (`SHUTDOWN_GRACE_MS`, default 240 s), `TimeoutStopSec=300s`, `kill_timeout: 300000` |
 | Errors | Global Fastify error handler and per-chunk JSON envelopes; no route can answer 502 with an empty body |
@@ -423,11 +424,12 @@ depending on whether the docs section should remain.
 
 ### 14.4 Tests
 
-`pnpm --dir server test` → **105/105 passing**. New cases cover reasoning
-caps/floor, thought exclusion, largest-array parsing, silence maths, coverage
-verdicts, a thought-part route run, the strict-retry success path, and the
-`partial_script` envelope (empty body is asserted against). Frontend build
-clean: `index-Bns_y1OQ.js`.
+`pnpm --dir server test` → **106/106 passing**. New cases cover reasoning
+caps/floor, the `-lite` cap (`isLiteDubbingModel` / `usesShortDubbingWindow`), a
+130 s lite route run that must split at 60 s, thought exclusion, largest-array
+parsing, silence maths, coverage verdicts, a thought-part route run, the
+strict-retry success path, and the `partial_script` envelope (empty body is
+asserted against). Frontend build clean: `index-49ZyM23a.js`.
 
 ### 14.5 Live verification
 
@@ -439,31 +441,40 @@ Production, synthetic English TTS clips (12 lines / 24 lines / ~66 lines):
 | 120 s, `gemini-3.8-flash-high` | 200 in 128 s, 24 segments, ratio 1.155 |
 | 300 s, `gemini-3.8-flash-high` | 200 in 616 s, **82 segments** in 3 × 120 s chunks (35/34/13), ratio 1.216 |
 | 300 s, `gemini-3.5-flash-high` | 502 `upstream_unavailable` — core answered **HTTP 503 “All accounts failed or unhealthy”** for the 3.5 high/low/medium pools (verified with a plain `/v1/chat/completions` ping), so the ≥ 80 target could not be re-checked this round |
-| 300 s, `gemini-3.5-flash-lite` (default window) | 502 `partial_script`: 20 segments covering 43.4 s of 169.6 s audible speech (26 %), first attempt 28 % |
-| 300 s, `gemini-3.5-flash-lite`, `chunk_seconds=120` | 200, 51 segments, but inspection shows chunk 1 stopped at `01:09` and chunk 2 repeated earlier lines — lite is not a safe long-clip model |
+| 300 s, `gemini-3.5-flash-lite` (before the lite window fix) | 502 `partial_script`: 20 segments covering 43.4 s of 169.6 s audible speech (26 %), first attempt 28 % |
+| 300 s, `gemini-3.5-flash-lite`, 120 s window (before the 60 s fix) | 200 in 42 s, 56 segments (14/24/18), ratio 1.013 — but chunk 1 stopped at `01:09` and dropped the last 10 lines of its 120 s window; the global ratio hid it |
+| 300 s, `gemini-3.5-flash-lite`, 60 s window (current default) | 200 in 54 s / 59 s on two runs: **67 and 73 segments** in 5 × 60 s chunks (run 2: 18/12/14/14/15), ratio 1.224 / 1.204, last line `04:59.9` / `04:59.8`, no gaps over 12 s |
+| `gemini-3.5-flash-lite` chat ping | 200, `content: "chat-ok"` — the dubbing window does not affect `/v1/chat/completions`, and `/v1/models` still lists the id |
 
 Service checks after the deploy:
 
 | Check | Result |
 |---|---|
-| `systemctl show -p NRestarts` | `0` |
+| `systemctl show -p NRestarts` | `0` (after both the 12:38 and 12:44 UTC restarts) |
 | `TimeoutStopUSec` / `KillSignal` | `5min` / `SIGTERM` (drop-in) |
-| 502 log lines since deploy | 3 dubbing failures, all JSON with `error.code` (`partial_script`, 2 × `upstream_unavailable`) |
+| 502 log lines since the first fix deploy | 3 dubbing failures, all JSON with `error.code` (`partial_script`, 2 × `upstream_unavailable`) |
+| 502 / `partial_script` lines since the 60 s deploy | `0` |
 | `Content-Length: 0` responses | none |
 | Unhandled route errors | `0` |
 | `X-Geminirouter-Segments` vs `segments.length` | equal on every 200 |
 
-Docs site redeployed afterwards: backup `20261103-122456`, live asset
-`index-N7Rm0l1a.js` (CSS `index-DKl6l1hE.css`), bridge untouched
-(`NRestarts=0`).
+Server + docs site were redeployed as `20261103-124415` (server + frontend);
+live asset `index-wo0mslzi.js` (CSS `index-DKl6l1hE.css`) carries the 60 s lite
+note, bridge restarted clean (`NRestarts=0`). Earlier frontend-only deploy:
+`20261103-122456`, `index-N7Rm0l1a.js`.
 
 ### 14.6 Follow-ups
 
-- `gemini-3.5-flash-lite` remains the dubbing default but cannot produce a
-  complete script for long windows; 300 s requests now fail loudly instead of
-  returning a truncated script. Use `gemini-3.8-flash-high` (or
-  `chunk_seconds=120` with a spot check) for long clips.
+- `gemini-3.5-flash-lite` is the dubbing default and now runs on 60 s windows.
+  It needs the short window because it stops at the end of the first complete
+  script pass: on a 300 s window it answered the first ~69 s, and on a 120 s
+  window it still stopped at `01:09`. 60 s windows end mid-pass and covered the
+  whole 300 s fixture (5 chunks, 67–73 segments across runs).
 - The 35 % per-chunk coverage floor is deliberately lenient; a chunk can still
-  lose dialogue between 35 % and ~75 % coverage. Tightening it needs a corpus of
-  real footage because music and overlapping speech depress the measured ratio.
+  lose dialogue between 35 % and ~75 % coverage. The 120 s lite run is the proof:
+  chunk 1 stopped at `01:09` and 10 lines were missing, yet the global ratio was
+  1.013 and the request returned 200. The live fixture loops a 14-line script, so
+  a truncated tail is hard to spot in this corpus. Tightening the guard needs a
+  tail check plus a corpus of real footage, because music and overlapping speech
+  depress or inflate the measured ratio.
 - 3.5 high/low/medium verification is pending account-pool recovery.

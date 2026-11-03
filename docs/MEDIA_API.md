@@ -302,7 +302,15 @@ Reasoning models (the `gemini-3.8` family and any id containing `high`,
 `thinking`, `reasoner` or `pro`) spend output tokens on a thinking pass before
 the JSON answer. They are capped at **120 seconds per chunk** and always get at
 least **40,960** output tokens, because their earlier 300-second answers returned
-a single line. Other models keep the requested chunk size and the duration table.
+a single line.
+
+The `-lite` models get a **60-second window** and the same 40,960-token floor.
+`gemini-3.5-flash-lite` stops when it reaches the end of the first complete
+script pass: on a 300-second window it returned only the first ~69 seconds, and
+on a 120-second chunk it still stopped at `01:09`. 60-second windows end mid-pass,
+so the whole chunk is transcribed (300 s → 5 chunks, 67 segments). Other models
+keep the requested chunk size and the duration table. This cap is dubbing-only:
+the same model id is unchanged for `/v1/chat/completions` and `/v1/models`.
 
 ### Output contract
 
@@ -346,7 +354,7 @@ The default `json` response wraps the merged segments with metadata:
   "chunks": [
     { "index": 0, "start_seconds": 0, "end_seconds": 300, "segment_count": 24,
       "speech_seconds": 271.2, "covered_seconds": 260.4, "thought_characters": 0,
-      "max_output_tokens": 24576, "model": "gemini-3.5-flash-lite",
+      "max_output_tokens": 40960, "model": "gemini-3.5-flash-lite",
       "usage": { "promptTokens": 0, "completionTokens": 0, "totalTokens": 0 } }
   ],
   "usage": { "promptTokens": 0, "completionTokens": 0, "totalTokens": 0 },
@@ -366,8 +374,8 @@ With `response_format=array`, the body is only the segment array.
 | ≤ 600 s | 40,960 |
 | > 600 s | 65,535 |
 
-Reasoning models always receive at least 40,960 tokens, even for a 60- or
-120-second chunk.
+Reasoning models and `-lite` models always receive at least 40,960 tokens, even
+for a 60- or 120-second chunk.
 
 A response that stops at the cap (`finishReason: "MAX_TOKENS"`) fails the whole
 request with `model_output_truncated`; the server never returns a silently
@@ -417,12 +425,13 @@ Silent or unmeasurable chunks are accepted with an empty segment list; the
 `coverage` block reports `speech_seconds: null` when FFmpeg could not measure
 the chunk.
 
-Completeness is checked per chunk. The default model `gemini-3.5-flash-lite`
-stops early on long windows: on a 300 s chunk it returned 20 segments covering
-26% of the audible speech, so the request now fails with `partial_script` instead
-of returning a truncated script. `gemini-3.8-flash-high` handled the same 300 s
-clip in three 120 s chunks and returned 82 segments. Pick the model per clip
-length, or set `chunk_seconds=120` and spot-check the result.
+Completeness is checked per chunk. `gemini-3.5-flash-lite` used to stop early on
+a 300 s window (20 segments covering 43 s of 170 s of dialogue), and on a 120 s
+window it still stopped at the end of the first script pass (`01:09`, dropping
+10 lines). It now uses 60 s windows plus the 40,960-token floor, which covered
+the same clip completely (5 chunks, 67–73 segments across runs). If a chunk is
+still incomplete after the strict retry, the request fails with `partial_script`
+instead of returning a truncated script.
 
 ### Examples
 
