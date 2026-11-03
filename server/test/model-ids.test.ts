@@ -5,6 +5,8 @@ import {
   canonicalizeModelEntries,
   canonicalizeModelIds,
   includeVerifiedWebsiteModels,
+  isUnavailableWebsiteModel,
+  UNAVAILABLE_WEBSITE_MODEL_IDS,
   VERIFIED_WEBSITE_MODEL_IDS,
 } from '../src/modelIds.js';
 
@@ -61,13 +63,13 @@ test('the website list adds verified ids the core omits without dropping live on
     'claude-opus-4-6-thinking',
     'gemini-3.1-flash-lite',
     'gemini-3.5-flash-lite',
-    'gemini-3.6-flash',
+    'gemini-3.1-flash-image',
     'gpt-oss-120b-medium',
   ];
 
   const merged = includeVerifiedWebsiteModels(live);
 
-  // Live ids keep their positions, so the Models page order is unchanged.
+  // Usable live ids keep their positions, so the Models page order is unchanged.
   assert.deepEqual(merged.slice(0, live.length), live);
   // Every verified alias is present exactly once.
   for (const id of VERIFIED_WEBSITE_MODEL_IDS) {
@@ -89,6 +91,37 @@ test('the website list adds verified ids the core omits without dropping live on
   ]) {
     assert.ok(merged.includes(id), `${id} is offered`);
   }
+});
+
+test('the website list drops core ids whose pool is currently unhealthy', () => {
+  const live = [
+    'gemini-3.6-flash',
+    'gemini-3.7-flash-tiered',
+    'gemini-3.5-flash-high',
+    'gemini-3.8-flash-high',
+    'gemini-3.5-flash-lite',
+  ];
+
+  const merged = includeVerifiedWebsiteModels(live);
+
+  for (const id of ['gemini-3.6-flash', 'gemini-3.7-flash-tiered', 'gemini-3.5-flash-high']) {
+    assert.ok(!merged.includes(id), `${id} is hidden`);
+  }
+  assert.ok(merged.includes('gemini-3.8-flash-high'));
+  assert.ok(merged.includes('gemini-3.5-flash-lite'));
+  for (const id of UNAVAILABLE_WEBSITE_MODEL_IDS) {
+    assert.ok(!merged.includes(id), `${id} is hidden`);
+  }
+  // Hiding is website-only: the canonical id still exists for /v1/models.
+  assert.equal(canonicalModelId('gemini-3.7-flash-tiered'), 'gemini-3.7-flash-tiered');
+});
+
+test('hiding is decided on the canonical id, so a retired alias cannot slip through', () => {
+  assert.equal(isUnavailableWebsiteModel('gemini-3.7-flash-tiered'), true);
+  assert.equal(isUnavailableWebsiteModel('gemini-3.6-flash-tiered'), true);
+  assert.equal(isUnavailableWebsiteModel('gemini-3.8-flash-tiered'), false);
+  assert.equal(isUnavailableWebsiteModel('gemini-3.8-flash-high'), false);
+  assert.equal(isUnavailableWebsiteModel('claude-sonnet-4-6'), false);
 });
 
 test('the website list rewrites the retired tiered id instead of exposing it', () => {

@@ -56,8 +56,9 @@ Probe again before adding an id — per-model pool health is uneven and changes.
 
 `frontend/src/components/PlaygroundPage.tsx`:
 
-1. Loads `/api/models` and keeps **every** entry. A failed last probe no longer
-   hides a model, because the probe result is a stale snapshot.
+1. Loads `/api/models` and keeps **every** entry the endpoint returns. A failed
+   last probe no longer hides a model client-side, because the probe snapshot can
+   be stale; the server-side probe list (below) is what decides visibility.
 2. Sorts usable models first (`availability?.ok !== false`) and last-failed ones
    last.
 3. Labels a failed entry `Name — last check failed` in both the model and
@@ -66,6 +67,30 @@ Probe again before adding an id — per-model pool health is uneven and changes.
    `gemini-3.1-flash-lite`, then `gemini-2.5-flash-lite`, then any Gemini, then
    the first usable model. A saved selection is kept when it is still in the
    list.
+
+## Hiding unhealthy ids
+
+`UNAVAILABLE_WEBSITE_MODEL_IDS` in `server/src/modelIds.ts` removes ids whose
+backing pool has no healthy account. `includeVerifiedWebsiteModels()` filters
+them out, and both catalog fallbacks filter `MODEL_CATALOG` with
+`isUnavailableWebsiteModel()`, so gateway-offline mode cannot reintroduce them.
+
+Full probe on 2026-11-03: **35 listed ids, two attempts each**, real
+`/v1/chat/completions` calls through the bridge.
+
+| Result | Count | Ids |
+|---|---:|---|
+| `200` | 19 | all 14 Claude ids, `gemini-3.1-flash-lite`, `gemini-3.1-flash-image`, `gemini-3.5-flash-lite`, `gemini-3.8-flash-high`, `gpt-oss-120b-medium` |
+| `503 All accounts failed or unhealthy` | 16 | `gemini-3-flash`, `gemini-3.1-pro-high/low`, `gemini-3.5-flash-high/low/medium`, `gemini-3.6-flash`, `gemini-3.6-flash-high/low/medium/tiered`, `gemini-3.7-flash`, `gemini-3.7-flash-high/low/medium/tiered` |
+
+The 16 are hidden from `/api/models` and `/api/public/models` only. `/v1/models`
+still returns all 28 core ids, so API clients that hardcode a hidden id keep
+working and can be used to re-test it.
+
+Re-promotion procedure: probe the id directly first —
+`curl -H "Authorization: Bearer $KEY" .../v1/chat/completions -d '{"model":"ID",...}'` —
+and delete it from `UNAVAILABLE_WEBSITE_MODEL_IDS` only after it answers `200`
+twice. The set is a snapshot, not a permanent property of the model.
 
 ## Dubbing is unaffected
 
@@ -81,8 +106,10 @@ so a Claude id on that route fails with `502 upstream_unavailable`
 
 | Case | Asserts |
 |---|---|
-| website list adds verified ids | live order preserved, every alias present once, no duplicate ids, excluded aliases absent |
+| website list adds verified ids | usable live order preserved, every alias present once, no duplicate ids, excluded aliases absent |
+| website list drops unhealthy core ids | hidden ids never appear, healthy ids survive |
+| hiding uses the canonical id | tiered aliases of hidden families are hidden, 3.8 high/low stay visible |
 | retired tiered id | rewritten to `gemini-3.8-flash-high`, appears once, `tiered` never leaks |
 | empty gateway list | returns the verified ids in declaration order |
 
-Full suite: 111/111 (`pnpm --dir server test`).
+Full suite: 113/113 (`pnpm --dir server test`).

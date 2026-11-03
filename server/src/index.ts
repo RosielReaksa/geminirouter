@@ -25,6 +25,7 @@ import {
   canonicalModelId,
   canonicalizeModelEntries,
   includeVerifiedWebsiteModels,
+  isUnavailableWebsiteModel,
 } from './modelIds.js';
 import { mapCoreTrafficItems as mapCoreTrafficItemsFromCore } from './trafficMapping.js';
 import { AccountTester, type AccountTestResult } from './accountTester.js';
@@ -409,13 +410,15 @@ export async function createServer(): Promise<{
     return {
       source: 'catalog',
       online: false,
-      models: MODEL_CATALOG.map((m) => ({
-        id: m.id,
-        name: m.name,
-        provider: m.provider,
-        contextLength: m.contextLength,
-        maxOutputTokens: m.maxOutputTokens,
-      })),
+      models: MODEL_CATALOG
+        .filter((m) => !isUnavailableWebsiteModel(m.id))
+        .map((m) => ({
+          id: m.id,
+          name: m.name,
+          provider: m.provider,
+          contextLength: m.contextLength,
+          maxOutputTokens: m.maxOutputTokens,
+        })),
     };
   });
 
@@ -1812,12 +1815,14 @@ export async function createServer(): Promise<{
       source: 'catalog',
       gatewayOnline: false,
       gatewayPort,
-      models: MODEL_CATALOG.map((m) => ({
-        ...m,
-        live: false,
-        availability: store.getModelTest(m.id),
-        availabilityHistory: availabilityHistory[m.id] ?? emptyModelAvailabilityHistory(),
-      })),
+      models: MODEL_CATALOG
+        .filter((m) => !isUnavailableWebsiteModel(m.id))
+        .map((m) => ({
+          ...m,
+          live: false,
+          availability: store.getModelTest(m.id),
+          availabilityHistory: availabilityHistory[m.id] ?? emptyModelAvailabilityHistory(),
+        })),
     };
   });
 

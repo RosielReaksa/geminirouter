@@ -80,10 +80,49 @@ export const VERIFIED_WEBSITE_MODEL_IDS: readonly string[] = [
 ];
 
 /**
- * Merge the core's live listing with the verified website aliases. Core order is
- * preserved, aliases are appended, retired ids are rewritten and duplicates
- * collapse, so the website dropdown and the Models page show one canonical list.
+ * Model ids that the website must not offer right now.
+ *
+ * Every id here was probed twice against the live bridge and answered
+ * `503 All accounts failed or unhealthy` on both attempts while the other
+ * models served normal chat completions. They are core-advertised ids whose
+ * backing pool has no healthy account, so listing them only produces a failing
+ * dropdown entry.
+ *
+ * This is a probe-derived snapshot, not a permanent fact: re-probe before
+ * removing an id from the set, and delete it from the set once it answers 200
+ * again. `/v1/models` is unaffected, so API clients still see the core list.
+ */
+export const UNAVAILABLE_WEBSITE_MODEL_IDS: ReadonlySet<string> = new Set([
+  'gemini-3-flash',
+  'gemini-3.1-pro-high',
+  'gemini-3.1-pro-low',
+  'gemini-3.5-flash-high',
+  'gemini-3.5-flash-low',
+  'gemini-3.5-flash-medium',
+  'gemini-3.6-flash',
+  'gemini-3.6-flash-high',
+  'gemini-3.6-flash-low',
+  'gemini-3.6-flash-medium',
+  'gemini-3.6-flash-tiered',
+  'gemini-3.7-flash',
+  'gemini-3.7-flash-high',
+  'gemini-3.7-flash-low',
+  'gemini-3.7-flash-medium',
+  'gemini-3.7-flash-tiered',
+]);
+
+/** True when the website should hide this id (canonical form is checked). */
+export function isUnavailableWebsiteModel(id: string): boolean {
+  return UNAVAILABLE_WEBSITE_MODEL_IDS.has(canonicalModelId(id));
+}
+
+/**
+ * Merge the core's live listing with the verified website aliases, then drop
+ * ids whose pool is currently unhealthy. Core order is preserved, aliases are
+ * appended, retired ids are rewritten and duplicates collapse, so the website
+ * dropdown and the Models page show one canonical list of working models.
  */
 export function includeVerifiedWebsiteModels(gatewayIds: string[]): string[] {
-  return canonicalizeModelIds([...gatewayIds, ...VERIFIED_WEBSITE_MODEL_IDS]);
+  return canonicalizeModelIds([...gatewayIds, ...VERIFIED_WEBSITE_MODEL_IDS])
+    .filter((id) => !isUnavailableWebsiteModel(id));
 }
