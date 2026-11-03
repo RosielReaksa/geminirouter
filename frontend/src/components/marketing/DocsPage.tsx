@@ -271,7 +271,7 @@ const response = await fetch("${origin}/v1/audio/dubbing", {
   body: form,
 });
 
-// Bare contract array: start, end, speaker_gender, pitch, vocal_timbre,
+// Bare contract array: start, end, speaker_gender, vocal_timbre,
 // character_role, original_transcript, khmer_dubbing.
 const segments = await response.json();
 for (const line of segments) {
@@ -285,7 +285,6 @@ for (const line of segments) {
     "start": "00:00.1",
     "end": "00:02.1",
     "speaker_gender": "female",
-    "pitch": "high",
     "vocal_timbre": "clear, friendly, welcoming voice",
     "character_role": "narrator",
     "original_transcript": "Hello and welcome to Duber.",

@@ -132,14 +132,12 @@ interface ChunkResult {
 }
 
 export type DubbingSpeakerGender = 'male' | 'female';
-export type DubbingPitch = 'low' | 'high';
 
 /** One timed dubbing line in the public output contract. */
 export interface DubbingSegment {
   start: string;
   end: string;
   speaker_gender: DubbingSpeakerGender;
-  pitch: DubbingPitch;
   vocal_timbre: string;
   character_role: string;
   original_transcript: string;
@@ -1758,7 +1756,6 @@ Translation rules:
 
 Voice rules:
 - speaker_gender must be male or female.
-- pitch is low for deep, older or authoritative voices and high for young or light voices.
 - character_role must stay the same for the same character across lines (for example "younger sister", "boss", "mother").
 - Mention whispering, shouting or crying in vocal_timbre when audible.`;
 
@@ -1769,7 +1766,6 @@ Every element must be an object with exactly these fields:
   "start": "MM:SS.S",
   "end": "MM:SS.S",
   "speaker_gender": "male" or "female",
-  "pitch": "low" or "high",
   "vocal_timbre": "short voice description",
   "character_role": "stable speaker role",
   "original_transcript": "verbatim original-language line",
@@ -1786,7 +1782,6 @@ const DUBBING_SEGMENT_PROPERTIES = {
   start: { type: 'STRING', description: 'Utterance start as MM:SS.S from the start of this audio part.' },
   end: { type: 'STRING', description: 'Utterance end as MM:SS.S from the start of this audio part.' },
   speaker_gender: { type: 'STRING', enum: ['male', 'female'] },
-  pitch: { type: 'STRING', enum: ['low', 'high'] },
   vocal_timbre: { type: 'STRING', description: 'Short description of the voice quality.' },
   character_role: { type: 'STRING', description: 'Stable role of the speaker in the scene.' },
   original_transcript: { type: 'STRING', description: 'Verbatim original-language line.' },
@@ -1961,15 +1956,6 @@ function normalizeSpeakerGender(value: string, khmer: string): DubbingSpeakerGen
   return 'male';
 }
 
-function normalizePitch(value: string, gender: DubbingSpeakerGender): DubbingPitch {
-  const normalized = value.trim().toLowerCase();
-  if (['low', 'deep', 'lower', '低', '低沉', '低音'].includes(normalized)) return 'low';
-  if (['high', 'higher', '高', '高音', '尖'].includes(normalized)) return 'high';
-  if (normalized.includes('deep') || normalized.includes('low')) return 'low';
-  if (normalized.includes('high')) return 'high';
-  return gender === 'female' ? 'high' : 'low';
-}
-
 /**
  * Validate one model segment, clamp its timing to the chunk, and shift it onto
  * the absolute recording timeline. Segments without a Khmer line are dropped.
@@ -2015,7 +2001,6 @@ export function normalizeDubbingSegment(
     firstString(raw, ['speaker_gender', 'speakerGender', 'gender', 'sex']),
     khmer,
   );
-  const pitch = normalizePitch(firstString(raw, ['pitch', 'voice_pitch', 'voicePitch']), gender);
   const timbre = firstString(raw, ['vocal_timbre', 'vocalTimbre', 'timbre', 'voice', 'voice_type', 'voiceType']);
   const role = firstString(raw, ['character_role', 'characterRole', 'role', 'speaker', 'character']);
 
@@ -2025,7 +2010,6 @@ export function normalizeDubbingSegment(
     start: formatDubbingTimestamp(startSeconds),
     end: formatDubbingTimestamp(endSeconds),
     speaker_gender: gender,
-    pitch,
     vocal_timbre: timbre || (gender === 'female' ? 'female voice' : 'male voice'),
     character_role: role,
     original_transcript: original,

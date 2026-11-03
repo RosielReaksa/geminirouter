@@ -90,7 +90,6 @@ function defaultDubbingReply(index: number): string {
       start,
       end,
       speaker_gender: 'female',
-      pitch: 'high',
       vocal_timbre: 'young and bright',
       character_role: 'younger sister',
       original_transcript: `小梨说第 ${index} 段`,
@@ -665,7 +664,6 @@ test('dubbing segments are clamped, defaulted and shifted to absolute time', () 
       start: '00:01.0',
       end: '00:04.0',
       speaker_gender: '女',
-      pitch: '高',
       vocal_timbre: 'bright',
       character_role: '小梨',
       original_transcript: '你来了',
@@ -680,7 +678,6 @@ test('dubbing segments are clamped, defaulted and shifted to absolute time', () 
   assert.equal(shifted.startSeconds, 61);
   assert.equal(shifted.endSeconds, 64);
   assert.equal(shifted.speaker_gender, 'female');
-  assert.equal(shifted.pitch, 'high');
 
   const clamped = normalizeDubbingSegment(
     { start: '00:50.0', end: '00:70.0', khmer_dubbing: 'បាទ' },
@@ -689,7 +686,6 @@ test('dubbing segments are clamped, defaulted and shifted to absolute time', () 
   assert.ok(clamped);
   assert.equal(clamped.end, '01:00.0');
   assert.equal(clamped.speaker_gender, 'male');
-  assert.equal(clamped.pitch, 'low');
 
   const inferredFemale = normalizeDubbingSegment(
     { start: '00:00.0', end: '00:01.0', khmer_dubbing: 'ចាស ខ្ញុំទៅហើយ' },
@@ -779,7 +775,6 @@ test(
         'end',
         'khmer_dubbing',
         'original_transcript',
-        'pitch',
         'speaker_gender',
         'start',
         'vocal_timbre',
@@ -788,7 +783,6 @@ test(
     assert.equal(first.start, '00:01.0');
     assert.equal(first.end, '00:04.5');
     assert.equal(first.speaker_gender, 'female');
-    assert.equal(first.pitch, 'high');
     assert.equal(first.character_role, 'younger sister');
     assert.match(first.khmer_dubbing, /ប្អូនស្រី/);
 

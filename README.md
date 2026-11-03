@@ -18,7 +18,7 @@ task or target language. The endpoint also accepts up to 2 hours per request for
 large files; the website can split into 10–20 minute windows for faster
 responses. For Chinese→Khmer timed dubbing, `POST /v1/audio/dubbing` chunks the
 recording, enforces the JSON segment contract, and returns absolute-time
-segments with gender, pitch, timbre and speaker role.
+segments with gender, timbre and speaker role.
 See the [audio/video API guide](docs/MEDIA_API.md) for request examples, size
 limits, and current output limitations.
 

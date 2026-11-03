@@ -307,7 +307,6 @@ Each segment has exactly these fields:
   "start": "00:12.4",
   "end": "00:16.8",
   "speaker_gender": "female",
-  "pitch": "high",
   "vocal_timbre": "young and bright",
   "character_role": "younger sister",
   "original_transcript": "你来了",
@@ -329,7 +328,7 @@ The default `json` response wraps the merged segments with metadata:
   "chunk_seconds": 300,
   "segment_count": 284,
   "segments": [
-    { "start": "00:12.4", "end": "00:16.8", "speaker_gender": "female", "pitch": "high",
+    { "start": "00:12.4", "end": "00:16.8", "speaker_gender": "female",
       "vocal_timbre": "young and bright", "character_role": "younger sister",
       "original_transcript": "你来了", "khmer_dubbing": "អ្នកមកហើយ ចាស" }
   ],
