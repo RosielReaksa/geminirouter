@@ -1,6 +1,7 @@
 import axios from 'axios';
 import type { CoreClient } from './coreClient.js';
 import type { LocalStateStore, GoogleAccount, ModelAvailabilityResult } from './store.js';
+import { canonicalModelId, canonicalizeModelIds } from './modelIds.js';
 
 export interface AccountTestResult {
   accountId: string;
@@ -85,11 +86,12 @@ export class AccountTester {
    */
   async testAndRefreshAccount(
     account: GoogleAccount,
-    model: string = 'gemini-3.8-flash-low',
+    model: string = 'gemini-3.8-flash-high',
     refreshQuota = true,
   ): Promise<AccountTestResult> {
     const { port, apiKey } = this.resolveGateway();
     const startedAt = Date.now();
+    const canonicalModel = canonicalModelId(model);
 
     let ok = false;
     let requiresValidation = false;
@@ -102,7 +104,7 @@ export class AccountTester {
       const response = await axios.post(
         `http://127.0.0.1:${port}/v1/chat/completions`,
         {
-          model,
+          model: canonicalModel,
           max_tokens: 16,
           messages: [{ role: 'user', content: 'Reply: ok' }],
         },
@@ -195,7 +197,7 @@ export class AccountTester {
       ok,
       requiresValidation,
       validationUrl: freshValidationUrl,
-      model,
+      model: canonicalModel,
       latencyMs,
       httpStatus,
       sample,
@@ -256,7 +258,7 @@ export class AccountTester {
   /**
    * Test and refresh all accounts in the pool sequentially.
    */
-  async testAndRefreshAll(model: string = 'gemini-3.8-flash-low'): Promise<AccountTestResult[]> {
+  async testAndRefreshAll(model: string = 'gemini-3.8-flash-high'): Promise<AccountTestResult[]> {
     const accounts = this.store.getAccounts();
     const results: AccountTestResult[] = [];
 
@@ -287,11 +289,11 @@ export class AccountTester {
       timeout: 10000,
       headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
     });
-    const models: string[] = [...new Set<string>(
+    const models: string[] = canonicalizeModelIds(
       (response.data?.data || [])
         .map((item: any) => item?.id)
         .filter((id: unknown): id is string => typeof id === 'string' && id.trim().length > 0),
-    )];
+    );
 
     for (const model of models) {
       const results: AccountTestResult[] = [];

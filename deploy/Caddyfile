@@ -71,6 +71,26 @@
         }
     }
 
+    # The model listing is answered by the bridge so retired aliases (for
+    # example gemini-3.8-flash-tiered) never appear in a public response.
+    @models {
+        path /v1/models
+    }
+
+    handle @models {
+        reverse_proxy 127.0.0.1:3000 {
+            header_up Host {upstream_hostport}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+
+            transport http {
+                response_header_timeout 60s
+                read_timeout 60s
+            }
+        }
+    }
+
     @api {
         path /v1/*
     }

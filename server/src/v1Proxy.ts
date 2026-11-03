@@ -2,6 +2,7 @@ import http from 'node:http';
 import type { FastifyRequest, FastifyReply } from 'fastify';
 import type { ConcurrencyLeaseManager } from './leaseManager.js';
 import type { LocalStateStore, GoogleAccount } from './store.js';
+import { canonicalModelId } from './modelIds.js';
 
 export interface V1ProxyOptions {
   leaseManager: ConcurrencyLeaseManager;
@@ -40,6 +41,26 @@ function resolveServedAccount(
   return { ...leasedAccount, id: servedByAccountId, email: servedByAccountId };
 }
 
+/**
+ * Rewrite a retired model id inside a Gemini-native path
+ * (`/v1beta/models/<id>:generateContent`) to the id the gateway exposes.
+ */
+function canonicalizeModelPath(url: string): string {
+  return url.replace(
+    /(\/(?:v1|v1beta)\/models\/)([^/:?]+)/,
+    (match, prefix: string, encodedId: string) => {
+      let id = encodedId;
+      try {
+        id = decodeURIComponent(encodedId);
+      } catch {
+        // Keep the raw segment when it is not valid URL encoding.
+      }
+      const canonical = canonicalModelId(id);
+      return canonical === id ? match : `${prefix}${encodeURIComponent(canonical)}`;
+    }
+  );
+}
+
 export async function handleV1ProxyRequest(
   request: FastifyRequest,
   reply: FastifyReply,
@@ -52,20 +73,25 @@ export async function handleV1ProxyRequest(
   // Extract model name from body if available
   let requestedModel: string | undefined;
   let rawBodyBuffer: Buffer | null = null;
+  let bodyIsJson = false;
 
   if (request.body) {
     if (Buffer.isBuffer(request.body)) {
       rawBodyBuffer = request.body;
       try {
         const parsed = JSON.parse(rawBodyBuffer.toString('utf8'));
-        if (parsed && typeof parsed.model === 'string') {
-          requestedModel = parsed.model;
+        if (parsed && typeof parsed === 'object') {
+          bodyIsJson = true;
+          if (typeof parsed.model === 'string') {
+            requestedModel = parsed.model;
+          }
         }
       } catch {
         // ignore non-json
       }
     } else if (typeof request.body === 'object') {
       requestedModel = (request.body as any).model;
+      bodyIsJson = true;
       try {
         rawBodyBuffer = Buffer.from(JSON.stringify(request.body), 'utf8');
       } catch {
@@ -75,8 +101,11 @@ export async function handleV1ProxyRequest(
       rawBodyBuffer = Buffer.from(request.body, 'utf8');
       try {
         const parsed = JSON.parse(request.body);
-        if (parsed && typeof parsed.model === 'string') {
-          requestedModel = parsed.model;
+        if (parsed && typeof parsed === 'object') {
+          bodyIsJson = true;
+          if (typeof parsed.model === 'string') {
+            requestedModel = parsed.model;
+          }
         }
       } catch {
         // ignore
@@ -85,7 +114,7 @@ export async function handleV1ProxyRequest(
   }
 
   // Gemini-native API routes carry the model in the path, not in a body field:
-  //   /v1beta/models/gemini-3.8-flash-tiered:generateContent
+  //   /v1beta/models/gemini-3.8-flash-high:generateContent
   // Without this, every /v1beta request would lease with no model, which would
   // make quota checks use the wrong family and cooldowns account-wide.
   if (!requestedModel) {
@@ -97,6 +126,29 @@ export async function handleV1ProxyRequest(
         requestedModel = decodeURIComponent(match[1]);
       } catch {
         requestedModel = match[1];
+      }
+    }
+  }
+
+  // The core still accepts retired aliases for the same model. Canonicalise
+  // the lease, the forwarded path, and the JSON body so clients, quota checks
+  // and traffic records all use the single exposed ID.
+  const rawRequestUrl = request.raw.url || request.url || '';
+  let forwardUrl = canonicalizeModelPath(rawRequestUrl);
+  if (requestedModel) {
+    const canonical = canonicalModelId(requestedModel);
+    if (canonical !== requestedModel) {
+      requestedModel = canonical;
+      if (rawBodyBuffer && bodyIsJson) {
+        try {
+          const parsed = JSON.parse(rawBodyBuffer.toString('utf8'));
+          if (parsed && typeof parsed === 'object' && 'model' in parsed) {
+            parsed.model = canonical;
+            rawBodyBuffer = Buffer.from(JSON.stringify(parsed), 'utf8');
+          }
+        } catch {
+          // Keep the original body if it stopped being valid JSON.
+        }
       }
     }
   }
@@ -180,7 +232,7 @@ export async function handleV1ProxyRequest(
           {
             hostname: '127.0.0.1',
             port: gatewayPort,
-            path: request.raw.url || request.url,
+            path: forwardUrl,
             method: request.method,
             headers: forwardHeaders,
           },

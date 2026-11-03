@@ -60,7 +60,7 @@ function groups(options: {
 }
 
 test('model family distinguishes Gemini from Claude/GPT models', () => {
-  assert.equal(quotaFamilyForModel('gemini-3.8-flash-tiered'), 'gemini');
+  assert.equal(quotaFamilyForModel('gemini-3.8-flash-high'), 'gemini');
   assert.equal(quotaFamilyForModel('gemini-3.1-flash-image'), 'gemini');
   assert.equal(quotaFamilyForModel('claude-opus-4-6-thinking'), 'claude-gpt');
   assert.equal(quotaFamilyForModel('gpt-oss-120b-medium'), 'claude-gpt');
@@ -73,7 +73,7 @@ test('an exhausted Gemini window blocks Gemini but not Claude/GPT', () => {
     quotaGroups: groups({ geminiWeekly: 0 }),
   });
 
-  const gemini = findQuotaExhaustion(acc, 'gemini-3.8-flash-tiered');
+  const gemini = findQuotaExhaustion(acc, 'gemini-3.8-flash-high');
   assert.equal(gemini.exhausted, true);
   assert.equal(gemini.bucket, 'gemini-weekly');
   assert.equal(gemini.resetAt, FUTURE);
@@ -146,7 +146,7 @@ test('remaining percent uses the limiting bucket in the model family', () => {
     id: 'acc-pct',
     quotaGroups: groups({ geminiWeekly: 0.25, gemini5h: 1 }),
   });
-  assert.equal(remainingQuotaPercent(acc, 'gemini-3.8-flash-tiered'), 25);
+  assert.equal(remainingQuotaPercent(acc, 'gemini-3.8-flash-high'), 25);
   assert.equal(remainingQuotaPercent(acc, 'claude-opus-4-6-thinking'), 100);
 });
 
@@ -162,7 +162,7 @@ test('lease selection skips an exhausted account and picks a healthy one', async
   const manager = new ConcurrencyLeaseManager({ maxConcurrentRequestsPerAccount: 10 });
 
   const lease = await manager.acquireLease([exhausted, healthy], {
-    model: 'gemini-3.8-flash-tiered',
+    model: 'gemini-3.8-flash-high',
   });
   assert.ok(lease);
   assert.equal(lease.account.id, 'acc-healthy');
@@ -180,7 +180,7 @@ test('lease selection reuses an account once its reset time passes', async () =>
   });
 
   const lease = await manager.acquireLease([reset], {
-    model: 'gemini-3.8-flash-tiered',
+    model: 'gemini-3.8-flash-high',
   });
   assert.ok(lease, 'a reset window must return the account to rotation');
   assert.equal(lease.account.id, 'acc-rolled-over');
@@ -198,7 +198,7 @@ test('lease selection refuses an exhausted pool and still allows Claude', async 
   });
 
   const gemini = await manager.acquireLease([exhausted], {
-    model: 'gemini-3.8-flash-tiered',
+    model: 'gemini-3.8-flash-high',
   });
   assert.equal(gemini, null, 'an exhausted pool must not be used');
 
@@ -221,7 +221,7 @@ test('validation-blocked accounts are never selected', async () => {
   });
 
   const lease = await manager.acquireLease([accountNeedingVerification], {
-    model: 'gemini-3.8-flash-tiered',
+    model: 'gemini-3.8-flash-high',
   });
   assert.equal(lease, null);
 });

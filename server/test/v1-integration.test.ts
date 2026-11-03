@@ -41,6 +41,8 @@ const { createServer } = await import('../src/index.js');
 type Mode = 'slow' | 'failover' | 'stream-break' | 'misdirect' | 'serve-other';
 let mode: Mode = 'slow';
 let hits: Record<string, number> = {};
+let lastUpstreamBody = '';
+let lastModelsAuthorization: string | undefined;
 let upstreamSocketsClosed = 0;
 // Account ids the fake core knows about, in selection order.
 let corePool: string[] = [];
@@ -49,6 +51,23 @@ const coreRateLimited = new Set<string>();
 const totalHits = () => Object.values(hits).reduce((a, b) => a + b, 0);
 
 const upstream = http.createServer((req, res) => {
+  // The bridge answers GET /v1/models itself and canonicalises the core's list.
+  if (req.method === 'GET' && (req.url || '').split('?')[0] === '/v1/models') {
+    const auth = req.headers.authorization;
+    lastModelsAuthorization = typeof auth === 'string' ? auth : undefined;
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(
+      JSON.stringify({
+        object: 'list',
+        data: [
+          { id: 'gemini-3.8-flash-tiered', object: 'model', owned_by: 'antigravity' },
+          { id: 'gemini-3.1-flash-lite', object: 'model', owned_by: 'antigravity' },
+        ],
+      }),
+    );
+    return;
+  }
+
   // Honour an explicit pin when present (single-account test path), else pick
   // the first pool account the fake core has not rate-limited.
   const pinned = req.headers['x-account-id'];
@@ -62,6 +81,7 @@ const upstream = http.createServer((req, res) => {
   let body = '';
   req.on('data', (c) => (body += c));
   req.on('end', () => {
+    lastUpstreamBody = body;
     if (mode === 'serve-other') {
       // Success, but served by a different account than the bridge leased.
       // The traffic record must name the account that actually served it.
@@ -224,6 +244,61 @@ test('regression: 200 after 300 ms reaches the client (request.raw close bug)', 
   assert.equal(body.choices[0].message.content, 'pong');
   assert.ok(body.served_by, 'upstream must have received the request');
   assert.equal(leaseManager.getTotalInFlight(), 0, 'lease must be released after completion');
+});
+
+test('GET /v1/models replaces the retired alias with the canonical model id', async () => {
+  const res = await fetch(`http://127.0.0.1:${bridgePort}/v1/models`);
+
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  const ids = body.data.map((model: any) => model.id);
+
+  assert.ok(ids.includes('gemini-3.8-flash-high'), 'canonical id must be listed');
+  assert.ok(!ids.includes('gemini-3.8-flash-tiered'), 'retired alias must not be listed');
+  assert.equal(new Set(ids).size, ids.length, 'the list must not contain duplicates');
+});
+
+test('GET /v1/models relays caller credentials and never mints its own', async () => {
+  lastModelsAuthorization = 'unset';
+
+  const anonymous = await fetch(`http://127.0.0.1:${bridgePort}/v1/models`);
+  assert.equal(anonymous.status, 200);
+  assert.equal(
+    lastModelsAuthorization,
+    undefined,
+    'the bridge must not inject its gateway key for an unauthenticated caller',
+  );
+
+  const authenticated = await fetch(`http://127.0.0.1:${bridgePort}/v1/models`, {
+    headers: { Authorization: 'Bearer client-supplied-key' },
+  });
+  assert.equal(authenticated.status, 200);
+  assert.equal(lastModelsAuthorization, 'Bearer client-supplied-key');
+});
+
+test('a retired model alias is forwarded to the core as the canonical id', async () => {
+  mode = 'slow';
+  setPool(makeAccounts('alias', 1));
+  hits = {};
+  lastUpstreamBody = '';
+  const before = store.getTraffic().length;
+
+  const res = await fetch(`http://127.0.0.1:${bridgePort}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: 'gemini-3.8-flash-tiered',
+      messages: [{ role: 'user', content: 'hi' }],
+    }),
+  });
+
+  assert.equal(res.status, 200);
+  assert.equal(JSON.parse(lastUpstreamBody).model, 'gemini-3.8-flash-high');
+
+  const records = store.getTraffic();
+  assert.equal(records.length, before + 1);
+  assert.equal(records[0].modelRequested, 'gemini-3.8-flash-high');
+  assert.equal(records[0].modelRouted, 'gemini-3.8-flash-high');
 });
 
 test('account A 429 -> client gets 200 from account B; A enters cooldown', async () => {

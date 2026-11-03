@@ -5,7 +5,7 @@ import { isPublicRoute } from '../src/auth.js';
 test('API proxy routes bypass the dashboard session check', () => {
   assert.equal(isPublicRoute('/v1/chat/completions'), true);
   assert.equal(
-    isPublicRoute('/v1beta/models/gemini-3.8-flash-tiered:generateContent'),
+    isPublicRoute('/v1beta/models/gemini-3.8-flash-high:generateContent'),
     true,
   );
   assert.equal(isPublicRoute('/v1beta/models/claude-opus-4-6-thinking:generateContent'), true);

@@ -21,6 +21,7 @@ import { derivePoolState, bridgeToCoreProxy, coreProxyToBridge } from './pool-st
 import { readCoreProxyConfig, applyCoreProxyConfig } from './coreConfig.js';
 import { ConcurrencyLeaseManager } from './leaseManager.js';
 import { handleV1ProxyRequest } from './v1Proxy.js';
+import { canonicalModelId, canonicalizeModelEntries, canonicalizeModelIds } from './modelIds.js';
 import { AccountTester, type AccountTestResult } from './accountTester.js';
 import {
   isModelFailureText,
@@ -231,6 +232,51 @@ export async function createServer(): Promise<{
     });
   };
 
+  // GET /v1/models is answered by the bridge, not proxied verbatim, because the
+  // core still advertises retired aliases (for example
+  // gemini-3.8-flash-tiered). The list exposes only canonical IDs.
+  app.get('/v1/models', async (request, reply) => {
+    const { port } = resolveGateway();
+    // Forward only the caller's own credentials. The core decides whether the
+    // caller may list models; the bridge must never mint access with its own
+    // gateway key (that would make an authenticated endpoint public).
+    const headers: Record<string, string> = { Accept: 'application/json' };
+    const authorization = request.headers.authorization;
+    if (typeof authorization === 'string' && authorization) {
+      headers.Authorization = authorization;
+    }
+    const apiKeyHeader = request.headers['x-api-key'];
+    if (typeof apiKeyHeader === 'string' && apiKeyHeader) {
+      headers['x-api-key'] = apiKeyHeader;
+    }
+
+    try {
+      const upstream = await axios.get(`http://127.0.0.1:${port}/v1/models`, {
+        headers,
+        timeout: 5000,
+        validateStatus: () => true,
+      });
+      const data = upstream.data;
+      if (data && Array.isArray(data.data)) {
+        return reply.code(upstream.status).send({
+          ...data,
+          data: canonicalizeModelEntries(data.data),
+        });
+      }
+      // Non-standard upstream shape: pass it through unchanged.
+      return reply.code(upstream.status).send(data);
+    } catch (error: any) {
+      request.log.warn({ err: error?.message }, 'models: core listing unavailable');
+      return reply.code(503).send({
+        error: {
+          message: 'The model list is temporarily unavailable.',
+          type: 'upstream_unavailable',
+          code: 'model_list_unavailable',
+        },
+      });
+    }
+  });
+
   app.all('/v1/*', { bodyLimit: V1_REQUEST_BODY_LIMIT_BYTES }, proxyApiRequest);
   app.all('/v1beta/*', { bodyLimit: V1_REQUEST_BODY_LIMIT_BYTES }, proxyApiRequest);
 
@@ -329,7 +375,7 @@ export async function createServer(): Promise<{
       });
       const ids: string[] = (res.data?.data || []).map((m: any) => m.id).filter(Boolean);
       if (ids.length > 0) {
-        const websiteIds = includeWebsiteModelAliases(ids);
+        const websiteIds = canonicalizeModelIds(includeWebsiteModelAliases(ids));
         return {
           source: 'gateway',
           online: true,
@@ -445,8 +491,8 @@ export async function createServer(): Promise<{
       const mapped: GoogleAccount[] = coreViews.map((cv: any) => {
         const quotas = cv.quota?.models
           ? Object.entries(cv.quota.models).map(([modelId, q]: [string, any]) => ({
-              modelId,
-              modelName: q.display_name || modelId,
+              modelId: canonicalModelId(modelId),
+              modelName: canonicalModelId(q.display_name || modelId),
               requestsIn5h: Math.round((1 - (q.percentage || 0) / 100) * 50),
               limitIn5h: 50,
               resetTime5h: q.resetTime || 'in 3h',
@@ -490,7 +536,7 @@ export async function createServer(): Promise<{
         const models5h = Object.entries(coreModels)
           .filter(([, q]: [string, any]) => typeof q?.percentage === 'number')
           .map(([id, q]: [string, any]) => ({
-            name: q.display_name || id,
+            name: canonicalModelId(q.display_name || id),
             reset: q.resetTime || '',
             percentage: Math.round(q.percentage),
           }))
@@ -1765,7 +1811,7 @@ export async function createServer(): Promise<{
       });
       const liveIds: Array<string> = (res.data?.data || []).map((m: any) => m.id).filter(Boolean);
       if (liveIds.length > 0) {
-        const websiteIds = includeWebsiteModelAliases(liveIds);
+        const websiteIds = canonicalizeModelIds(includeWebsiteModelAliases(liveIds));
         const models = websiteIds.map((id) => {
           const meta = MODEL_CATALOG.find((c) => c.id === id);
           const isClaude = id.includes('claude');
