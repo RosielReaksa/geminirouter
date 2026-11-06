@@ -479,7 +479,9 @@ export async function createServer(): Promise<{
       });
       const data = upstream.data;
       if (data && Array.isArray(data.data)) {
-        const models: any[] = canonicalizeModelEntries(data.data);
+        const models: any[] = canonicalizeModelEntries(data.data).filter(
+          (model: any) => typeof model?.id === 'string' && isGeminiModelId(model.id),
+        );
         // The two AI Studio models are served by the key pool, not the core.
         if (geminiApiPool.hasEnabledKeys()) {
           for (const id of GEMINI_API_MODELS) {
@@ -2337,22 +2339,6 @@ export async function createServer(): Promise<{
     { id: 'gemini-3.5-flash-lite', name: 'Gemini 3.5 Flash Lite', provider: 'Google Gemini', family: 'gemini', contextLength: 1048576, maxOutputTokens: 65535 },
     { id: 'gemini-3-pro-image', name: 'Gemini 3 Pro Image', provider: 'Google Gemini', family: 'gemini-image', contextLength: 1048576, maxOutputTokens: 65535 },
     { id: 'gemini-3.8-flash-high', name: 'Gemini 3.8 Flash High', provider: 'Google Gemini', family: 'gemini', contextLength: 1048576, maxOutputTokens: 65535 },
-    { id: 'claude-sonnet-4-5', name: 'Claude 4.5 Sonnet', provider: 'Anthropic Claude', family: 'claude', contextLength: 200000, maxOutputTokens: 65535 },
-    { id: 'claude-sonnet-4-5-thinking', name: 'Claude 4.5 Sonnet (Thinking)', provider: 'Anthropic Claude', family: 'claude', contextLength: 200000, maxOutputTokens: 65535 },
-    { id: 'claude-sonnet-4-6', name: 'Claude 4.6 Sonnet', provider: 'Anthropic Claude', family: 'claude', contextLength: 200000, maxOutputTokens: 65535 },
-    { id: 'claude-opus-4-5', name: 'Claude 4.5 Opus', provider: 'Anthropic Claude', family: 'claude', contextLength: 200000, maxOutputTokens: 65535 },
-    { id: 'claude-opus-4-5-thinking', name: 'Claude 4.5 Opus (Thinking)', provider: 'Anthropic Claude', family: 'claude', contextLength: 200000, maxOutputTokens: 65535 },
-    { id: 'claude-opus-4-6', name: 'Claude 4.6 Opus', provider: 'Anthropic Claude', family: 'claude', contextLength: 200000, maxOutputTokens: 65535 },
-    { id: 'claude-sonnet-4-6-thinking', name: 'Claude 4.6 Sonnet (Thinking)', provider: 'Anthropic Claude', family: 'claude', contextLength: 200000, maxOutputTokens: 65535 },
-    { id: 'claude-opus-4-6-thinking', name: 'Claude 4.6 Opus (Thinking)', provider: 'Anthropic Claude', family: 'claude', contextLength: 200000, maxOutputTokens: 65535 },
-    { id: 'claude-haiku-4-5-20251001', name: 'Claude 4.5 Haiku', provider: 'Anthropic Claude', family: 'claude', contextLength: 200000, maxOutputTokens: 65535 },
-    { id: 'claude-sonnet-5-5-high', name: 'Claude 5.5 Sonnet (High)', provider: 'Anthropic Claude', family: 'claude', contextLength: 200000, maxOutputTokens: 65535 },
-    { id: 'claude-sonnet-5-5-medium', name: 'Claude 5.5 Sonnet (Medium)', provider: 'Anthropic Claude', family: 'claude', contextLength: 200000, maxOutputTokens: 65535 },
-    { id: 'claude-sonnet-5-5-low', name: 'Claude 5.5 Sonnet (Low)', provider: 'Anthropic Claude', family: 'claude', contextLength: 200000, maxOutputTokens: 65535 },
-    { id: 'claude-opus-5-5-high', name: 'Claude 5.5 Opus (High)', provider: 'Anthropic Claude', family: 'claude', contextLength: 200000, maxOutputTokens: 65535 },
-    { id: 'claude-opus-5-5-medium', name: 'Claude 5.5 Opus (Medium)', provider: 'Anthropic Claude', family: 'claude', contextLength: 200000, maxOutputTokens: 65535 },
-    { id: 'claude-opus-5-5-low', name: 'Claude 5.5 Opus (Low)', provider: 'Anthropic Claude', family: 'claude', contextLength: 200000, maxOutputTokens: 65535 },
-    { id: 'gpt-oss-120b', name: 'GPT OSS 120B', provider: 'OpenAI-compatible', family: 'gpt-oss', contextLength: 131072, maxOutputTokens: 65535 },
   ];
 
   app.get('/api/models', async () => {
@@ -2372,14 +2358,12 @@ export async function createServer(): Promise<{
         const websiteIds = includeVerifiedWebsiteModels(liveIds).filter(isGeminiModelId);
         const models = websiteIds.map((id) => {
           const meta = MODEL_CATALOG.find((c) => c.id === id);
-          const isClaude = id.includes('claude');
-          const isGpt = id.includes('gpt') || id.includes('oss');
           return {
             id,
             name: meta?.name || id,
-            provider: meta?.provider || (isClaude ? 'Anthropic Claude' : isGpt ? 'OpenAI-compatible' : 'Google Gemini'),
-            family: meta?.family || (isClaude ? 'claude' : isGpt ? 'gpt-oss' : 'gemini'),
-            contextLength: meta?.contextLength || (isClaude ? 200000 : 1048576),
+            provider: 'Google Gemini',
+            family: meta?.family || 'gemini',
+            contextLength: meta?.contextLength || 1048576,
             maxOutputTokens: meta?.maxOutputTokens || 65535,
             live: liveIds.includes(id),
             availability: store.getModelTest(id),

@@ -62,6 +62,8 @@ const upstream = http.createServer((req, res) => {
         data: [
           { id: 'gemini-3.8-flash-tiered', object: 'model', owned_by: 'antigravity' },
           { id: 'gemini-3.1-flash-lite', object: 'model', owned_by: 'antigravity' },
+          { id: 'claude-opus-4-6-thinking', object: 'model', owned_by: 'antigravity' },
+          { id: 'gpt-oss-120b-medium', object: 'model', owned_by: 'antigravity' },
         ],
       }),
     );
@@ -255,7 +257,29 @@ test('GET /v1/models replaces the retired alias with the canonical model id', as
 
   assert.ok(ids.includes('gemini-3.8-flash-high'), 'canonical id must be listed');
   assert.ok(!ids.includes('gemini-3.8-flash-tiered'), 'retired alias must not be listed');
+  assert.equal(ids.some((id: string) => /^claude|^gpt/i.test(id)), false, 'non-Gemini models must not be listed');
   assert.equal(new Set(ids).size, ids.length, 'the list must not contain duplicates');
+});
+
+test('non-Gemini model ids are rejected before reaching the core', async () => {
+  mode = 'slow';
+  setPool(makeAccounts('reject', 1));
+  hits = {};
+
+  const res = await fetch(`http://127.0.0.1:${bridgePort}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: 'claude-sonnet-4-5',
+      messages: [{ role: 'user', content: 'hi' }],
+    }),
+  });
+
+  assert.equal(res.status, 400);
+  const body = await res.json();
+  assert.equal(body.error.code, 'model_not_available');
+  assert.match(body.error.message, /Gemini models only/i);
+  assert.deepEqual(hits, {}, 'the request must not consume an account or reach the core');
 });
 
 test('GET /v1/models relays caller credentials and never mints its own', async () => {

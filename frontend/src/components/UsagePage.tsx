@@ -2,8 +2,6 @@ import React, { useEffect, useRef, useState, useCallback } from 'react';
 import {
   BarChart3,
   Sparkles,
-  Bot,
-  Cpu,
   TrendingUp,
   TrendingDown,
   Minus,
@@ -38,7 +36,7 @@ interface ModelStats {
 }
 
 interface FamilyGroup {
-  key: 'gemini' | 'claude' | 'gpt';
+  key: 'gemini';
   label: string;
   tagline: string;
   icon: React.ElementType;
@@ -61,7 +59,7 @@ interface FamilyGroup {
 // ─── Capacity types ───────────────────────────────────────────────────────────
 
 interface FamilyCapacity {
-  family: 'gemini' | 'claude_gpt';
+  family: 'gemini';
   label: string;
   icon: React.ElementType;
   barColor: string;
@@ -88,37 +86,24 @@ interface FamilyCapacity {
 // Derive token capacity data from accounts list
 function deriveCapacity(accounts: GoogleAccount[]): FamilyCapacity[] {
   const geminiAccounts: FamilyCapacity['accountDetail'] = [];
-  const gpAccounts: FamilyCapacity['accountDetail'] = [];
 
   let geminiWeeklySum = 0, geminiWeeklyCount = 0;
   let gemini5hSum = 0, gemini5hCount = 0;
   let geminiTokensUsed = 0, geminiTokensLimit = 0;
   let geminiThrottled = 0;
 
-  let gpWeeklySum = 0, gpWeeklyCount = 0;
-  let gp5hSum = 0, gp5hCount = 0;
-  let gpTokensUsed = 0, gpTokensLimit = 0;
-  let gpThrottled = 0;
-
   for (const acc of accounts) {
     // Pull fractions from quotaGroups (the richest data source)
     const groups = acc.quotaGroups ?? [];
     let gWeekly: number | null = null, g5h: number | null = null;
-    let pWeekly: number | null = null, p5h: number | null = null;
 
     for (const grp of groups) {
       const name = (grp.displayName ?? '').toLowerCase();
-      const isGemini = name.includes('gemini');
-      const is3p = /claude|gpt|3p/.test(name);
+      if (!name.includes('gemini')) continue;
       for (const bucket of grp.buckets ?? []) {
         const frac = bucket.remainingFraction ?? 1;
-        if (isGemini) {
-          if (bucket.window === 'weekly') gWeekly = frac;
-          if (bucket.window === '5h') g5h = frac;
-        } else if (is3p) {
-          if (bucket.window === 'weekly') pWeekly = frac;
-          if (bucket.window === '5h') p5h = frac;
-        }
+        if (bucket.window === 'weekly') gWeekly = frac;
+        if (bucket.window === '5h') g5h = frac;
       }
     }
 
@@ -126,23 +111,13 @@ function deriveCapacity(accounts: GoogleAccount[]): FamilyCapacity[] {
     if (gWeekly !== null) { geminiWeeklySum += gWeekly; geminiWeeklyCount++; }
     if (g5h !== null) { gemini5hSum += g5h; gemini5hCount++; }
 
-    // Accumulate 3p (Claude/GPT)
-    if (pWeekly !== null) { gpWeeklySum += pWeekly; gpWeeklyCount++; }
-    if (p5h !== null) { gp5hSum += p5h; gp5hCount++; }
-
     // Token sums from quotas[] (tokensIn7d / limitIn7d)
     for (const q of acc.quotas ?? []) {
       const mid = (q.modelId ?? '').toLowerCase();
-      const isGeminiModel = !/(claude|gpt|oss|3p|sonnet|opus|haiku)/.test(mid);
-      if (isGeminiModel) {
-        geminiTokensUsed += q.tokensIn7d ?? 0;
-        geminiTokensLimit += q.limitIn7d ?? 0;
-        if (q.isThrottled) geminiThrottled++;
-      } else {
-        gpTokensUsed += q.tokensIn7d ?? 0;
-        gpTokensLimit += q.limitIn7d ?? 0;
-        if (q.isThrottled) gpThrottled++;
-      }
+      if (/(claude|gpt|oss|3p|sonnet|opus|haiku)/.test(mid)) continue;
+      geminiTokensUsed += q.tokensIn7d ?? 0;
+      geminiTokensLimit += q.limitIn7d ?? 0;
+      if (q.isThrottled) geminiThrottled++;
     }
 
     // Per-account detail rows
@@ -155,60 +130,27 @@ function deriveCapacity(accounts: GoogleAccount[]): FamilyCapacity[] {
         fiveHourFraction: g5h ?? 1,
       });
     }
-    if (pWeekly !== null || p5h !== null) {
-      gpAccounts.push({
-        email: acc.email,
-        name: acc.name,
-        status: acc.status,
-        weeklyFraction: pWeekly ?? 1,
-        fiveHourFraction: p5h ?? 1,
-      });
-    }
   }
 
-  const result: FamilyCapacity[] = [];
+  if (geminiWeeklyCount === 0 && geminiTokensLimit === 0) return [];
 
-  if (geminiWeeklyCount > 0 || geminiTokensLimit > 0) {
-    result.push({
-      family: 'gemini',
-      label: 'Google Gemini',
-      icon: Sparkles,
-      barColor: '#3b82f6',
-      accentLight: '#eff6ff',
-      accentBorder: '#bfdbfe',
-      accentColor: '#1d4ed8',
-      weeklyRemainingFraction: geminiWeeklyCount > 0 ? geminiWeeklySum / geminiWeeklyCount : 1,
-      fiveHourRemainingFraction: gemini5hCount > 0 ? gemini5hSum / gemini5hCount : 1,
-      tokensUsed7d: geminiTokensUsed,
-      tokensLimit7d: geminiTokensLimit,
-      activeAccounts: geminiAccounts.filter((a) => a.status === 'active').length,
-      totalAccounts: geminiAccounts.length,
-      throttledCount: geminiThrottled,
-      accountDetail: geminiAccounts,
-    });
-  }
-
-  if (gpWeeklyCount > 0 || gpTokensLimit > 0) {
-    result.push({
-      family: 'claude_gpt',
-      label: 'Claude & GPT',
-      icon: Bot,
-      barColor: '#f97316',
-      accentLight: '#fff7ed',
-      accentBorder: '#fed7aa',
-      accentColor: '#c2410c',
-      weeklyRemainingFraction: gpWeeklyCount > 0 ? gpWeeklySum / gpWeeklyCount : 1,
-      fiveHourRemainingFraction: gp5hCount > 0 ? gp5hSum / gp5hCount : 1,
-      tokensUsed7d: gpTokensUsed,
-      tokensLimit7d: gpTokensLimit,
-      activeAccounts: gpAccounts.filter((a) => a.status === 'active').length,
-      totalAccounts: gpAccounts.length,
-      throttledCount: gpThrottled,
-      accountDetail: gpAccounts,
-    });
-  }
-
-  return result;
+  return [{
+    family: 'gemini',
+    label: 'Google Gemini',
+    icon: Sparkles,
+    barColor: '#3b82f6',
+    accentLight: '#eff6ff',
+    accentBorder: '#bfdbfe',
+    accentColor: '#1d4ed8',
+    weeklyRemainingFraction: geminiWeeklyCount > 0 ? geminiWeeklySum / geminiWeeklyCount : 1,
+    fiveHourRemainingFraction: gemini5hCount > 0 ? gemini5hSum / gemini5hCount : 1,
+    tokensUsed7d: geminiTokensUsed,
+    tokensLimit7d: geminiTokensLimit,
+    activeAccounts: geminiAccounts.filter((a) => a.status === 'active').length,
+    totalAccounts: geminiAccounts.length,
+    throttledCount: geminiThrottled,
+    accountDetail: geminiAccounts,
+  }];
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -236,20 +178,13 @@ const timeAgo = (ts: number | null): string => {
   return `${Math.floor(delta / 86400)}d ago`;
 };
 
-const modelFamily = (id: string): 'gemini' | 'claude' | 'gpt' => {
-  const lower = id.toLowerCase();
-  if (lower.includes('claude')) return 'claude';
-  if (lower.includes('gpt') || lower.includes('oss')) return 'gpt';
-  return 'gemini';
-};
+const isGeminiModel = (id: string): boolean => /^gemini([-.]|$)/i.test(id.trim());
 
 const shortModelName = (id: string): string =>
   id
     .replace(/^gemini-/, 'Gemini ')
-    .replace(/^claude-/, 'Claude ')
-    .replace(/^gpt-/, 'GPT ')
     .replace(/-(latest|exp|preview)(-\d+)?/gi, '')
-    .replace(/-(flash|pro|ultra|opus|sonnet|haiku|lite|high|low|medium|image|thinking)/gi, ' $1')
+    .replace(/-(flash|pro|ultra|lite|high|low|medium|image|thinking)/gi, ' $1')
     .replace(/-(\d)/g, ' $1')
     .replace(/\s+/g, ' ')
     .trim();
@@ -269,30 +204,6 @@ const FAMILY_META: Record<FamilyKey, Omit<FamilyGroup, 'models' | 'totalRequests
     badgeBg: '#dbeafe',
     badgeText: '#1e40af',
     barColor: '#3b82f6',
-  },
-  claude: {
-    key: 'claude',
-    label: 'Anthropic Claude',
-    tagline: 'Claude 3.x · Opus · Sonnet · Haiku',
-    icon: Bot,
-    accentColor: '#c2410c',
-    accentLight: '#fff7ed',
-    accentBorder: '#fed7aa',
-    badgeBg: '#ffedd5',
-    badgeText: '#9a3412',
-    barColor: '#f97316',
-  },
-  gpt: {
-    key: 'gpt',
-    label: 'OpenAI-compatible',
-    tagline: 'GPT-OSS and other compatible endpoints',
-    icon: Cpu,
-    accentColor: '#6d28d9',
-    accentLight: '#f5f3ff',
-    accentBorder: '#ddd6fe',
-    badgeBg: '#ede9fe',
-    badgeText: '#5b21b6',
-    barColor: '#8b5cf6',
   },
 };
 
@@ -316,28 +227,34 @@ function deriveGroups(records: TrafficRecord[]): FamilyGroup[] {
     byModel.set(id, e);
   }
 
-  const families: Record<FamilyKey, ModelStats[]> = { gemini: [], claude: [], gpt: [] };
+  const models: ModelStats[] = [];
   for (const [id, data] of byModel) {
-    const fk = modelFamily(id);
+    if (!isGeminiModel(id)) continue;
     const avg = data.latencyCount > 0 ? Math.round(data.latencyTotal / data.latencyCount) : 0;
     const sr = data.requests > 0 ? Math.round(((data.requests - data.errors) / data.requests) * 100) : 100;
-    families[fk].push({ id, requests: data.requests, tokens: data.tokens, cachedTokens: data.cachedTokens, errors: data.errors, avgLatencyMs: avg, successRate: sr, lastUsed: data.lastUsed });
+    models.push({ id, requests: data.requests, tokens: data.tokens, cachedTokens: data.cachedTokens, errors: data.errors, avgLatencyMs: avg, successRate: sr, lastUsed: data.lastUsed });
   }
-  for (const fk of Object.keys(families) as FamilyKey[]) families[fk].sort((a, b) => b.requests - a.requests);
+  if (models.length === 0) return [];
+  models.sort((a, b) => b.requests - a.requests);
 
-  return (Object.keys(FAMILY_META) as FamilyKey[])
-    .filter((fk) => families[fk].length > 0)
-    .map((fk) => {
-      const models = families[fk];
-      const totalRequests = models.reduce((s, m) => s + m.requests, 0);
-      const totalTokens = models.reduce((s, m) => s + m.tokens, 0);
-      const totalCachedTokens = models.reduce((s, m) => s + m.cachedTokens, 0);
-      const totalErrors = models.reduce((s, m) => s + m.errors, 0);
-      const lm = models.filter((m) => m.avgLatencyMs > 0);
-      const avgLatencyMs = lm.length > 0 ? Math.round(lm.reduce((s, m) => s + m.avgLatencyMs, 0) / lm.length) : 0;
-      const successRate = totalRequests > 0 ? Math.round(((totalRequests - totalErrors) / totalRequests) * 100) : 100;
-      return { ...FAMILY_META[fk], models, totalRequests, totalTokens, totalCachedTokens, totalErrors, avgLatencyMs, successRate };
-    });
+  const totalRequests = models.reduce((s, m) => s + m.requests, 0);
+  const totalTokens = models.reduce((s, m) => s + m.tokens, 0);
+  const totalCachedTokens = models.reduce((s, m) => s + m.cachedTokens, 0);
+  const totalErrors = models.reduce((s, m) => s + m.errors, 0);
+  const lm = models.filter((m) => m.avgLatencyMs > 0);
+  const avgLatencyMs = lm.length > 0 ? Math.round(lm.reduce((s, m) => s + m.avgLatencyMs, 0) / lm.length) : 0;
+  const successRate = totalRequests > 0 ? Math.round(((totalRequests - totalErrors) / totalRequests) * 100) : 100;
+
+  return [{
+    ...FAMILY_META.gemini,
+    models,
+    totalRequests,
+    totalTokens,
+    totalCachedTokens,
+    totalErrors,
+    avgLatencyMs,
+    successRate,
+  }];
 }
 
 // ─── Stat pill ────────────────────────────────────────────────────────────────

@@ -38,7 +38,7 @@ export const GatewayPage: React.FC<GatewayPageProps> = ({ config }) => {
   const snippets: Record<SdkTab, { title: string; code: string; note: string }> = {
     claude: {
       title: 'Claude Code CLI (~/.claude/settings.json)',
-      note: 'Drop into your Claude Code config to route Sonnet / Opus calls seamlessly to Gemini Pro & Flash models with high context windows.',
+      note: 'Drop into your Claude Code config to use Gemini Pro & Flash models with high context windows.',
       code: `{
   "env": {
     "ANTHROPIC_BASE_URL": "${v1Url}",
@@ -53,11 +53,7 @@ export const GatewayPage: React.FC<GatewayPageProps> = ({ config }) => {
       note: 'Configures Codex review & exec batches through geminirouter via OpenAI-compatible endpoints.',
       code: `model = "gemini-2.5-pro"
 api_base = "${v1Url}"
-api_key = "${config.masterApiKey}"
-
-[aliases]
-"gpt-4o" = "gemini-2.5-pro"
-"deepseek-v4.1-flash" = "gemini-2.5-flash"`,
+api_key = "${config.masterApiKey}"`,
     },
     curl: {
       title: 'Standard cURL (OpenAI Compatible API)',

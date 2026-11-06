@@ -2,7 +2,7 @@ import http from 'node:http';
 import type { FastifyRequest, FastifyReply } from 'fastify';
 import type { ConcurrencyLeaseManager } from './leaseManager.js';
 import type { LocalStateStore, GoogleAccount } from './store.js';
-import { canonicalModelId } from './modelIds.js';
+import { canonicalModelId, isGeminiModelId } from './modelIds.js';
 
 export interface V1ProxyOptions {
   leaseManager: ConcurrencyLeaseManager;
@@ -151,6 +151,20 @@ export async function handleV1ProxyRequest(
         }
       }
     }
+  }
+
+  // This gateway exposes Gemini models only. Claude, GPT and other third-party
+  // ids are rejected instead of being forwarded to the core, so a client cannot
+  // consume a model the website does not offer.
+  if (requestedModel && !isGeminiModelId(requestedModel)) {
+    return reply.code(400).send({
+      error: {
+        message: `Model '${requestedModel}' is not available. This gateway exposes Gemini models only.`,
+        type: 'invalid_request_error',
+        param: 'model',
+        code: 'model_not_available',
+      },
+    });
   }
 
   // Attempt to acquire lease across accounts pool
