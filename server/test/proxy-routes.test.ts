@@ -123,3 +123,16 @@ test('POST /api/proxy/status rejects a proxy outside the inventory', async () =>
   assert.equal(res.statusCode, 404);
   assert.match(res.json().error, /not found/i);
 });
+
+test('DELETE /api/accounts/:id accepts the empty JSON body the dashboard sends', async () => {
+  const res = await app.inject({
+    method: 'DELETE',
+    url: '/api/accounts/does-not-exist',
+    payload: {},
+  });
+  // Regression: Fastify rejects an empty body with content-type json, which made
+  // every Remove Account click fail before reaching the handler.
+  assert.equal(res.statusCode, 404);
+  assert.equal(res.json().success, false);
+  assert.match(res.json().error, /not found/i);
+});

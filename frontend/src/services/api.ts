@@ -70,15 +70,23 @@ export class ApiClient {
   ): Promise<{ response: Response; data: T | null }> {
     const controller = new AbortController();
     const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+    const method = (options?.method || 'GET').toUpperCase();
+    // Fastify rejects an empty body when Content-Type is application/json, and
+    // the headers below always set that content type. Sending `{}` makes
+    // body-less POST/PATCH/DELETE calls (account removal, refresh) valid.
+    const requestOptions: RequestInit =
+      method !== 'GET' && method !== 'HEAD' && options?.body === undefined
+        ? { ...options, body: '{}' }
+        : { ...options };
 
     try {
       const response = await fetch(endpoint, {
-        ...options,
+        ...requestOptions,
         signal: controller.signal,
         headers: {
           'Content-Type': 'application/json',
           ...authApi.headers(),
-          ...(options?.headers || {}),
+          ...(requestOptions.headers || {}),
         },
       });
       const data = await response.json().catch(() => null) as T | null;

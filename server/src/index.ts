@@ -1534,16 +1534,56 @@ export async function createServer(): Promise<{
   app.delete<{ Params: { id: string } }>('/api/accounts/:id', async (request, reply) => {
     const { id } = request.params;
     const proxyKey = proxyManager.getAccountProxyKey(id);
-    if (await coreClient.isCoreAlive()) {
+
+    // Resolve the account against the core first. The local store can be empty
+    // or stale (accounts live in the core), and deleting only the local copy
+    // lets the account reappear on the next GET /api/accounts.
+    const before = await loadCoreAccounts();
+    const coreAlive = before !== null;
+    const knownInCore = before?.some((account) => account.id === id) ?? false;
+    const knownLocally = store.getAccounts().some((account) => account.id === id);
+
+    if (!coreAlive && !knownLocally) {
+      return reply.code(404).send({ success: false, error: 'Account not found in the pool.' });
+    }
+    if (coreAlive && !knownInCore && !knownLocally) {
+      return reply.code(404).send({ success: false, error: 'Account not found in the pool.' });
+    }
+
+    if (coreAlive && knownInCore) {
+      let result: any = null;
       try {
-        await coreClient.callRpc('accountDelete', { accountId: id });
-      } catch {
-        // proceed
+        result = await coreClient.callRpc('accountDelete', { accountId: id });
+      } catch (error: any) {
+        return reply.code(502).send({
+          success: false,
+          error: `Core could not remove the account: ${error?.message || String(error)}`,
+        });
+      }
+      if (!result || result.success !== true) {
+        return reply.code(502).send({
+          success: false,
+          error: `Core refused the removal: ${result?.message || 'unknown error'}`,
+        });
+      }
+
+      // Confirm the core actually dropped it; otherwise report an honest failure
+      // instead of returning success and letting the account reappear.
+      const after = await loadCoreAccounts();
+      if (after?.some((account) => account.id === id)) {
+        return reply.code(502).send({
+          success: false,
+          error: 'The core still reports this account after the delete; nothing was changed.',
+        });
       }
     }
 
-    const removed = store.removeAccount(id);
-    if (removed && proxyKey) {
+    const removed = store.removeAccount(id) || knownInCore;
+    if (!removed) {
+      return reply.code(404).send({ success: false, error: 'Account not found in the pool.' });
+    }
+
+    if (proxyKey) {
       // A freed IP from a removed (possibly banned) account cools down before it
       // can be assigned to another account or API key.
       proxyManager.quarantineProxy(proxyKey, 24 * 60 * 60 * 1000);
@@ -1553,7 +1593,7 @@ export async function createServer(): Promise<{
     }
 
     return {
-      success: removed,
+      success: true,
       accounts: store.getAccounts(),
     };
   });
