@@ -35,7 +35,7 @@ fake = http.createServer((req, res) => {
     const key = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
     calls.push({ key, model: body.model, stream: body.stream === true });
 
-    if (exhaustedModels.has(String(body.model))) {
+    if (exhaustedModels.has(String(body.model)) && key.endsWith('0001')) {
       res.writeHead(429, { 'content-type': 'application/json' });
       res.end(
         JSON.stringify([
@@ -179,32 +179,33 @@ test('streaming responses are piped through', async () => {
   assert.ok(calls.every((call) => call.stream === true));
 });
 
-test('an exhausted key model is never substituted with another model', async () => {
+test('one exhausted key is cooled and the next key serves the same model', async () => {
   exhaustedModels.add('gemini-3.5-flash-lite');
   try {
+    // The first test in this file cooled key 1 for one second.
+    await new Promise((resolve) => setTimeout(resolve, 1_200));
     calls.length = 0;
-    const started = Date.now();
-    const res = await chat({
+    const first = await chat({
       model: 'gemini-3.5-flash-lite',
       messages: [{ role: 'user', content: 'ping' }],
     });
-    assert.equal(res.status, 429, 'no silent downgrade to 3.1');
-    assert.ok(Date.now() - started < 10_000, 'a daily block fails fast instead of queueing');
-    assert.ok(
-      calls.every((call) => call.model === 'gemini-3.5-flash-lite'),
-      'the requested model is the only one sent to Google',
+    assert.equal(first.status, 200, 'the second key still has 3.5 quota');
+    const body = await first.json();
+    assert.equal(body.model, 'gemini-3.5-flash-lite', 'the model is never substituted');
+    assert.deepEqual(
+      calls.map((call) => call.key),
+      [KEY_1, KEY_2],
+      'key 1 fails, key 2 serves the same model',
     );
-    const body = await res.json();
-    assert.match(body.error.message, /quota/i);
 
-    // The block is now known, so the next call fails without touching Google.
+    // Key 1 is now parked for its daily reset; key 2 answers directly.
     calls.length = 0;
-    const again = await chat({
+    const second = await chat({
       model: 'gemini-3.5-flash-lite',
       messages: [{ role: 'user', content: 'ping' }],
     });
-    assert.equal(again.status, 429);
-    assert.equal(calls.length, 0, 'the parked model is not probed again');
+    assert.equal(second.status, 200);
+    assert.deepEqual(calls.map((call) => call.key), [KEY_2]);
   } finally {
     exhaustedModels.delete('gemini-3.5-flash-lite');
   }

@@ -183,9 +183,6 @@ function utcDay(now: number): string {
 export class GeminiApiPool {
   private keys: GeminiApiKeyRecord[] = [];
   private buckets = new Map<string, BucketState>();
-  // Persisted daily-quota blocks, kept separately so a fresh process can park
-  // the same models without probing Google again.
-  private modelBlocks = new Map<string, number>();
   private keyCooldowns = new Map<string, number>();
   private queues = new Map<string, Waiter[]>();
   private clientOrder: string[] = [];
@@ -431,6 +428,12 @@ export class GeminiApiPool {
     const immediate = this.tryAcquire(model, estimatedTokens, clientId);
     if (immediate) return Promise.resolve(immediate);
 
+    // If the next slot is further away than a client should wait (for example a
+    // daily quota reset), return immediately instead of burning the full wait.
+    if (this.nextAvailabilityMs(model) > Math.max(this.maxWaitMs, 1_000)) {
+      return Promise.resolve(null);
+    }
+
     if (this.queueDepth >= this.maxQueueSize) return Promise.resolve(null);
 
     return new Promise<GeminiApiLease | null>((resolve) => {
@@ -557,50 +560,6 @@ export class GeminiApiPool {
     this.schedulePump();
   }
 
-  /**
-   * Bench every key for one model. Google's daily quota is per project/model;
-   * when one key reports a multi-hour reset, probing the others only burns
-   * requests, so the whole model is parked for the same window.
-   */
-  blockModel(model: string, cooldownMs: number): void {
-    const until = this.now() + Math.max(60_000, cooldownMs);
-    this.modelBlocks.set(model, until);
-    for (const key of this.keys) {
-      const bucket = this.bucketFor(key.id, model);
-      bucket.cooldownUntil = Math.max(bucket.cooldownUntil, until);
-    }
-    this.schedulePump();
-  }
-
-  /** Restore persisted model blocks (model -> epoch ms). */
-  hydrateModelBlocks(blocks: Record<string, number>): void {
-    const now = this.now();
-    this.modelBlocks.clear();
-    for (const [model, until] of Object.entries(blocks || {})) {
-      if (!Number.isFinite(until) || until <= now) continue;
-      this.modelBlocks.set(model, until);
-      for (const key of this.keys) {
-        const bucket = this.bucketFor(key.id, model);
-        bucket.cooldownUntil = Math.max(bucket.cooldownUntil, until);
-      }
-    }
-  }
-
-  /** Active model blocks (model -> epoch ms), for persistence. */
-  getModelBlocks(): Record<string, number> {
-    const now = this.now();
-    const result: Record<string, number> = {};
-    for (const [model, until] of this.modelBlocks) {
-      if (until > now) result[model] = until;
-    }
-    return result;
-  }
-
-  /** Remaining block for a model, or 0 when it is not parked. */
-  modelBlockedForMs(model: string): number {
-    return Math.max(0, (this.modelBlocks.get(model) ?? 0) - this.now());
-  }
-
   /** Earliest time (ms from now) a model could accept work. */
   nextAvailabilityMs(model: string): number {
     const now = this.now();
@@ -618,7 +577,11 @@ export class GeminiApiPool {
         best = Math.min(best, cooldown);
         continue;
       }
-      if (bucket.active >= this.maxConcurrentPerKey) continue;
+      if (bucket.active >= this.maxConcurrentPerKey) {
+        // A concurrency slot can free at any moment; queue instead of failing.
+        best = 0;
+        continue;
+      }
       if (bucket.rpd >= this.limits.rpd) continue;
       this.refill(bucket, now);
       const rpmWait = bucket.rpmTokens >= 1 ? 0 : ((1 - bucket.rpmTokens) * 60_000) / this.limits.rpm;

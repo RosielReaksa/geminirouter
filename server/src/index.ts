@@ -136,8 +136,6 @@ export async function createServer(): Promise<{
   // AI Studio keys serve the two flash-lite models; everything else keeps using
   // the OAuth account pool through the core.
   const geminiApiPool = new GeminiApiPool(store.getGeminiApiKeys());
-  // Restore daily-quota blocks so a restart does not probe an exhausted model.
-  geminiApiPool.hydrateModelBlocks(store.getGeminiApiModelBlocks());
   const gatewayApiKeys = (): string[] =>
     [
       process.env.GEMINIROUTER_API_KEY || '',
@@ -485,7 +483,6 @@ export async function createServer(): Promise<{
         // direct for 24 hours instead of failing every call.
         proxyManager.markApiKeyProxyRateLimited(keyId);
       },
-      onModelBlocked: (model, untilMs) => store.setGeminiApiModelBlock(model, untilMs),
       chooseKeyModel: (model) => sharedModelProvider(model),
     });
     if (handledByApiKeys) return;

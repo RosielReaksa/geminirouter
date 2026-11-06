@@ -20,8 +20,6 @@ export interface GeminiApiProxyOptions {
   getProxyAgent?: (keyId: string) => HttpsProxyAgent<string> | null;
   /** Called when a key's proxy gets a 429/timeout; the key is retried direct. */
   onProxyRateLimited?: (keyId: string) => void;
-  /** Notify the caller that a model's daily key quota is exhausted. */
-  onModelBlocked?: (model: string, untilMs: number) => void;
   /**
    * Choose the shared model the key pool should serve for this request. Return
    * null to send the request to the OAuth account pool instead.
@@ -135,24 +133,6 @@ export async function handleGeminiApiRequest(
       reply.code(401).send(openAiError('Invalid API key.', 401, 'auth_error'));
       return true;
     }
-  }
-
-  // A daily-quota block is known; fail fast instead of queueing 30 seconds.
-  const blockedFor = options.pool.modelBlockedForMs(model);
-  if (blockedFor > 0) {
-    reply.header('Retry-After', String(Math.ceil(blockedFor / 1000)));
-    reply
-      .code(429)
-      .send(
-        openAiError(
-          `The ${model} free-tier daily quota is exhausted. Retry after ${Math.ceil(
-            blockedFor / 60_000,
-          )} minutes, or send the request to the connected account pool.`,
-          429,
-          'rate_limit_error',
-        ),
-      );
-    return true;
   }
 
   const stream = body.stream === true;
@@ -316,19 +296,13 @@ export async function handleGeminiApiRequest(
         return true;
       }
 
-      // Per-key limits: bench and try the next key.
+      // Per-key limits: bench this key/model and try the next key. A 429 is usually
+  // per project, so another key may still have quota for the same model.
       if (status === 429) {
-        const cooldown = retryAfterMs(response.headers as Record<string, any>, response.data);
-        options.pool.settle(lease, { cooldownMs: cooldown });
+        options.pool.settle(lease, {
+          cooldownMs: retryAfterMs(response.headers as Record<string, any>, response.data),
+        });
         lastError = upstreamErrorBody(response.data);
-
-        // A multi-hour reset means the whole project/model is exhausted; trying
-        // another key cannot help and the model must never be substituted.
-        if (cooldown >= 5 * 60 * 1000) {
-          options.pool.blockModel(model, cooldown);
-          options.onModelBlocked?.(model, Date.now() + cooldown);
-          break;
-        }
         continue;
       }
       if (status === 401 || status === 403) {

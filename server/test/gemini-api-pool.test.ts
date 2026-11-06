@@ -84,7 +84,7 @@ test('the RPM bucket refills continuously instead of at the minute boundary', as
   const pool = new GeminiApiPool([key('a')], {
     limits: { rpm: 1, tpm: 100_000, rpd: 10 },
     now: () => now,
-    maxWaitMs: 200,
+    maxWaitMs: 90_000,
     pumpIntervalMs: 5,
   });
 
@@ -181,32 +181,20 @@ test('maskApiKey hides short secrets completely', () => {
   assert.equal(maskApiKey('AIzaSy0123456789abcd'), 'AIza…abcd');
 });
 
-test('blockModel parks every key for one model only', () => {
-  const pool = new GeminiApiPool([key('a'), key('b')], {
-    limits: { rpm: 15, tpm: 250_000, rpd: 500 },
+test('acquire fails fast when the next slot is beyond the client wait', async () => {
+  const pool = new GeminiApiPool([key('a')], {
+    limits: { rpm: 15, tpm: 100_000, rpd: 10 },
+    maxWaitMs: 1_000,
   });
 
-  pool.blockModel('gemini-3.5-flash-lite', 6 * 60 * 60 * 1000);
+  const lease = await pool.acquire('gemini-3.1-flash-lite', 10, 'client');
+  assert.ok(lease);
+  pool.settle(lease!, { cooldownMs: 60 * 60 * 1000 });
 
-  assert.equal(pool.hasImmediateCapacity('gemini-3.5-flash-lite'), false);
-  assert.equal(pool.hasImmediateCapacity('gemini-3.1-flash-lite'), true);
-  assert.ok(pool.nextAvailabilityMs('gemini-3.5-flash-lite') > 5 * 60 * 60 * 1000);
-});
-
-test('a model block can be restored into a fresh pool', () => {
-  const first = new GeminiApiPool([key('a')], {
-    limits: { rpm: 15, tpm: 250_000, rpd: 500 },
-  });
-  first.blockModel('gemini-3.5-flash-lite', 6 * 60 * 60 * 1000);
-  const saved = first.getModelBlocks();
-
-  const second = new GeminiApiPool([key('a')], {
-    limits: { rpm: 15, tpm: 250_000, rpd: 500 },
-  });
-  second.hydrateModelBlocks(saved);
-
-  assert.equal(second.hasImmediateCapacity('gemini-3.5-flash-lite'), false);
-  assert.equal(second.hasImmediateCapacity('gemini-3.1-flash-lite'), true);
+  const started = Date.now();
+  const next = await pool.acquire('gemini-3.1-flash-lite', 10, 'client');
+  assert.equal(next, null);
+  assert.ok(Date.now() - started < 500, 'did not wait for the hourly reset');
 });
 
 test('hasImmediateCapacity is false once the key bucket is saturated', async () => {
