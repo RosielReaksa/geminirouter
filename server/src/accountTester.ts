@@ -103,7 +103,7 @@ export class AccountTester {
    */
   async testAndRefreshAccount(
     account: GoogleAccount,
-    model: string = 'gemini-3.8-flash-low',
+    model: string = 'gemini-3.1-flash-lite',
     refreshQuota = true,
   ): Promise<AccountTestResult> {
     const { port, apiKey } = this.resolveGateway();
@@ -127,7 +127,7 @@ export class AccountTester {
           messages: [{ role: 'user', content: 'Reply: ok' }],
         },
         {
-          timeout: 25000,
+          timeout: 60000,
           headers: {
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${apiKey}`,

@@ -1475,7 +1475,7 @@ export async function createServer(): Promise<{
     '/api/accounts/:id/test',
     async (request, reply) => {
       const { id } = request.params;
-      const model = request.body?.model || 'gemini-2.5-flash';
+      const model = request.body?.model || 'gemini-3.1-flash-lite';
       const list = (await loadCoreAccounts()) ?? store.getAccounts();
       const acc = list.find((a) => a.id === id);
 
@@ -1490,7 +1490,7 @@ export async function createServer(): Promise<{
 
   // 2e. POST /api/accounts/test-all — test all accounts in pool & refresh all quotas
   app.post<{ Body?: { model?: string } }>('/api/accounts/test-all', async (request) => {
-    const model = request.body?.model || 'gemini-2.5-flash';
+    const model = request.body?.model || 'gemini-3.1-flash-lite';
     const results = await accountTester.testAndRefreshAll(model);
     return { success: true, count: results.length, results };
   });
