@@ -674,6 +674,13 @@ export class ProxyManager {
     };
   }
 
+  /** Egress identity for an AI Studio key, for traffic attribution. */
+  getEgressForKey(keyId: string): { address: string; country: string | null } | null {
+    const proxy = this.getApiKeyProxySummary(keyId);
+    if (!proxy) return null;
+    return { address: proxy.address, country: proxy.country };
+  }
+
   /**
    * Filter a desired state down to the accounts whose core value actually
    * differs from the last successful push. An empty result means the core is

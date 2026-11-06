@@ -30,7 +30,7 @@ import {
   isGeminiModelId,
   isUnavailableWebsiteModel,
 } from './modelIds.js';
-import { mapCoreTrafficItems as mapCoreTrafficItemsFromCore } from './trafficMapping.js';
+import { mapCoreTrafficItems as mapCoreTrafficItemsFromCore, mergeTrafficRecords } from './trafficMapping.js';
 import { getSharedCoreAuditDb } from './coreAuditDb.js';
 import { getSharedProxyManager } from './proxyManager.js';
 import { syncProxyAssignments as syncProxyRouting } from './proxySync.js';
@@ -254,6 +254,15 @@ export async function createServer(): Promise<{
       store.getAccounts().map((account) => [account.email.toLowerCase(), account.id]),
     );
     const resolveProxy = (record: TrafficRecord) => {
+      // AI Studio key calls are not tied to a core account; use the key's own
+      // egress proxy so the Traffic page can show where the call left from.
+      if (record.provider === 'gemini-api') {
+        const keyId = record.accountId?.startsWith('gemini-api:')
+          ? record.accountId.slice('gemini-api:'.length)
+          : '';
+        const keyEgress = keyId ? proxyManager.getEgressForKey(keyId) : null;
+        if (keyEgress) return keyEgress;
+      }
       const accountId =
         record.accountId ?? idByEmail.get((record.backingAccountEmail || '').toLowerCase());
       return accountId ? proxyManager.getEgressForAccount(accountId) : null;
@@ -2187,7 +2196,10 @@ export async function createServer(): Promise<{
     const liveTraffic = await loadCoreModelTraffic({
       ...(hasValidRange ? { from, to, allPages: true } : {}),
     });
-    const records = liveTraffic?.records ?? store.getTraffic();
+    // AI Studio key calls are recorded by the bridge, not the core audit DB, so
+    // merge them in explicitly. Without this they never appear while the core
+    // is reachable. Newest first, de-duplicated by record id.
+    const records = mergeTrafficRecords(liveTraffic?.records ?? null, store.getTraffic());
     if (hasValidRange) {
       const filtered = records.filter((record) => {
         const timestamp = Date.parse(record.timestamp);
@@ -2243,6 +2255,9 @@ export async function createServer(): Promise<{
     const windowEnd = Date.now();
     const windowStart = windowEnd - durationMs;
     const liveTraffic = await loadCoreModelTraffic({ from: windowStart, to: windowEnd, allPages: true, accounts: [] });
+    const localGemini = store.getTraffic().filter((record) => record.provider === 'gemini-api');
+    const volumeRecords = [...(liveTraffic?.records ?? []), ...localGemini];
+    const available = Boolean(liveTraffic) || localGemini.length > 0;
     const buckets = Array.from({ length: bucketCount }, (_, index) => ({
       from: new Date(windowStart + index * bucketMs).toISOString(),
       to: new Date(Math.min(windowStart + (index + 1) * bucketMs, windowEnd)).toISOString(),
@@ -2250,25 +2265,23 @@ export async function createServer(): Promise<{
       errors: 0,
     }));
 
-    if (liveTraffic) {
-      for (const record of liveTraffic.records) {
-        const timestamp = Date.parse(record.timestamp);
-        if (!Number.isFinite(timestamp) || timestamp < windowStart || timestamp >= windowEnd) continue;
-        const index = Math.floor((timestamp - windowStart) / bucketMs);
-        const bucket = buckets[index];
-        if (!bucket) continue;
-        bucket.requests += 1;
-        if (record.status >= 400) bucket.errors += 1;
-      }
+    for (const record of volumeRecords) {
+      const timestamp = Date.parse(record.timestamp);
+      if (!Number.isFinite(timestamp) || timestamp < windowStart || timestamp >= windowEnd) continue;
+      const index = Math.floor((timestamp - windowStart) / bucketMs);
+      const bucket = buckets[index];
+      if (!bucket) continue;
+      bucket.requests += 1;
+      if (record.status >= 400) bucket.errors += 1;
     }
 
     const value = {
       range,
-      available: Boolean(liveTraffic),
+      available,
       windowStart: new Date(windowStart).toISOString(),
       windowEnd: new Date(windowEnd).toISOString(),
       bucketMs,
-      buckets: liveTraffic ? buckets : [],
+      buckets: available ? buckets : [],
       totalRequests: buckets.reduce((total, bucket) => total + bucket.requests, 0),
       totalErrors: buckets.reduce((total, bucket) => total + bucket.errors, 0),
     };

@@ -327,7 +327,11 @@ export const DashboardApp: React.FC = () => {
         </header>
 
         {/* Tab Page Container */}
-        <div className="p-6 sm:p-10 max-w-6xl w-full mx-auto pb-20">
+        <div
+          className={`p-6 sm:p-10 w-full mx-auto pb-20 ${
+            currentTab === 'traffic' ? 'max-w-7xl' : 'max-w-6xl'
+          }`}
+        >
           <div className="dashboard-page-enter">
           {currentTab === 'overview' && (
             <OverviewPage

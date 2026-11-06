@@ -570,6 +570,18 @@ test('proxy health survives a store reload', () => {
   }
 });
 
+test('key egress attribution follows the key proxy and disappears when disabled', async () => {
+  const { manager } = await managerWith(inventory([1]), ['a1']);
+  manager.setApiKeyProxyEnabled(true);
+  manager.reconcileApiKeyAssignments(['k1']);
+
+  assert.deepEqual(manager.getEgressForKey('k1'), { address: '1.1.1.1', country: 'US' });
+  assert.equal(manager.getEgressForKey('unknown'), null);
+
+  manager.setApiKeyProxyEnabled(false);
+  assert.equal(manager.getEgressForKey('k1'), null);
+});
+
 test('sync results never expose proxy credentials to API clients', async () => {
   const { manager } = await managerWith(inventory([1]), ['a1']);
   const rpc = async () => ({ success: true });

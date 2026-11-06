@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import type { GoogleAccount } from '../src/store.js';
-import { mapCoreTrafficItems } from '../src/trafficMapping.js';
+import type { GoogleAccount, TrafficRecord } from '../src/store.js';
+import { mapCoreTrafficItems, mergeTrafficRecords } from '../src/trafficMapping.js';
 
 const accounts = [
   {
@@ -88,4 +88,58 @@ test('stale in-progress audit rows are reported as aborted', () => {
   assert.equal(record.status, 0);
   assert.equal(record.outcome, 'aborted');
   assert.equal(record.modelRouted, 'gemini-3.8-flash-high');
+});
+
+function trafficRecord(
+  id: string,
+  timestamp: string,
+  provider?: TrafficRecord['provider'],
+): TrafficRecord {
+  return {
+    id,
+    timestamp,
+    clientName: 'API Client',
+    clientIp: '127.0.0.1',
+    modelRequested: 'gemini-3.1-flash-lite',
+    modelRouted: 'gemini-3.1-flash-lite',
+    backingAccountEmail: provider === 'gemini-api' ? 'Gemini API · key one' : 'one@gmail.com',
+    status: 200,
+    latencyMs: 100,
+    promptTokens: 5,
+    completionTokens: 2,
+    totalTokens: 7,
+    provider,
+  };
+}
+
+test('AI Studio key calls are merged into core traffic, newest first', () => {
+  const core = [trafficRecord('core-1', '2026-11-06T10:00:00.000Z', 'core')];
+  const local = [
+    trafficRecord('key-1', '2026-11-06T10:05:00.000Z', 'gemini-api'),
+    trafficRecord('old-local', '2026-11-06T09:00:00.000Z', 'core'),
+  ];
+
+  const merged = mergeTrafficRecords(core, local);
+  assert.deepEqual(
+    merged.map((record) => record.id),
+    ['key-1', 'core-1'],
+    'key calls appear and stale bridge-local core rows do not duplicate',
+  );
+});
+
+test('merging de-duplicates by id and keeps working without a core', () => {
+  const core = [trafficRecord('same', '2026-11-06T10:00:00.000Z', 'core')];
+  const local = [
+    trafficRecord('same', '2026-11-06T10:00:00.000Z', 'gemini-api'),
+    trafficRecord('key-2', '2026-11-06T10:01:00.000Z', 'gemini-api'),
+  ];
+
+  assert.deepEqual(
+    mergeTrafficRecords(core, local).map((record) => record.id),
+    ['key-2', 'same'],
+  );
+  assert.deepEqual(
+    mergeTrafficRecords(null, local).map((record) => record.id),
+    ['key-2', 'same'],
+  );
 });

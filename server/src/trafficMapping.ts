@@ -4,6 +4,35 @@ import { canonicalModelId } from './modelIds.js';
 const DEFAULT_STALE_IN_PROGRESS_MS = 300_000;
 
 /**
+ * Merge bridge-local records (AI Studio key calls) into the core audit stream.
+ *
+ * The core never sees key-pool calls because the bridge sends those to Google
+ * directly, so without this merge they disappear from the dashboard whenever
+ * the core is reachable. Newest first, de-duplicated by record id.
+ */
+export function mergeTrafficRecords(
+  coreRecords: TrafficRecord[] | null,
+  localRecords: TrafficRecord[],
+): TrafficRecord[] {
+  const newestFirst = (a: TrafficRecord, b: TrafficRecord) =>
+    (Date.parse(b.timestamp) || 0) - (Date.parse(a.timestamp) || 0);
+
+  if (!coreRecords) return [...localRecords].sort(newestFirst);
+
+  const seen = new Set<string>();
+  const merged: TrafficRecord[] = [];
+  for (const record of [
+    ...coreRecords,
+    ...localRecords.filter((entry) => entry.provider === 'gemini-api'),
+  ]) {
+    if (seen.has(record.id)) continue;
+    seen.add(record.id);
+    merged.push(record);
+  }
+  return merged.sort(newestFirst);
+}
+
+/**
  * Map the core's audit rows onto the dashboard's traffic records.
  *
  * The core reports the model it actually ran, which can still be a retired

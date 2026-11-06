@@ -58,6 +58,8 @@ The Gemini API keys can optionally leave through the Webshare inventory:
 - Assignments are persisted (`address:port` only, no credentials), so a restart
   keeps the same key on the same IP.
 - The Test button and live traffic both use the assigned proxy.
+- Key calls appear on the **Traffic** page as `Gemini API · <key label>`, with the
+  egress IP they actually used (the key's proxy, or the gateway host when direct).
 - Proxies change the **egress IP only**. They do not add RPM/TPM/RPD and do not
   bypass Google's project or account limits.
 

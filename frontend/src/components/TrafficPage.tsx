@@ -7,6 +7,7 @@ import {
   XCircle,
   Loader2,
   X,
+  KeyRound,
 } from 'lucide-react';
 import { TrafficRecord } from '../types';
 import { api } from '../services/api';
@@ -31,6 +32,22 @@ const formatRangeTime = (timestamp: number) => new Date(timestamp).toLocaleStrin
 
 const PENDING_NOTICE_AFTER_MS = 2 * 60 * 1000;
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Core traffic sometimes carries an opaque account id instead of an email. */
+const shortAccountLabel = (value: string): string => {
+  if (UUID_RE.test(value)) return `${value.slice(0, 8)}…`;
+  return value;
+};
+
+/** API-key calls are stored as "Gemini API · <key label>"; show the key label. */
+const servedByLabel = (record: TrafficRecord): string => {
+  if (record.provider === 'gemini-api') {
+    return record.backingAccountEmail.replace(/^Gemini API\s*[·•-]\s*/i, '');
+  }
+  return shortAccountLabel(record.backingAccountEmail);
+};
+
 const formatElapsed = (elapsedMs: number): string => {
   const elapsedSeconds = Math.max(0, Math.floor(elapsedMs / 1000));
   if (elapsedSeconds < 60) return `${elapsedSeconds}s`;
@@ -53,7 +70,7 @@ const EgressCell: React.FC<{ record: TrafficRecord }> = ({ record }) => {
   return (
     <div
       className="flex items-center gap-2"
-      title={viaProxy ? "Left through this account's Webshare proxy" : 'Left directly from the gateway host'}
+      title={viaProxy ? "Left through this account's or API key's Webshare proxy" : 'Left directly from the gateway host'}
     >
       {country ? (
         <img
@@ -80,7 +97,7 @@ const EgressCell: React.FC<{ record: TrafficRecord }> = ({ record }) => {
 
 export const TrafficPage: React.FC<TrafficPageProps> = ({ traffic, onReady }) => {
   const [searchTerm, setSearchTerm] = useState('');
-  const [statusFilter, setStatusFilter] = useState<'all' | '200' | '429'>('all');
+  const [statusFilter, setStatusFilter] = useState<'all' | '200' | 'error'>('all');
   const [timeRange, setTimeRange] = useState<TrafficTimeRange | null>(readTrafficTimeRange);
   const [rangeTraffic, setRangeTraffic] = useState<TrafficRecord[]>([]);
   const [rangeLoading, setRangeLoading] = useState(() => Boolean(readTrafficTimeRange()));
@@ -166,6 +183,7 @@ export const TrafficPage: React.FC<TrafficPageProps> = ({ traffic, onReady }) =>
     const matchesSearch =
       t.clientName.toLowerCase().includes(searchTerm.toLowerCase()) ||
       t.modelRequested.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      t.modelRouted.toLowerCase().includes(searchTerm.toLowerCase()) ||
       t.backingAccountEmail.toLowerCase().includes(searchTerm.toLowerCase());
 
     const matchesStatus =
@@ -173,7 +191,7 @@ export const TrafficPage: React.FC<TrafficPageProps> = ({ traffic, onReady }) =>
         ? true
         : statusFilter === '200'
         ? t.status === 200
-        : t.status === 429;
+        : t.status >= 400;
 
     return matchesSearch && matchesStatus;
   }).sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp));
@@ -198,7 +216,7 @@ export const TrafficPage: React.FC<TrafficPageProps> = ({ traffic, onReady }) =>
         </h2>
         <p className="text-sm text-[#706B65] mt-1 max-w-xl">
           Live stream of API completions routed through geminirouter. Inspect latency, token usage,
-          and which Google account served each request.
+          and whether a Google account or an AI Studio API key served each request.
         </p>
       </div>
 
@@ -263,7 +281,7 @@ export const TrafficPage: React.FC<TrafficPageProps> = ({ traffic, onReady }) =>
 
         <div className="flex items-center gap-2 w-full sm:w-auto">
           <span className="text-xs text-[#706B65] font-medium hidden sm:inline">Filter:</span>
-          {(['all', '200', '429'] as const).map((filter) => (
+          {(['all', '200', 'error'] as const).map((filter) => (
             <button
               key={filter}
               onClick={() => setStatusFilter(filter)}
@@ -273,7 +291,7 @@ export const TrafficPage: React.FC<TrafficPageProps> = ({ traffic, onReady }) =>
                   : 'bg-[#FAF7F2] border border-[#EAE5DE] text-[#706B65] hover:text-[#2A2723]'
               }`}
             >
-              {filter === 'all' ? 'All Codes' : filter === '200' ? '200 Success' : '429 Throttled'}
+              {filter === 'all' ? 'All Codes' : filter === '200' ? '200 Success' : 'Errors'}
             </button>
           ))}
         </div>
@@ -282,18 +300,18 @@ export const TrafficPage: React.FC<TrafficPageProps> = ({ traffic, onReady }) =>
       {/* Table Container */}
       <div className="bg-[#FFFFFF] border border-[#EAE5DE] rounded-2xl shadow-soft overflow-hidden">
         <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs">
+          <table className="w-full min-w-[1040px] text-left text-xs">
             <thead className="bg-[#FAF7F2] text-[#706B65] font-semibold border-b border-[#EAE5DE]">
               <tr>
-                <th className="py-3.5 px-4">Time</th>
-                <th className="py-3.5 px-4">Client</th>
-                <th className="py-3.5 px-4">Model & Route</th>
-                <th className="py-3.5 px-4">Status</th>
-                <th className="py-3.5 px-4">Latency</th>
-                <th className="py-3.5 px-4">Tokens (In / Out)</th>
-                <th className="py-3.5 px-4">Cached</th>
-                <th className="py-3.5 px-4">Served By Account</th>
-                <th className="py-3.5 px-4">Egress IP</th>
+                <th className="py-3.5 px-3 whitespace-nowrap">Time</th>
+                <th className="py-3.5 px-3 whitespace-nowrap">Client</th>
+                <th className="py-3.5 px-3 whitespace-nowrap">Model & Route</th>
+                <th className="py-3.5 px-3 whitespace-nowrap">Status</th>
+                <th className="py-3.5 px-3 whitespace-nowrap">Latency</th>
+                <th className="py-3.5 px-3 whitespace-nowrap">Tokens (In / Out)</th>
+                <th className="py-3.5 px-3 whitespace-nowrap">Cached</th>
+                <th className="py-3.5 px-3 whitespace-nowrap">Served By</th>
+                <th className="py-3.5 px-3 whitespace-nowrap">Egress IP</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-[#EAE5DE] text-[#2A2723]">
@@ -329,15 +347,15 @@ export const TrafficPage: React.FC<TrafficPageProps> = ({ traffic, onReady }) =>
                       key={t.id}
                       className="hover:bg-[#FAF9F5]/70 transition-colors"
                     >
-                      <td className="py-3.5 px-4 font-mono-code text-[#706B65] whitespace-nowrap">
+                      <td className="py-3.5 px-3 font-mono-code text-[#706B65] whitespace-nowrap">
                         {timeFormatted}
                       </td>
-                      <td className="py-3.5 px-4 font-medium whitespace-nowrap">
+                      <td className="py-3.5 px-3 font-medium whitespace-nowrap">
                         <span className="bg-[#FAF7F2] border border-[#EAE5DE] px-2 py-0.5 rounded text-[11px] text-[#2A2723]">
                           {t.clientName}
                         </span>
                       </td>
-                      <td className="py-3.5 px-4">
+                      <td className="py-3.5 px-3 whitespace-nowrap">
                         <div className="flex flex-col">
                           <span className="font-mono-code font-semibold text-[#2A2723]">
                             {t.modelRouted}
@@ -349,7 +367,7 @@ export const TrafficPage: React.FC<TrafficPageProps> = ({ traffic, onReady }) =>
                           )}
                         </div>
                       </td>
-                      <td className="py-3.5 px-4 whitespace-nowrap">
+                      <td className="py-3.5 px-3 whitespace-nowrap">
                         {isPending ? (
                           <div className="max-w-[250px] whitespace-normal">
                             <span
@@ -392,10 +410,10 @@ export const TrafficPage: React.FC<TrafficPageProps> = ({ traffic, onReady }) =>
                           </span>
                         )}
                       </td>
-                      <td className="py-3.5 px-4 font-mono-code text-[#504C46] whitespace-nowrap">
+                      <td className="py-3.5 px-3 font-mono-code text-[#504C46] whitespace-nowrap">
                         {isPending ? `Open for ${formatElapsed(elapsedMs)}` : `${t.latencyMs} ms`}
                       </td>
-                      <td className="py-3.5 px-4 font-mono-code text-[#504C46] whitespace-nowrap">
+                      <td className="py-3.5 px-3 font-mono-code text-[#504C46] whitespace-nowrap">
                         {isPending ? (
                           <span className="text-[#9E988F]">Not recorded</span>
                         ) : (
@@ -407,7 +425,7 @@ export const TrafficPage: React.FC<TrafficPageProps> = ({ traffic, onReady }) =>
                           </div>
                         )}
                       </td>
-                      <td className="py-3.5 px-4 font-mono-code text-xs whitespace-nowrap">
+                      <td className="py-3.5 px-3 font-mono-code text-xs whitespace-nowrap">
                         {isPending ? (
                           <span className="text-[#9E988F]">—</span>
                         ) : t.cachedTokens && t.cachedTokens > 0 ? (
@@ -418,12 +436,26 @@ export const TrafficPage: React.FC<TrafficPageProps> = ({ traffic, onReady }) =>
                           <span className="text-[#9E988F]">—</span>
                         )}
                       </td>
-                      <td className="py-3.5 px-4 font-mono-code text-xs text-[#706B65] whitespace-nowrap">
-                        {isPending && t.backingAccountEmail === 'unknown'
-                          ? 'Not assigned yet'
-                          : t.backingAccountEmail}
+                      <td className="py-3.5 px-3 text-xs text-[#706B65]">
+                        {isPending && t.backingAccountEmail === 'unknown' ? (
+                          <span className="whitespace-nowrap">Not assigned yet</span>
+                        ) : (
+                          <div
+                            className="flex min-w-0 max-w-[220px] items-center gap-1.5"
+                            title={t.backingAccountEmail}
+                          >
+                            {t.provider === 'gemini-api' && (
+                              <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-[#F2DDD5] bg-[#FAF2EF] px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-[#C25938]">
+                                <KeyRound className="h-2.5 w-2.5" /> key
+                              </span>
+                            )}
+                            <span className="truncate font-mono-code">
+                              {servedByLabel(t)}
+                            </span>
+                          </div>
+                        )}
                       </td>
-                      <td className="py-3.5 px-4 whitespace-nowrap">
+                      <td className="py-3.5 px-3 whitespace-nowrap">
                         <EgressCell record={t} />
                       </td>
                     </tr>
