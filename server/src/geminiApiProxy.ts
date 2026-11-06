@@ -1,4 +1,5 @@
 import axios from 'axios';
+import type { HttpsProxyAgent } from 'https-proxy-agent';
 import type { FastifyRequest, FastifyReply } from 'fastify';
 import { safeEqual } from './auth.js';
 import { canonicalModelId } from './modelIds.js';
@@ -6,6 +7,7 @@ import {
   GEMINI_API_MODELS,
   estimateGeminiTokens,
   geminiApiBaseUrl,
+  type GeminiApiLease,
   type GeminiApiPool,
 } from './geminiApiPool.js';
 import type { TrafficRecord } from './store.js';
@@ -14,6 +16,8 @@ export interface GeminiApiProxyOptions {
   pool: GeminiApiPool;
   getApiKeys: () => string[];
   recordTraffic: (record: TrafficRecord) => void;
+  /** Optional per-key proxy agent (Webshare). Null means direct. */
+  getProxyAgent?: (keyId: string) => HttpsProxyAgent<string> | null;
 }
 
 function parseJsonBody(request: FastifyRequest): any | null {
@@ -63,6 +67,15 @@ function openAiError(message: string, code: number, type = 'gateway_error') {
   return { error: { message, type, code } };
 }
 
+function clientIdentity(request: FastifyRequest): string {
+  const forwarded = request.headers['x-forwarded-for'];
+  if (typeof forwarded === 'string') {
+    const first = forwarded.split(',')[0]?.trim();
+    if (first) return first;
+  }
+  return request.ip || 'unknown';
+}
+
 /**
  * Serves the two AI Studio models with a pool of Google API keys.
  *
@@ -104,142 +117,28 @@ export async function handleGeminiApiRequest(
     Number.parseInt(process.env.GEMINI_API_TIMEOUT_MS || '300000', 10) || 300000,
   );
   const url = `${geminiApiBaseUrl()}/v1beta/openai/chat/completions`;
+  const clientId = clientIdentity(request);
   const maxAttempts = Math.max(1, options.pool.snapshot().filter((key) => key.enabled).length);
 
-  let lastError: any = null;
-  let lastStatus = 0;
-
-  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-    const lease = options.pool.acquire(estimatedTokens);
-    if (!lease) break;
-
-    const startedAt = Date.now();
-    let response: any;
+  const abort = new AbortController();
+  const onAborted = () => abort.abort();
+  request.raw.on('aborted', onAborted);
+  const releaseAbort = () => {
     try {
-      response = await axios.post(url, upstreamBody, {
-        headers: {
-          Authorization: `Bearer ${lease.record.key}`,
-          'Content-Type': 'application/json',
-          Accept: stream ? 'text/event-stream' : 'application/json',
-        },
-        responseType: stream ? 'stream' : 'json',
-        validateStatus: () => true,
-        timeout: timeoutMs,
-      });
-    } catch (error: any) {
-      options.pool.markCooldown(lease.record.id, 15_000);
-      lastError = { message: error?.message || String(error) };
-      lastStatus = 0;
-      continue;
+      request.raw.off('aborted', onAborted);
+    } catch {
+      // best effort
     }
+  };
 
-    const status = response.status || 500;
-    lastStatus = status;
-
-    if (status === 200) {
-      const usage = response.data?.usage;
-      const promptTokens = Number(usage?.prompt_tokens) || 0;
-      const completionTokens = Number(usage?.completion_tokens) || 0;
-      const totalTokens = Number(usage?.total_tokens) || promptTokens + completionTokens;
-
-      if (!stream) {
-        options.pool.recordTokens(
-          lease.record.id,
-          totalTokens || lease.estimatedTokens,
-          lease.estimatedTokens,
-        );
-        options.recordTraffic({
-          id: `tr-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
-          timestamp: new Date().toISOString(),
-          clientName: String(request.headers['user-agent'] || 'API Client'),
-          clientIp: request.ip || '127.0.0.1',
-          modelRequested: model,
-          modelRouted: model,
-          backingAccountEmail: `Gemini API · ${lease.record.label}`,
-          accountId: `gemini-api:${lease.record.id}`,
-          status,
-          latencyMs: Date.now() - startedAt,
-          promptTokens,
-          completionTokens,
-          totalTokens,
-          provider: 'gemini-api',
-        });
-        reply.header('x-egress-provider', 'gemini-api');
-        return reply.code(status).send(response.data), true;
-      }
-
-      const streamData = response.data as NodeJS.ReadableStream;
-      const headers = response.headers as Record<string, any>;
-      // Take over the raw response: Fastify must not finalize it before the
-      // upstream SSE stream ends.
-      reply.hijack();
-      reply.raw.statusCode = status;
-      reply.raw.setHeader(
-        'content-type',
-        String(headers['content-type'] || 'text/event-stream'),
-      );
-      reply.raw.setHeader('cache-control', 'no-cache');
-      reply.raw.setHeader('x-egress-provider', 'gemini-api');
-      streamData.pipe(reply.raw);
-
-      const finish = (completed: boolean) => {
-        options.pool.recordTokens(
-          lease.record.id,
-          lease.estimatedTokens,
-          lease.estimatedTokens,
-        );
-        options.recordTraffic({
-          id: `tr-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
-          timestamp: new Date().toISOString(),
-          clientName: String(request.headers['user-agent'] || 'API Client'),
-          clientIp: request.ip || '127.0.0.1',
-          modelRequested: model,
-          modelRouted: model,
-          backingAccountEmail: `Gemini API · ${lease.record.label}`,
-          accountId: `gemini-api:${lease.record.id}`,
-          status: completed ? 200 : 0,
-          latencyMs: Date.now() - startedAt,
-          promptTokens: 0,
-          completionTokens: 0,
-          totalTokens: lease.estimatedTokens,
-          provider: 'gemini-api',
-        });
-      };
-      streamData.on('end', () => finish(true));
-      streamData.on('error', () => finish(false));
-      reply.raw.on('close', () => {
-        if (!reply.raw.writableFinished) {
-          try {
-            (streamData as any).destroy?.();
-          } catch {
-            // best effort
-          }
-        }
-      });
-      return true;
-    }
-
-    // Per-key limits: bench and try the next key.
-    if (status === 429) {
-      options.pool.markCooldown(
-        lease.record.id,
-        retryAfterMs(response.headers as Record<string, any>, response.data),
-      );
-      lastError = response.data;
-      continue;
-    }
-    if (status === 401 || status === 403) {
-      options.pool.markCooldown(lease.record.id, 5 * 60 * 1000);
-      lastError = response.data;
-      continue;
-    }
-    if (status >= 500) {
-      options.pool.markCooldown(lease.record.id, 30_000);
-      lastError = response.data;
-      continue;
-    }
-
-    // A request-shaped error (400/404/…) will not be fixed by another key.
+  const record = (
+    lease: GeminiApiLease,
+    status: number,
+    startedAt: number,
+    promptTokens: number,
+    completionTokens: number,
+    totalTokens: number,
+  ) => {
     options.recordTraffic({
       id: `tr-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
       timestamp: new Date().toISOString(),
@@ -251,24 +150,148 @@ export async function handleGeminiApiRequest(
       accountId: `gemini-api:${lease.record.id}`,
       status,
       latencyMs: Date.now() - startedAt,
-      promptTokens: 0,
-      completionTokens: 0,
-      totalTokens: 0,
+      promptTokens,
+      completionTokens,
+      totalTokens,
       provider: 'gemini-api',
     });
-    return reply.code(status).send(response.data), true;
-  }
+  };
 
-  reply
-    .code(lastStatus === 0 ? 503 : 429)
-    .send(
-      openAiError(
-        lastError?.error?.message ||
-          lastError?.message ||
-          'All Gemini API keys are at their rate limit or unavailable. Try again shortly.',
-        lastStatus === 0 ? 503 : 429,
-        'rate_limit_error',
-      ),
-    );
-  return true;
+  let lastError: any = null;
+  let lastStatus = 0;
+
+  try {
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      const lease = await options.pool.acquire(
+        model,
+        estimatedTokens,
+        clientId,
+        abort.signal,
+      );
+      if (!lease) break;
+
+      const startedAt = Date.now();
+      const proxyAgent = options.getProxyAgent?.(lease.record.id) ?? null;
+      let response: any;
+      try {
+        response = await axios.post(url, upstreamBody, {
+          headers: {
+            Authorization: `Bearer ${lease.record.key}`,
+            'Content-Type': 'application/json',
+            Accept: stream ? 'text/event-stream' : 'application/json',
+          },
+          responseType: stream ? 'stream' : 'json',
+          validateStatus: () => true,
+          timeout: timeoutMs,
+          // Key traffic is direct unless a Webshare proxy is assigned.
+          ...(proxyAgent ? { httpAgent: proxyAgent, httpsAgent: proxyAgent } : {}),
+          proxy: false,
+        });
+      } catch (error: any) {
+        options.pool.settle(lease, { cooldownMs: 15_000 });
+        lastError = { message: error?.message || String(error) };
+        lastStatus = 0;
+        continue;
+      }
+
+      const status = response.status || 500;
+      lastStatus = status;
+
+      if (status === 200) {
+        const usage = response.data?.usage;
+        const promptTokens = Number(usage?.prompt_tokens) || 0;
+        const completionTokens = Number(usage?.completion_tokens) || 0;
+        const totalTokens = Number(usage?.total_tokens) || promptTokens + completionTokens;
+
+        if (!stream) {
+          options.pool.settle(lease, { actualTokens: totalTokens || lease.estimatedTokens });
+          record(lease, status, startedAt, promptTokens, completionTokens, totalTokens);
+          releaseAbort();
+          reply.header('x-egress-provider', 'gemini-api');
+          return reply.code(status).send(response.data), true;
+        }
+
+        const streamData = response.data as NodeJS.ReadableStream;
+        const headers = response.headers as Record<string, any>;
+        // Take over the raw response: Fastify must not finalize it before the
+        // upstream SSE stream ends.
+        reply.hijack();
+        reply.raw.statusCode = status;
+        reply.raw.setHeader(
+          'content-type',
+          String(headers['content-type'] || 'text/event-stream'),
+        );
+        reply.raw.setHeader('cache-control', 'no-cache');
+        reply.raw.setHeader('x-egress-provider', 'gemini-api');
+        streamData.pipe(reply.raw);
+
+        let finished = false;
+        const finish = (completed: boolean) => {
+          if (finished) return;
+          finished = true;
+          options.pool.settle(lease, {
+            actualTokens: lease.estimatedTokens,
+            ...(completed ? {} : { cooldownMs: 5_000 }),
+          });
+          record(lease, completed ? 200 : 0, startedAt, 0, 0, lease.estimatedTokens);
+          releaseAbort();
+        };
+        streamData.on('end', () => finish(true));
+        streamData.on('error', () => finish(false));
+        reply.raw.on('close', () => {
+          if (!reply.raw.writableFinished) {
+            try {
+              (streamData as any).destroy?.();
+            } catch {
+              // best effort
+            }
+            finish(false);
+          }
+        });
+        return true;
+      }
+
+      // Per-key limits: bench and try the next key.
+      if (status === 429) {
+        options.pool.settle(lease, {
+          cooldownMs: retryAfterMs(response.headers as Record<string, any>, response.data),
+        });
+        lastError = response.data;
+        continue;
+      }
+      if (status === 401 || status === 403) {
+        options.pool.settle(lease, { cooldownMs: 5 * 60 * 1000, keyWide: true });
+        lastError = response.data;
+        continue;
+      }
+      if (status >= 500) {
+        options.pool.settle(lease, { cooldownMs: 30_000 });
+        lastError = response.data;
+        continue;
+      }
+
+      // A request-shaped error (400/404/…) will not be fixed by another key.
+      options.pool.settle(lease, { actualTokens: 0 });
+      record(lease, status, startedAt, 0, 0, 0);
+      releaseAbort();
+      return reply.code(status).send(response.data), true;
+    }
+
+    const retryAfterSec = Math.max(1, Math.ceil(options.pool.nextAvailabilityMs(model) / 1000));
+    reply.header('Retry-After', String(retryAfterSec));
+    reply
+      .code(429)
+      .send(
+        openAiError(
+          lastError?.error?.message ||
+            lastError?.message ||
+            'All Gemini API keys are at their rate limit or unavailable. Try again shortly.',
+          429,
+          'rate_limit_error',
+        ),
+      );
+    return true;
+  } finally {
+    releaseAbort();
+  }
 }

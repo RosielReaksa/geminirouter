@@ -171,6 +171,10 @@ export class LocalStateStore {
   // AI Studio keys used by the Gemini API provider. Stored server-side only and
   // never returned in full by the API.
   private geminiApiKeys: GeminiApiKeyRecord[] = [];
+  // Whether key traffic should leave through the Webshare inventory, and the
+  // stable keyId -> "address:port" pins.
+  private geminiApiProxyEnabled = false;
+  private geminiApiProxyAssignments: Record<string, string> = {};
   // Debounce timer: traffic writes are batched so disk I/O is not on the hot
   // request path. Config/account changes still flush immediately.
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -210,6 +214,11 @@ export class LocalStateStore {
             lastUsedAt: typeof key.lastUsedAt === 'string' ? key.lastUsedAt : undefined,
           }))
       : [];
+    this.geminiApiProxyEnabled = loaded.geminiApiProxyEnabled === true;
+    this.geminiApiProxyAssignments =
+      loaded.geminiApiProxyAssignments && typeof loaded.geminiApiProxyAssignments === 'object'
+        ? { ...loaded.geminiApiProxyAssignments }
+        : {};
     this.gatewayPort = this.config.port || 8045;
   }
 
@@ -222,6 +231,8 @@ export class LocalStateStore {
     proxyRoutingEnabled?: boolean;
     proxyAssignments?: Record<string, string>;
     geminiApiKeys?: GeminiApiKeyRecord[];
+    geminiApiProxyEnabled?: boolean;
+    geminiApiProxyAssignments?: Record<string, string>;
   } {
     if (fs.existsSync(this.stateFile)) {
       try {
@@ -248,6 +259,8 @@ export class LocalStateStore {
             proxyRoutingEnabled: this.proxyRoutingEnabled,
             proxyAssignments: this.proxyAssignments,
             geminiApiKeys: this.geminiApiKeys,
+            geminiApiProxyEnabled: this.geminiApiProxyEnabled,
+            geminiApiProxyAssignments: this.geminiApiProxyAssignments,
           },
           null,
           2
@@ -348,6 +361,28 @@ export class LocalStateStore {
 
   setGeminiApiKeys(keys: GeminiApiKeyRecord[]): void {
     this.geminiApiKeys = keys.map((key) => ({ ...key }));
+    this.saveState();
+  }
+
+  isGeminiApiProxyEnabled(): boolean {
+    return this.geminiApiProxyEnabled;
+  }
+
+  setGeminiApiProxyEnabled(enabled: boolean): void {
+    this.geminiApiProxyEnabled = enabled;
+    this.saveState();
+  }
+
+  getGeminiApiProxyAssignments(): Record<string, string> {
+    return { ...this.geminiApiProxyAssignments };
+  }
+
+  setGeminiApiProxyAssignments(assignments: Record<string, string>): void {
+    const next: Record<string, string> = {};
+    for (const [keyId, proxyKey] of Object.entries(assignments || {})) {
+      if (typeof proxyKey === 'string' && proxyKey) next[keyId] = proxyKey;
+    }
+    this.geminiApiProxyAssignments = next;
     this.saveState();
   }
 

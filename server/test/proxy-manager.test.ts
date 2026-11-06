@@ -415,6 +415,52 @@ test('a vanished proxy forces only the affected account to be re-assigned', asyn
   assert.equal(after.get('a2'), before.get('a2'));
 });
 
+test('AI Studio keys get their own proxy pins, spread least-used', async () => {
+  const { manager } = await managerWith(inventory([1, 2]), ['a1']);
+  assert.equal(manager.setApiKeyProxyEnabled(true), true);
+
+  manager.reconcileApiKeyAssignments(['k1', 'k2', 'k3']);
+  const urls = ['k1', 'k2', 'k3'].map((id) => manager.getApiKeyProxyUrl(id));
+  assert.ok(urls.every(Boolean));
+  assert.match(urls[0]!, /^http:\/\/user\d:pass\d@\d+\.\d+\.\d+\.\d+:900\d$/);
+
+  const hosts = urls.map((url) => new URL(url!).hostname);
+  assert.equal(new Set(hosts).size, 2, 'three keys share two proxies');
+
+  const state = manager.getApiKeyProxyState();
+  assert.equal(state.enabled, true);
+  assert.equal(state.available, 2);
+  assert.equal(state.assigned, 3);
+
+  manager.setApiKeyProxyEnabled(false);
+  assert.equal(manager.getApiKeyProxyUrl('k1'), null);
+  assert.equal(manager.getApiKeyProxyState().assigned, 0);
+});
+
+test('key proxy pins survive a refresh and a restart', async () => {
+  const manager = new ProxyManager({ fetchInventory: async () => inventory([1, 2]) });
+  manager.setApiKey('test-key');
+  manager.setApiKeyProxyEnabled(true);
+  await manager.refreshProxies();
+  manager.reconcileApiKeyAssignments(['k1', 'k2']);
+
+  const before = new Map(
+    ['k1', 'k2'].map((id) => [id, manager.getApiKeyProxyUrl(id)]),
+  );
+  const saved = manager.getApiKeyAssignmentKeys();
+
+  const second = new ProxyManager({ fetchInventory: async () => inventory([2, 1]) });
+  second.setApiKey('test-key');
+  second.setApiKeyProxyEnabled(true);
+  second.hydrateApiKeyAssignments(saved);
+  await second.refreshProxies();
+  second.reconcileApiKeyAssignments(['k1', 'k2']);
+
+  for (const id of ['k1', 'k2']) {
+    assert.equal(second.getApiKeyProxyUrl(id), before.get(id));
+  }
+});
+
 test('sync results never expose proxy credentials to API clients', async () => {
   const { manager } = await managerWith(inventory([1]), ['a1']);
   const rpc = async () => ({ success: true });

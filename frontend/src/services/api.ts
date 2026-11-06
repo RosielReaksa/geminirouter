@@ -452,6 +452,8 @@ export class ApiClient {
       () => ({
         models: ['gemini-3.1-flash-lite', 'gemini-3.5-flash-lite'],
         limits: { rpm: 15, tpm: 250000, rpd: 500 },
+        queue: { depth: 0, active: 0, maxWaitMs: 30000, maxConcurrentPerKey: 4, maxQueueSize: 200 },
+        proxy: { enabled: false, available: 0, hasApiKey: false, assigned: 0 },
         keys: [],
       })
     );
@@ -489,6 +491,13 @@ export class ApiClient {
       `/api/gemini/keys/${encodeURIComponent(id)}/test`,
       { method: 'POST' }
     );
+  }
+
+  async setGeminiApiProxy(enabled: boolean): Promise<GeminiApiConfig> {
+    return this.mutateJson<GeminiApiConfig>('/api/gemini/proxy', {
+      method: 'POST',
+      body: JSON.stringify({ enabled }),
+    });
   }
 
   async getTrafficVolume(range: TrafficVolumeRange): Promise<{ data: TrafficVolumeResponse; isLiveApi: boolean }> {

@@ -47,7 +47,19 @@ test('config starts empty with the two Gemini models', async () => {
   assert.equal(body.limits.rpm, 15);
   assert.equal(body.limits.tpm, 250000);
   assert.equal(body.limits.rpd, 500);
+  assert.equal(body.proxy.enabled, false);
+  assert.equal(body.proxy.available, 0);
   assert.deepEqual(body.keys, []);
+});
+
+test('enabling key proxies without a Webshare key is refused', async () => {
+  const res = await app.inject({
+    method: 'POST',
+    url: '/api/gemini/proxy',
+    payload: { enabled: true },
+  });
+  assert.equal(res.statusCode, 400);
+  assert.match(res.json().error, /Webshare/i);
 });
 
 test('adds several keys at once and only returns them masked', async () => {

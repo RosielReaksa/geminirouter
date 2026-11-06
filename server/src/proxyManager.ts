@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { HttpsProxyAgent } from 'https-proxy-agent';
 
 /**
  * Webshare proxy inventory and per-account assignment.
@@ -117,6 +118,13 @@ export class ProxyManager {
    * onto a different IP.
    */
   private persistedAssignments = new Map<string, string>();
+  // AI Studio key -> proxy. Kept separate from account assignments: the key
+  // pool can use proxies while account routing is off (or vice versa).
+  private apiKeyProxyEnabled = false;
+  private apiKeyAssignments = new Map<string, WebshareProxy>();
+  private persistedApiKeyAssignments = new Map<string, string>();
+  private apiKeyAgentCache = new Map<string, HttpsProxyAgent<string>>();
+  private apiKeyRoundRobin = 0;
 
   /**
    * @param options.fetchInventory Injectable inventory source. Production uses
@@ -133,6 +141,7 @@ export class ProxyManager {
     this.apiKey = apiKey.trim();
     if (!this.apiKey) {
       this.enabled = false;
+      this.apiKeyProxyEnabled = false;
       this.clearInventory();
     }
   }
@@ -148,8 +157,35 @@ export class ProxyManager {
   setEnabled(enabled: boolean): boolean {
     if (enabled && !this.hasApiKey()) return false;
     this.enabled = enabled;
-    if (!enabled) this.clearInventory();
+    if (!enabled) {
+      this.assignments.clear();
+      if (!this.apiKeyProxyEnabled) this.clearInventory();
+    }
     return true;
+  }
+
+  /**
+   * Route AI Studio key traffic through the Webshare inventory. The inventory is
+   * shared with account routing; this flag only decides whether keys use it.
+   */
+  setApiKeyProxyEnabled(enabled: boolean): boolean {
+    if (enabled && !this.hasApiKey()) return false;
+    this.apiKeyProxyEnabled = enabled;
+    if (!enabled) {
+      this.apiKeyAssignments.clear();
+      this.apiKeyAgentCache.clear();
+      if (!this.enabled) this.clearInventory();
+    }
+    return true;
+  }
+
+  isApiKeyProxyEnabled(): boolean {
+    return this.apiKeyProxyEnabled && this.hasApiKey();
+  }
+
+  /** True when the shared inventory is needed by either routing mode. */
+  isProxyInventoryActive(): boolean {
+    return this.isEnabled() || this.isApiKeyProxyEnabled();
   }
 
   /** True only when routing is switched on AND a key is present. */
@@ -168,6 +204,8 @@ export class ProxyManager {
   private clearInventory(): void {
     this.proxyList = [];
     this.assignments.clear();
+    this.apiKeyAssignments.clear();
+    this.apiKeyAgentCache.clear();
     this.lastFetchedAt = 0;
   }
 
@@ -186,11 +224,13 @@ export class ProxyManager {
     try {
       const proxies = await this.fetchInventoryImpl();
       const previous = new Map(this.assignments);
+      const previousApi = new Map(this.apiKeyAssignments);
 
       this.proxyList = proxies;
       this.lastFetchedAt = Date.now();
       this.lastError = null;
       this.restoreAssignments(previous);
+      this.restoreApiKeyAssignments(previousApi);
 
       return { ok: true, proxyCount: proxies.length };
     } catch (err: any) {
@@ -250,11 +290,28 @@ export class ProxyManager {
     }
   }
 
+  /** Persisted AI Studio key -> proxy mapping. */
+  hydrateApiKeyAssignments(assignments: Record<string, string>): void {
+    this.persistedApiKeyAssignments.clear();
+    for (const [keyId, key] of Object.entries(assignments || {})) {
+      if (typeof key === 'string' && key) this.persistedApiKeyAssignments.set(keyId, key);
+    }
+  }
+
   /** Current mapping as `accountId -> "address:port"`, for persistence. */
   getAssignmentKeys(): Record<string, string> {
     const result: Record<string, string> = {};
     for (const [accountId, proxy] of this.assignments) {
       result[accountId] = proxyKey(proxy);
+    }
+    return result;
+  }
+
+  /** Current AI Studio key mapping as `keyId -> "address:port"`. */
+  getApiKeyAssignmentKeys(): Record<string, string> {
+    const result: Record<string, string> = {};
+    for (const [keyId, proxy] of this.apiKeyAssignments) {
+      result[keyId] = proxyKey(proxy);
     }
     return result;
   }
@@ -280,6 +337,23 @@ export class ProxyManager {
       if (this.assignments.has(accountId)) continue;
       const match = byKey.get(key);
       if (match) this.assignments.set(accountId, match);
+    }
+  }
+
+  /** Refresh counterpart for AI Studio key assignments. */
+  private restoreApiKeyAssignments(previous: Map<string, WebshareProxy>): void {
+    const byKey = new Map<string, WebshareProxy>();
+    for (const proxy of this.proxyList) byKey.set(proxyKey(proxy), proxy);
+
+    this.apiKeyAssignments.clear();
+    for (const [keyId, oldProxy] of previous) {
+      const match = byKey.get(proxyKey(oldProxy));
+      if (match) this.apiKeyAssignments.set(keyId, match);
+    }
+    for (const [keyId, key] of this.persistedApiKeyAssignments) {
+      if (this.apiKeyAssignments.has(keyId)) continue;
+      const match = byKey.get(key);
+      if (match) this.apiKeyAssignments.set(keyId, match);
     }
   }
 
@@ -374,6 +448,118 @@ export class ProxyManager {
     if (!this.isEnabled()) return null;
     const proxy = this.assignments.get(accountId);
     return proxy ? toProxyUrl(proxy) : null;
+  }
+
+  /**
+   * Assign one proxy to each AI Studio key, keeping existing pins. Keys are
+   * spread least-used first; when there are more keys than proxies, extras share
+   * an IP. Does nothing when key proxies are disabled or the inventory is empty.
+   */
+  reconcileApiKeyAssignments(keyIds: string[]): void {
+    const unique = [...new Set(keyIds)];
+    const live = new Set(unique);
+
+    for (const keyId of [...this.apiKeyAssignments.keys()]) {
+      if (!live.has(keyId)) this.apiKeyAssignments.delete(keyId);
+    }
+
+    if (!this.isApiKeyProxyEnabled() || this.proxyList.length === 0) return;
+
+    const byKey = new Map<string, WebshareProxy>();
+    for (const proxy of this.proxyList) byKey.set(proxyKey(proxy), proxy);
+
+    for (const keyId of unique) {
+      const current = this.apiKeyAssignments.get(keyId);
+      if (!current || !byKey.has(proxyKey(current))) {
+        this.assignProxyToApiKey(keyId, byKey);
+      }
+    }
+  }
+
+  private assignProxyToApiKey(
+    keyId: string,
+    byKey: Map<string, WebshareProxy>,
+  ): WebshareProxy | null {
+    if (!this.isApiKeyProxyEnabled() || this.proxyList.length === 0) {
+      this.apiKeyAssignments.delete(keyId);
+      return null;
+    }
+
+    const usage = new Map<string, number>();
+    for (const proxy of this.proxyList) usage.set(proxyKey(proxy), 0);
+    for (const [id, proxy] of this.apiKeyAssignments) {
+      if (id === keyId) continue;
+      const key = proxyKey(proxy);
+      if (usage.has(key)) usage.set(key, (usage.get(key) ?? 0) + 1);
+    }
+
+    const count = this.proxyList.length;
+    let best: WebshareProxy | null = null;
+    let bestUsage = Number.POSITIVE_INFINITY;
+    for (let offset = 0; offset < count; offset += 1) {
+      const candidate = this.proxyList[(this.apiKeyRoundRobin + offset) % count];
+      const candidateUsage = usage.get(proxyKey(candidate)) ?? 0;
+      if (candidateUsage < bestUsage) {
+        best = candidate;
+        bestUsage = candidateUsage;
+      }
+    }
+
+    this.apiKeyRoundRobin = (this.apiKeyRoundRobin + 1) % Math.max(count, 1);
+    if (!best) {
+      this.apiKeyAssignments.delete(keyId);
+      return null;
+    }
+    const canonical = byKey.get(proxyKey(best)) ?? best;
+    this.apiKeyAssignments.set(keyId, canonical);
+    return canonical;
+  }
+
+  /** Proxy URL for an AI Studio key, or null when the key goes direct. */
+  getApiKeyProxyUrl(keyId: string): string | null {
+    if (!this.isApiKeyProxyEnabled()) return null;
+    const proxy = this.apiKeyAssignments.get(keyId);
+    return proxy ? toProxyUrl(proxy) : null;
+  }
+
+  /** Cached HTTPS-over-HTTP agent for a key's assigned proxy. */
+  getApiKeyProxyAgent(keyId: string): HttpsProxyAgent<string> | null {
+    const url = this.getApiKeyProxyUrl(keyId);
+    if (!url) return null;
+
+    const cached = this.apiKeyAgentCache.get(url);
+    if (cached) return cached;
+
+    const agent = new HttpsProxyAgent<string>(url);
+    this.apiKeyAgentCache.set(url, agent);
+    return agent;
+  }
+
+  getApiKeyProxySummary(
+    keyId: string,
+  ): { address: string; port: number; country: string | null } | null {
+    if (!this.isApiKeyProxyEnabled()) return null;
+    const proxy = this.apiKeyAssignments.get(keyId);
+    if (!proxy) return null;
+    return {
+      address: proxy.proxy_address,
+      port: proxyPort(proxy),
+      country: proxy.country_code ? proxy.country_code.toUpperCase() : null,
+    };
+  }
+
+  getApiKeyProxyState(): {
+    enabled: boolean;
+    available: number;
+    hasApiKey: boolean;
+    assigned: number;
+  } {
+    return {
+      enabled: this.isApiKeyProxyEnabled(),
+      available: this.proxyList.length,
+      hasApiKey: this.hasApiKey(),
+      assigned: this.apiKeyAssignments.size,
+    };
   }
 
   /**

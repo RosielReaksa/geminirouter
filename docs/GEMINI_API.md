@@ -29,22 +29,41 @@ leaves the server.
 
 ## Rate limits
 
-Each key gets its own free-tier budget, configurable through the environment:
+Each key is tracked **per model**, because AI Studio enforces separate limits for
+each model:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `GEMINI_API_RPM` | 15 | requests per minute per key |
-| `GEMINI_API_TPM` | 250000 | tokens per minute per key |
-| `GEMINI_API_RPD` | 500 | requests per day per key |
+| `GEMINI_API_RPM` | 15 | requests per minute per key/model |
+| `GEMINI_API_TPM` | 250000 | tokens per minute per key/model |
+| `GEMINI_API_RPD` | 500 | requests per day per key/model |
+| `GEMINI_API_MAX_WAIT_MS` | 30000 | how long a request may wait for capacity |
+| `GEMINI_API_CONCURRENCY` | 4 | concurrent calls per key |
+| `GEMINI_API_QUEUE_LIMIT` | 200 | maximum queued requests |
 
-The pool picks the least-used key with capacity, counts the request and an
-estimated token cost before calling Google, and benches a key for its
-`Retry-After` when Google returns 429. A 401/403 benches the key for five
-minutes; a 5xx for thirty seconds. If every key is exhausted the client gets a
-429 with an OpenAI-style error.
+RPM and TPM are **sliding token buckets**, not fixed calendar minutes, so a burst
+at `:59` does not wait for the next minute. Requests that cannot be admitted wait
+in a fair queue (round-robin across client IPs) for up to `maxWaitMs`; if the
+wait expires the client gets a 429 with the earliest `Retry-After`. A key that
+returns 429 is benched for Google's `Retry-After`; 401/403 benches the key for
+five minutes; 5xx for thirty seconds.
 
-Adding more keys raises the pool's total RPM, TPM and RPD. The dashboard shows
-current-minute and current-day usage per key.
+## Egress proxies
+
+The Gemini API keys can optionally leave through the Webshare inventory:
+
+- Toggle **Egress proxies** on the Gemini API page.
+- Each key gets one static proxy (least-used assignment); when there are more
+  keys than proxies, extras share an IP.
+- Assignments are persisted (`address:port` only, no credentials), so a restart
+  keeps the same key on the same IP.
+- The Test button and live traffic both use the assigned proxy.
+- Proxies change the **egress IP only**. They do not add RPM/TPM/RPD and do not
+  bypass Google's project or account limits.
+
+The inventory is the same list managed on the Proxy page. Account routing and key
+routing are independent: you can use proxies for keys while account routing is
+off, and vice versa.
 
 ## Routing
 

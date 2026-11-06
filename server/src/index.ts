@@ -148,6 +148,7 @@ export async function createServer(): Promise<{
   const geminiApiConfig = () => ({
     models: [...GEMINI_API_MODELS],
     limits: geminiApiPool.getLimits(),
+    queue: geminiApiPool.getQueueStats(),
     keys: geminiApiPool.snapshot(),
   });
   // Webshare proxy routing. The bridge only decides which proxy each account
@@ -166,12 +167,32 @@ export async function createServer(): Promise<{
     proxyManager.setApiKey(effectiveProxyKey);
     // Restore the last account -> proxy mapping so a restart keeps the same IP.
     proxyManager.hydrateAssignments(store.getProxyAssignments());
+    proxyManager.hydrateApiKeyAssignments(store.getGeminiApiProxyAssignments());
+    if (store.isGeminiApiProxyEnabled()) proxyManager.setApiKeyProxyEnabled(true);
     // A key alone does not mean routing is wanted: honour the dashboard's last
     // choice. With no saved choice yet (fresh install plus env key), enabling is
     // the sensible default.
     const wantRouting = store.getProxyRoutingEnabled() ?? Boolean(envProxyKey);
     if (wantRouting) proxyManager.setEnabled(true);
   }
+
+  /** Assign a stable proxy to every AI Studio key and persist the mapping. */
+  const syncApiKeyProxyAssignments = (): void => {
+    const keyIds = store.getGeminiApiKeys().map((key) => key.id);
+    proxyManager.reconcileApiKeyAssignments(keyIds);
+    store.setGeminiApiProxyAssignments(
+      proxyManager.isApiKeyProxyEnabled() ? proxyManager.getApiKeyAssignmentKeys() : {},
+    );
+  };
+
+  const geminiConfig = () => ({
+    ...geminiApiConfig(),
+    proxy: proxyManager.getApiKeyProxyState(),
+    keys: geminiApiPool.snapshot().map((key) => ({
+      ...key,
+      proxy: proxyManager.getApiKeyProxySummary(key.id),
+    })),
+  });
 
   /**
    * Compute the desired per-account proxy state and push the changes to the
@@ -231,7 +252,7 @@ export async function createServer(): Promise<{
       proxyManager.getRefreshIntervalMs(),
   );
   const proxyRefreshTimer = setInterval(() => {
-    if (!proxyManager.isEnabled()) return;
+    if (!proxyManager.isProxyInventoryActive()) return;
     void (async () => {
       const refresh = await proxyManager.refreshProxies();
       if (!refresh.ok) {
@@ -239,32 +260,38 @@ export async function createServer(): Promise<{
         return;
       }
       // Pick up accounts added since the last cycle before assigning proxies.
-      try {
-        await loadCoreAccounts();
-      } catch {
-        // Keep the last known pool; sync still runs against the store.
+      if (proxyManager.isEnabled()) {
+        try {
+          await loadCoreAccounts();
+        } catch {
+          // Keep the last known pool; sync still runs against the store.
+        }
+        const sync = await runProxySync();
+        if (sync.failed > 0) {
+          console.warn('[ProxyManager] Could not apply some proxy assignments:', sync.errors.join('; '));
+        }
       }
-      const sync = await runProxySync();
-      if (sync.failed > 0) {
-        console.warn('[ProxyManager] Could not apply some proxy assignments:', sync.errors.join('; '));
-      }
+      if (proxyManager.isApiKeyProxyEnabled()) syncApiKeyProxyAssignments();
     })();
   }, proxyRefreshIntervalMs);
   proxyRefreshTimer.unref();
 
   // Initial inventory + assignment pass. Deferred so server startup is never
   // blocked by the Webshare API; skipped entirely when routing is off.
-  if (proxyManager.isEnabled()) {
+  if (proxyManager.isProxyInventoryActive()) {
     void (async () => {
       const refresh = await proxyManager.refreshProxies();
       if (!refresh.ok) {
         console.warn('[ProxyManager] Initial refresh failed:', refresh.error);
         return;
       }
-      const sync = await runProxySync();
-      if (sync.failed > 0) {
-        console.warn('[ProxyManager] Could not apply some proxy assignments:', sync.errors.join('; '));
+      if (proxyManager.isEnabled()) {
+        const sync = await runProxySync();
+        if (sync.failed > 0) {
+          console.warn('[ProxyManager] Could not apply some proxy assignments:', sync.errors.join('; '));
+        }
       }
+      if (proxyManager.isApiKeyProxyEnabled()) syncApiKeyProxyAssignments();
     })();
   }
   const initialCfg = store.getConfig();
@@ -380,6 +407,7 @@ export async function createServer(): Promise<{
       pool: geminiApiPool,
       getApiKeys: gatewayApiKeys,
       recordTraffic: (record) => store.addTrafficRecord(record),
+      getProxyAgent: (keyId) => proxyManager.getApiKeyProxyAgent(keyId),
     });
     if (handledByApiKeys) return;
 
@@ -1883,7 +1911,7 @@ export async function createServer(): Promise<{
 
   // 10d. Gemini API keys (AI Studio). These serve gemini-3.1-flash-lite and
   // gemini-3.5-flash-lite while the rest of the catalog stays on the account pool.
-  app.get('/api/gemini/config', async () => geminiApiConfig());
+  app.get('/api/gemini/config', async () => geminiConfig());
 
   app.post<{ Body?: { label?: string; key?: string; keys?: string[] } }>(
     '/api/gemini/keys',
@@ -1932,7 +1960,8 @@ export async function createServer(): Promise<{
 
       store.setGeminiApiKeys(current);
       geminiApiPool.setKeys(current);
-      return { added, skipped, ...geminiApiConfig() };
+      syncApiKeyProxyAssignments();
+      return { added, skipped, ...geminiConfig() };
     },
   );
 
@@ -1952,7 +1981,7 @@ export async function createServer(): Promise<{
 
       store.setGeminiApiKeys(keys);
       geminiApiPool.setKeys(keys);
-      return geminiApiConfig();
+      return geminiConfig();
     },
   );
 
@@ -1964,7 +1993,41 @@ export async function createServer(): Promise<{
     }
     store.setGeminiApiKeys(next);
     geminiApiPool.setKeys(next);
-    return geminiApiConfig();
+    syncApiKeyProxyAssignments();
+    return geminiConfig();
+  });
+
+  // Route AI Studio key traffic through the Webshare inventory (one proxy per key).
+  app.post<{ Body?: { enabled?: boolean } }>('/api/gemini/proxy', async (request, reply) => {
+    const enabled = request.body?.enabled === true;
+
+    if (enabled) {
+      if (!proxyManager.hasApiKey()) {
+        return reply
+          .code(400)
+          .send({ error: 'Save a Webshare API key on the Proxy page first.' });
+      }
+      if (proxyManager.getConfigSnapshot().proxyCount === 0) {
+        const refresh = await proxyManager.refreshProxies();
+        if (!refresh.ok) {
+          return reply
+            .code(502)
+            .send({ error: refresh.error || 'Could not load the proxy inventory.' });
+        }
+      }
+      if (proxyManager.getConfigSnapshot().proxyCount === 0) {
+        return reply.code(400).send({ error: 'No Webshare proxies are available.' });
+      }
+      if (!proxyManager.setApiKeyProxyEnabled(true)) {
+        return reply.code(400).send({ error: 'Could not enable key proxies.' });
+      }
+    } else {
+      proxyManager.setApiKeyProxyEnabled(false);
+    }
+
+    store.setGeminiApiProxyEnabled(enabled);
+    syncApiKeyProxyAssignments();
+    return geminiConfig();
   });
 
   app.post<{ Params: { id: string } }>('/api/gemini/keys/:id/test', async (request, reply) => {
@@ -1972,6 +2035,8 @@ export async function createServer(): Promise<{
     if (!key) return reply.code(404).send({ ok: false, error: 'API key not found' });
 
     const startedAt = Date.now();
+    const proxyAgent = proxyManager.getApiKeyProxyAgent(key.id);
+    const proxySummary = proxyManager.getApiKeyProxySummary(key.id);
     try {
       const response = await axios.post(
         `${geminiApiBaseUrl()}/v1beta/openai/chat/completions`,
@@ -1987,6 +2052,8 @@ export async function createServer(): Promise<{
           },
           timeout: 30_000,
           validateStatus: () => true,
+          ...(proxyAgent ? { httpAgent: proxyAgent, httpsAgent: proxyAgent } : {}),
+          proxy: false,
         },
       );
       const ok = response.status === 200;
@@ -1995,6 +2062,7 @@ export async function createServer(): Promise<{
         status: response.status,
         latencyMs: Date.now() - startedAt,
         sample: response.data?.choices?.[0]?.message?.content ?? null,
+        proxy: proxySummary,
         error: ok
           ? undefined
           : response.data?.error?.message || `HTTP ${response.status}`,
@@ -2004,6 +2072,7 @@ export async function createServer(): Promise<{
         ok: false,
         status: 0,
         latencyMs: Date.now() - startedAt,
+        proxy: proxySummary,
         error: error?.message || String(error),
       };
     }

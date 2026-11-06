@@ -228,11 +228,23 @@ export interface GeminiApiLimits {
   rpd: number;
 }
 
+export interface GeminiApiBucketUsage {
+  rpm: number;
+  tpm: number;
+  rpd: number;
+  limitRpm: number;
+  limitTpm: number;
+  limitRpd: number;
+  active: number;
+  cooldownUntil: number | null;
+}
+
 export interface GeminiApiUsage {
   requestsToday: number;
   tokensToday: number;
   rpm: number;
   tpm: number;
+  active: number;
   cooldownUntil: number | null;
   lastUsedAt?: string;
 }
@@ -245,11 +257,31 @@ export interface GeminiApiKey {
   createdAt: string;
   lastUsedAt?: string;
   usage: GeminiApiUsage;
+  models: Record<string, GeminiApiBucketUsage>;
+  /** Egress proxy assigned to this key, or null for direct. */
+  proxy?: { address: string; port: number; country: string | null } | null;
+}
+
+export interface GeminiApiProxyState {
+  enabled: boolean;
+  available: number;
+  hasApiKey: boolean;
+  assigned: number;
+}
+
+export interface GeminiApiQueue {
+  depth: number;
+  active: number;
+  maxWaitMs: number;
+  maxConcurrentPerKey: number;
+  maxQueueSize: number;
 }
 
 export interface GeminiApiConfig {
   models: string[];
   limits: GeminiApiLimits;
+  queue: GeminiApiQueue;
+  proxy: GeminiApiProxyState;
   keys: GeminiApiKey[];
   added?: number;
   skipped?: number;
@@ -260,6 +292,7 @@ export interface GeminiApiTestResult {
   status?: number;
   latencyMs: number;
   sample?: string | null;
+  proxy?: { address: string; port: number; country: string | null } | null;
   error?: string;
 }
 

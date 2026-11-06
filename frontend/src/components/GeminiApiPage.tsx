@@ -1,9 +1,11 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
+  Activity,
   CheckCircle2,
   Gauge,
   KeyRound,
   Loader2,
+  Network,
   Plus,
   Power,
   RefreshCw,
@@ -22,6 +24,8 @@ interface GeminiApiPageProps {
 const FALLBACK_CONFIG: GeminiApiConfig = {
   models: ['gemini-3.1-flash-lite', 'gemini-3.5-flash-lite'],
   limits: { rpm: 15, tpm: 250000, rpd: 500 },
+  queue: { depth: 0, active: 0, maxWaitMs: 30000, maxConcurrentPerKey: 4, maxQueueSize: 200 },
+  proxy: { enabled: false, available: 0, hasApiKey: false, assigned: 0 },
   keys: [],
 };
 
@@ -90,6 +94,7 @@ export const GeminiApiPage: React.FC<GeminiApiPageProps> = ({ onReady }) => {
   const [label, setLabel] = useState('');
   const [keysText, setKeysText] = useState('');
   const [busy, setBusy] = useState(false);
+  const [proxyBusy, setProxyBusy] = useState(false);
   const [testingId, setTestingId] = useState<string | null>(null);
   const [testResults, setTestResults] = useState<Record<string, GeminiApiTestResult>>({});
   const [message, setMessage] = useState<string | null>(null);
@@ -193,7 +198,11 @@ export const GeminiApiPage: React.FC<GeminiApiPageProps> = ({ onReady }) => {
       const result = await api.testGeminiApiKey(key.id);
       setTestResults((current) => ({ ...current, [key.id]: result }));
       if (result.ok) {
-        setMessage(`${key.label}: answered in ${result.latencyMs} ms.`);
+        setMessage(
+          `${key.label}: answered in ${result.latencyMs} ms${
+            result.proxy ? ` via ${result.proxy.address} (${result.proxy.country ?? '??'})` : ' (direct)'
+          }.`,
+        );
       } else {
         setError(`${key.label}: ${result.error || 'test failed'}`);
       }
@@ -201,6 +210,25 @@ export const GeminiApiPage: React.FC<GeminiApiPageProps> = ({ onReady }) => {
       setError(err?.message || 'Could not test the key.');
     } finally {
       setTestingId(null);
+    }
+  };
+
+  const handleToggleProxy = async () => {
+    setProxyBusy(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const data = await api.setGeminiApiProxy(!config.proxy.enabled);
+      setConfig(data);
+      setMessage(
+        data.proxy.enabled
+          ? `Key proxies enabled — ${data.proxy.assigned} key(s) assigned across ${data.proxy.available} IPs.`
+          : 'Key proxies disabled; key traffic goes direct.',
+      );
+    } catch (err: any) {
+      setError(err?.message || 'Could not change the key proxy setting.');
+    } finally {
+      setProxyBusy(false);
     }
   };
 
@@ -231,13 +259,24 @@ export const GeminiApiPage: React.FC<GeminiApiPageProps> = ({ onReady }) => {
         </button>
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
         <div className="rounded-2xl border border-[#EAE5DE] bg-[#FFFFFF] p-4 shadow-soft">
           <div className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-wider text-[#9E988F]">
             <KeyRound className="h-3.5 w-3.5" /> Keys
           </div>
           <div className="mt-2 font-serif-editorial text-2xl text-[#2A2723]">{keys.length}</div>
           <div className="text-[11px] text-[#9E988F]">{activeKeys.length} active right now</div>
+        </div>
+        <div className="rounded-2xl border border-[#EAE5DE] bg-[#FFFFFF] p-4 shadow-soft">
+          <div className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-wider text-[#9E988F]">
+            <Activity className="h-3.5 w-3.5" /> In flight
+          </div>
+          <div className="mt-2 font-serif-editorial text-2xl text-[#2A2723]">
+            {config.queue.active}
+          </div>
+          <div className="text-[11px] text-[#9E988F]">
+            {config.queue.depth} waiting · {config.queue.maxConcurrentPerKey}/key
+          </div>
         </div>
         <div className="rounded-2xl border border-[#EAE5DE] bg-[#FFFFFF] p-4 shadow-soft">
           <div className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-wider text-[#9E988F]">
@@ -267,8 +306,47 @@ export const GeminiApiPage: React.FC<GeminiApiPageProps> = ({ onReady }) => {
             {config.limits.rpm} RPM · {formatCompact(config.limits.tpm)} TPM
           </div>
           <div className="text-[11px] text-[#9E988F]">
-            {config.limits.rpd.toLocaleString()} RPD · free tier
+            {config.limits.rpd.toLocaleString()} RPD · waits up to{' '}
+            {Math.round(config.queue.maxWaitMs / 1000)}s
           </div>
+        </div>
+      </div>
+
+      <div className="rounded-2xl border border-[#EAE5DE] bg-[#FFFFFF] p-5 shadow-soft">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div className="flex items-start gap-3">
+            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-[#FAF2EF] text-[#C25938]">
+              <Network className="h-4 w-4" />
+            </span>
+            <div>
+              <div className="text-sm font-semibold text-[#2A2723]">Egress proxies</div>
+              <div className="text-xs text-[#706B65]">
+                {config.proxy.hasApiKey
+                  ? `${config.proxy.available} Webshare proxies available · ${config.proxy.assigned} key(s) assigned · one static IP per key`
+                  : 'Save a Webshare API key on the Proxy page to enable per-key proxies.'}
+              </div>
+              <div className="mt-1 text-[10px] text-[#9E988F]">
+                Proxies change the egress IP only; they do not add rate-limit quota.
+              </div>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => void handleToggleProxy()}
+            disabled={proxyBusy || !config.proxy.hasApiKey}
+            className={`flex items-center gap-1.5 rounded-xl border px-4 py-2 text-xs font-medium transition-all disabled:cursor-not-allowed disabled:opacity-50 ${
+              config.proxy.enabled
+                ? 'border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100'
+                : 'border-[#C25938] bg-[#C25938] text-white hover:border-[#a5462b] hover:bg-[#a5462b]'
+            }`}
+          >
+            {proxyBusy ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Network className="h-3.5 w-3.5" />
+            )}
+            {config.proxy.enabled ? 'Disable proxies' : 'Enable proxies'}
+          </button>
         </div>
       </div>
 
@@ -393,7 +471,9 @@ export const GeminiApiPage: React.FC<GeminiApiPageProps> = ({ onReady }) => {
           <div>
             <div className="text-sm font-semibold text-[#2A2723]">Keys</div>
             <div className="text-[11px] text-[#9E988F]">
-              Rotation is least-used first; a key that returns 429 is benched for its Retry-After.
+              Rotation is least-used first. A key that returns 429 is benched for its
+              Retry-After; requests wait up to {Math.round(config.queue.maxWaitMs / 1000)}s for a
+              free slot, with {config.queue.maxConcurrentPerKey} concurrent calls per key.
             </div>
           </div>
           <span className="font-mono-code text-xs text-[#C25938]">{keys.length} key(s)</span>
@@ -435,6 +515,13 @@ export const GeminiApiPage: React.FC<GeminiApiPageProps> = ({ onReady }) => {
                       <div className="mt-1 font-mono-code text-[11px] text-[#706B65]">
                         {key.maskedKey}
                         <span className="ml-2 text-[#9E988F]">added {formatWhen(key.createdAt)}</span>
+                        <span className="ml-2 text-[#9E988F]">
+                          {key.proxy
+                            ? `via ${key.proxy.address} (${key.proxy.country ?? '??'})`
+                            : config.proxy.enabled
+                              ? 'waiting for proxy'
+                              : 'direct'}
+                        </span>
                       </div>
                       {cooling && (
                         <div className="mt-1 text-[10px] text-amber-700">
@@ -485,10 +572,35 @@ export const GeminiApiPage: React.FC<GeminiApiPageProps> = ({ onReady }) => {
                     </div>
                   </div>
 
-                  <div className="mt-3 flex flex-wrap gap-4">
-                    <UsageBar label="RPM" used={key.usage.rpm} limit={config.limits.rpm} />
-                    <UsageBar label="TPM" used={key.usage.tpm} limit={config.limits.tpm} />
-                    <UsageBar label="RPD" used={key.usage.requestsToday} limit={config.limits.rpd} />
+                  <div className="mt-3 space-y-2">
+                    {Object.entries(key.models ?? {}).map(([modelId, bucket]) => (
+                      <div
+                        key={modelId}
+                        className="rounded-xl border border-[#F2ECE4] bg-[#FCFAF7] p-3"
+                      >
+                        <div className="flex items-center justify-between text-[10px] font-semibold text-[#706B65]">
+                          <span>{modelId}</span>
+                          <span
+                            className={
+                              bucket.active > 0 ? 'text-[#C25938]' : 'text-[#9E988F]'
+                            }
+                          >
+                            {bucket.active} in flight
+                          </span>
+                        </div>
+                        <div className="mt-2 flex flex-wrap gap-3">
+                          <UsageBar label="RPM" used={bucket.rpm} limit={bucket.limitRpm} />
+                          <UsageBar label="TPM" used={bucket.tpm} limit={bucket.limitTpm} />
+                          <UsageBar label="RPD" used={bucket.rpd} limit={bucket.limitRpd} />
+                        </div>
+                        {bucket.cooldownUntil && bucket.cooldownUntil > now && (
+                          <div className="mt-1 text-[10px] text-amber-700">
+                            Cooling until{' '}
+                            {new Date(bucket.cooldownUntil).toLocaleTimeString()}
+                          </div>
+                        )}
+                      </div>
+                    ))}
                   </div>
 
                   {test && (
