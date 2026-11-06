@@ -88,6 +88,20 @@ const formatWhen = (iso?: string): string => {
   });
 };
 
+/** Short cooldowns show a time; daily resets show the date too. */
+const formatCooldown = (ts: number): string => {
+  const date = new Date(ts);
+  const hours = (ts - Date.now()) / 3_600_000;
+  return hours >= 12
+    ? date.toLocaleString([], {
+        month: 'short',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+      })
+    : date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+};
+
 const barTone = (percent: number): string => {
   if (percent >= 90) return 'bg-red-500';
   if (percent >= 65) return 'bg-amber-500';
@@ -596,7 +610,13 @@ export const GeminiApiPage: React.FC<GeminiApiPageProps> = ({ onReady }) => {
           <div className="divide-y divide-[#EAE5DE]">
             {keys.map((key) => {
               const cooling = Boolean(key.usage.cooldownUntil && key.usage.cooldownUntil > now);
-              const status = !key.enabled ? 'Disabled' : cooling ? 'Cooling' : 'Active';
+              const status = !key.enabled
+                ? 'Disabled'
+                : cooling
+                  ? key.usage.cooldownReason === 'daily'
+                    ? 'Daily limit'
+                    : 'Cooling'
+                  : 'Active';
               const statusTone = !key.enabled
                 ? 'border-stone-200 bg-stone-100 text-stone-500'
                 : cooling
@@ -627,7 +647,10 @@ export const GeminiApiPage: React.FC<GeminiApiPageProps> = ({ onReady }) => {
                       </div>
                       {cooling && (
                         <div className="mt-1 text-[10px] text-amber-700">
-                          Rate limited until {new Date(key.usage.cooldownUntil!).toLocaleTimeString()}
+                          {key.usage.cooldownReason === 'daily'
+                            ? 'Google daily quota reached'
+                            : 'Rate limited'}{' '}
+                          until {formatCooldown(key.usage.cooldownUntil!)}
                         </div>
                       )}
                       {key.usage.lastUsedAt && (
@@ -701,7 +724,7 @@ export const GeminiApiPage: React.FC<GeminiApiPageProps> = ({ onReady }) => {
                           <span>{modelId}</span>
                           <span className="flex items-center gap-2">
                             <span className="text-[#9E988F]">
-                              {Math.max(0, bucket.limitRpd - bucket.rpd)} left today
+                              Gateway {bucket.rpd} / {bucket.limitRpd} RPD today
                             </span>
                             <span
                               className={
@@ -719,8 +742,10 @@ export const GeminiApiPage: React.FC<GeminiApiPageProps> = ({ onReady }) => {
                         </div>
                         {bucket.cooldownUntil && bucket.cooldownUntil > now && (
                           <div className="mt-1 text-[10px] text-amber-700">
-                            Cooling until{' '}
-                            {new Date(bucket.cooldownUntil).toLocaleTimeString()}
+                            {bucket.cooldownReason === 'daily'
+                              ? 'Google daily quota reached'
+                              : 'Cooling'}{' '}
+                            until {formatCooldown(bucket.cooldownUntil)}
                           </div>
                         )}
                       </div>

@@ -86,6 +86,7 @@ export interface GeminiApiUsageState {
           rpd: number;
           tokensToday: number;
           cooldownUntil?: number;
+          cooldownReason?: 'daily' | 'rate' | 'error';
           lastUsedAt?: string;
         }
       >;

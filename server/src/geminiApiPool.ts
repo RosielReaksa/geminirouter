@@ -10,6 +10,8 @@ export interface GeminiApiLimits {
   rpd: number;
 }
 
+export type GeminiApiCooldownReason = 'daily' | 'rate' | 'error';
+
 export interface GeminiApiBucketSnapshot {
   /** Requests used in the current sliding minute. */
   rpm: number;
@@ -22,6 +24,7 @@ export interface GeminiApiBucketSnapshot {
   limitRpd: number;
   active: number;
   cooldownUntil: number | null;
+  cooldownReason: GeminiApiCooldownReason | null;
 }
 
 export interface GeminiApiUsageSnapshot {
@@ -31,6 +34,7 @@ export interface GeminiApiUsageSnapshot {
   tpm: number;
   active: number;
   cooldownUntil: number | null;
+  cooldownReason: GeminiApiCooldownReason | null;
   lastUsedAt?: string;
 }
 
@@ -70,6 +74,8 @@ export interface GeminiApiSettleOptions {
   actualTokens?: number;
   /** Bench this key+model for the given time (429 / 5xx). */
   cooldownMs?: number;
+  /** Why the key is benched, for the dashboard. */
+  reason?: GeminiApiCooldownReason;
   /** Bench the whole key (401/403). */
   keyWide?: boolean;
 }
@@ -95,6 +101,7 @@ interface BucketState {
   tokensToday: number;
   active: number;
   cooldownUntil: number;
+  cooldownReason?: GeminiApiCooldownReason;
   lastUsedAt?: string;
 }
 
@@ -554,6 +561,7 @@ export class GeminiApiPool {
         );
       } else {
         bucket.cooldownUntil = Math.max(bucket.cooldownUntil, now + options.cooldownMs);
+        bucket.cooldownReason = options.reason ?? 'rate';
       }
     }
 
@@ -624,6 +632,7 @@ export class GeminiApiPool {
           rpd: bucket.rpd,
           tokensToday: bucket.tokensToday,
           ...(cooling ? { cooldownUntil: bucket.cooldownUntil } : {}),
+          ...(cooling && bucket.cooldownReason ? { cooldownReason: bucket.cooldownReason } : {}),
           ...(bucket.lastUsedAt ? { lastUsedAt: bucket.lastUsedAt } : {}),
         };
       }
@@ -663,6 +672,9 @@ export class GeminiApiPool {
         }
         if (Number.isFinite(saved.cooldownUntil) && (saved.cooldownUntil ?? 0) > now) {
           bucket.cooldownUntil = Math.max(bucket.cooldownUntil, saved.cooldownUntil as number);
+          if (saved.cooldownReason === 'daily' || saved.cooldownReason === 'rate' || saved.cooldownReason === 'error') {
+            bucket.cooldownReason = saved.cooldownReason;
+          }
         }
         if (typeof saved.lastUsedAt === 'string') bucket.lastUsedAt = saved.lastUsedAt;
       }
@@ -679,6 +691,7 @@ export class GeminiApiPool {
       let tpm = 0;
       let active = 0;
       let cooldownUntil = 0;
+      let cooldownReason: GeminiApiCooldownReason | null = null;
       let lastUsedAt = key.lastUsedAt;
 
       for (const model of GEMINI_API_MODELS) {
@@ -695,17 +708,28 @@ export class GeminiApiPool {
           limitRpd: this.limits.rpd,
           active: bucket.active,
           cooldownUntil: bucket.cooldownUntil > now ? bucket.cooldownUntil : null,
+          cooldownReason:
+            bucket.cooldownUntil > now
+              ? bucket.cooldownReason ??
+                (bucket.cooldownUntil - now >= 5 * 60 * 1000 ? 'daily' : 'rate')
+              : null,
         };
         requestsToday += bucket.rpd;
         tokensToday += bucket.tokensToday;
         rpm += rpmUsed;
         tpm += tpmUsed;
         active += bucket.active;
+        if (bucket.cooldownUntil > now && bucket.cooldownUntil >= cooldownUntil) {
+          cooldownReason =
+            bucket.cooldownReason ??
+            (bucket.cooldownUntil - now >= 5 * 60 * 1000 ? 'daily' : 'rate');
+        }
         cooldownUntil = Math.max(cooldownUntil, bucket.cooldownUntil);
         if (bucket.lastUsedAt) lastUsedAt = bucket.lastUsedAt;
       }
 
       const keyCooldown = this.keyCooldowns.get(key.id) ?? 0;
+      if (keyCooldown > cooldownUntil) cooldownReason = 'error';
       cooldownUntil = Math.max(cooldownUntil, keyCooldown);
 
       return {
@@ -722,6 +746,11 @@ export class GeminiApiPool {
           tpm: Math.round(tpm),
           active,
           cooldownUntil: cooldownUntil > now ? cooldownUntil : null,
+          cooldownReason:
+            cooldownUntil > now
+              ? cooldownReason ??
+                (cooldownUntil - now >= 5 * 60 * 1000 ? 'daily' : 'rate')
+              : null,
           lastUsedAt,
         },
         models,

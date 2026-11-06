@@ -228,6 +228,8 @@ export interface GeminiApiLimits {
   rpd: number;
 }
 
+export type GeminiApiCooldownReason = 'daily' | 'rate' | 'error';
+
 export interface GeminiApiBucketUsage {
   rpm: number;
   tpm: number;
@@ -237,6 +239,7 @@ export interface GeminiApiBucketUsage {
   limitRpd: number;
   active: number;
   cooldownUntil: number | null;
+  cooldownReason: GeminiApiCooldownReason | null;
 }
 
 export interface GeminiApiUsage {
@@ -246,6 +249,7 @@ export interface GeminiApiUsage {
   tpm: number;
   active: number;
   cooldownUntil: number | null;
+  cooldownReason: GeminiApiCooldownReason | null;
   lastUsedAt?: string;
 }
 

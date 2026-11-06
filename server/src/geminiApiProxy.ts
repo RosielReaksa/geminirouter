@@ -223,7 +223,7 @@ export async function handleGeminiApiRequest(
         }
       } catch (error: any) {
         if (!proxyAgent) {
-          options.pool.settle(lease, { cooldownMs: 15_000 });
+          options.pool.settle(lease, { cooldownMs: 15_000, reason: 'error' });
           lastError = { message: error?.message || String(error) };
           lastStatus = 0;
           continue;
@@ -232,7 +232,7 @@ export async function handleGeminiApiRequest(
         try {
           response = await post(null);
         } catch (directError: any) {
-          options.pool.settle(lease, { cooldownMs: 15_000 });
+          options.pool.settle(lease, { cooldownMs: 15_000, reason: 'error' });
           lastError = { message: directError?.message || String(directError) };
           lastStatus = 0;
           continue;
@@ -299,19 +299,21 @@ export async function handleGeminiApiRequest(
       // Per-key limits: bench this key/model and try the next key. A 429 is usually
   // per project, so another key may still have quota for the same model.
       if (status === 429) {
+        const cooldown = retryAfterMs(response.headers as Record<string, any>, response.data);
         options.pool.settle(lease, {
-          cooldownMs: retryAfterMs(response.headers as Record<string, any>, response.data),
+          cooldownMs: cooldown,
+          reason: cooldown >= 5 * 60 * 1000 ? 'daily' : 'rate',
         });
         lastError = upstreamErrorBody(response.data);
         continue;
       }
       if (status === 401 || status === 403) {
-        options.pool.settle(lease, { cooldownMs: 5 * 60 * 1000, keyWide: true });
+        options.pool.settle(lease, { cooldownMs: 5 * 60 * 1000, keyWide: true, reason: 'error' });
         lastError = upstreamErrorBody(response.data);
         continue;
       }
       if (status >= 500) {
-        options.pool.settle(lease, { cooldownMs: 30_000 });
+        options.pool.settle(lease, { cooldownMs: 30_000, reason: 'error' });
         lastError = upstreamErrorBody(response.data);
         continue;
       }
