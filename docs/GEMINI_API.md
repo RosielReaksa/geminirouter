@@ -88,6 +88,12 @@ Account calls take the normal core path, so they appear on the Traffic page with
 the account email and that account's egress proxy. Every other Gemini model always
 uses the connected accounts.
 
+The free tier is capped per key, project and model (500 requests/day for these
+models). When a model's daily quota is exhausted, the key side serves the other
+Flash Lite model instead of returning 429; the Traffic row shows the requested id
+and the model that actually answered. The pool also parks the exhausted model
+until Google's stated reset time, so later requests do not probe it again.
+
 The bridge validates the caller's `Authorization: Bearer …` against the gateway
 keys before using the pool. Without keys, or for any other model, the request
 falls back to the normal core proxy path.

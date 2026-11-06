@@ -554,10 +554,24 @@ export class GeminiApiPool {
     this.schedulePump();
   }
 
+  /**
+   * Bench every key for one model. Google's daily quota is per project/model;
+   * when one key reports a multi-hour reset, probing the others only burns
+   * requests, so the whole model is parked for the same window.
+   */
+  blockModel(model: string, cooldownMs: number): void {
+    const until = this.now() + Math.max(60_000, cooldownMs);
+    for (const key of this.keys) {
+      const bucket = this.bucketFor(key.id, model);
+      bucket.cooldownUntil = Math.max(bucket.cooldownUntil, until);
+    }
+    this.schedulePump();
+  }
+
   /** Earliest time (ms from now) a model could accept work. */
   nextAvailabilityMs(model: string): number {
     const now = this.now();
-    let best = 60_000;
+    let best = Number.POSITIVE_INFINITY;
     for (const key of this.keys) {
       if (!key.enabled) continue;
       const keyCooldown = (this.keyCooldowns.get(key.id) ?? 0) - now;
@@ -577,7 +591,7 @@ export class GeminiApiPool {
       const rpmWait = bucket.rpmTokens >= 1 ? 0 : ((1 - bucket.rpmTokens) * 60_000) / this.limits.rpm;
       best = Math.min(best, rpmWait);
     }
-    return Math.max(1000, Math.ceil(best));
+    return Math.max(1000, Math.ceil(Number.isFinite(best) ? best : 60_000));
   }
 
   /** Stop timers (tests/shutdown). */

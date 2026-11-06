@@ -13,6 +13,8 @@ const GATEWAY_KEY = 'sk-test-gemini-gateway';
 
 let fake: http.Server;
 const calls: Array<{ key: string; model: string; stream: boolean }> = [];
+// Models the fake Google reports as daily-quota exhausted.
+const exhaustedModels = new Set<string>();
 
 // The fake Gemini API: key 1 is rate limited, key 2 answers (JSON or SSE).
 fake = http.createServer((req, res) => {
@@ -32,6 +34,28 @@ fake = http.createServer((req, res) => {
     }
     const key = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
     calls.push({ key, model: body.model, stream: body.stream === true });
+
+    if (exhaustedModels.has(String(body.model))) {
+      res.writeHead(429, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify([
+          {
+            error: {
+              code: 429,
+              status: 'RESOURCE_EXHAUSTED',
+              message: 'You exceeded your current quota.',
+              details: [
+                {
+                  '@type': 'type.googleapis.com/google.rpc.RetryInfo',
+                  retryDelay: '64800s',
+                },
+              ],
+            },
+          },
+        ]),
+      );
+      return;
+    }
 
     if (key.endsWith('0001')) {
       res.writeHead(429, { 'content-type': 'application/json', 'retry-after': '1' });
@@ -153,6 +177,39 @@ test('streaming responses are piped through', async () => {
   assert.match(text, /from-key2/);
   assert.match(text, /\[DONE\]/);
   assert.ok(calls.every((call) => call.stream === true));
+});
+
+test('an exhausted key model falls back to the other flash-lite model', async () => {
+  exhaustedModels.add('gemini-3.5-flash-lite');
+  try {
+    calls.length = 0;
+    const res = await chat({
+      model: 'gemini-3.5-flash-lite',
+      messages: [{ role: 'user', content: 'ping' }],
+    });
+    assert.equal(res.status, 200, 'the client must not receive a 429');
+    const body = await res.json();
+    assert.equal(body.model, 'gemini-3.1-flash-lite', 'the fallback model answered');
+    assert.ok(
+      calls.some((call) => call.model === 'gemini-3.1-flash-lite'),
+      'a key served the fallback model',
+    );
+  } finally {
+    exhaustedModels.delete('gemini-3.5-flash-lite');
+  }
+
+  const traffic = (await (
+    await fetch(`http://127.0.0.1:${bridgePort}/api/traffic`)
+  ).json()) as Array<{ modelRequested: string; modelRouted: string; provider?: string }>;
+  assert.ok(
+    traffic.some(
+      (record) =>
+        record.provider === 'gemini-api' &&
+        record.modelRequested === 'gemini-3.5-flash-lite' &&
+        record.modelRouted === 'gemini-3.1-flash-lite',
+    ),
+    'traffic records the requested and served model separately',
+  );
 });
 
 test('other Gemini models still go to the account pool, not the key pool', async () => {

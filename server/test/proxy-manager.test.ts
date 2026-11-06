@@ -582,6 +582,21 @@ test('key egress attribution follows the key proxy and disappears when disabled'
   assert.equal(manager.getEgressForKey('k1'), null);
 });
 
+test('a throttled key proxy is bypassed while the key keeps its assignment', async () => {
+  const { manager } = await managerWith(inventory([1]), ['a1']);
+  manager.setApiKeyProxyEnabled(true);
+  manager.reconcileApiKeyAssignments(['k1']);
+
+  assert.ok(manager.getApiKeyProxyAgent('k1'));
+  assert.deepEqual(manager.getEgressForKey('k1'), { address: '1.1.1.1', country: 'US' });
+
+  manager.markApiKeyProxyRateLimited('k1', 60_000);
+  assert.equal(manager.isApiKeyProxyBypassed('k1'), true);
+  assert.equal(manager.getApiKeyProxyAgent('k1'), null, 'traffic goes direct');
+  assert.equal(manager.getEgressForKey('k1'), null, 'attribution follows the direct egress');
+  assert.ok(manager.getApiKeyProxyUrl('k1'), 'the assignment survives the bypass');
+});
+
 test('sync results never expose proxy credentials to API clients', async () => {
   const { manager } = await managerWith(inventory([1]), ['a1']);
   const rpc = async () => ({ success: true });

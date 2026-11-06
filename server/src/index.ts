@@ -440,29 +440,39 @@ export async function createServer(): Promise<{
   // Round-robin turn for the two shared flash-lite models under balanced routing.
   let sharedModelTurn = 0;
   /**
-   * Pick the provider for a shared model. Balanced alternates, but always uses
-   * the key pool when no connected account can take the call (error state or
-   * model cooldown), so the account side never blocks a request it cannot serve.
+   * Pick the model the key pool should serve, or null for an account turn.
+   *
+   * Balanced alternates providers. When the requested model's key quota is
+   * exhausted, the key turn uses the other flash-lite model if it still has
+   * capacity (the traffic log records the requested and served ids separately).
+   * When no account can take the call, keys always get it.
    */
-  const sharedModelProvider = (model: string): 'keys' | 'accounts' => {
+  const sharedModelProvider = (requestedModel: string): string | null => {
     const routing = store.getGeminiApiSharedRouting();
-    if (routing === 'keys') return 'keys';
-    if (routing === 'accounts') return 'accounts';
+    const fallbackModel =
+      GEMINI_API_MODELS.find((id) => id !== requestedModel) ?? requestedModel;
+    const keyModel = geminiApiPool.hasImmediateCapacity(requestedModel)
+      ? requestedModel
+      : geminiApiPool.hasImmediateCapacity(fallbackModel)
+        ? fallbackModel
+        : null;
+
+    if (routing === 'accounts') return null;
+    if (routing === 'keys') return keyModel ?? requestedModel;
 
     const usableAccounts = store
       .getAccounts()
       .filter(
         (account) =>
           account.status !== 'error' &&
-          !leaseManager.isAccountModelInCooldown(account.id, model),
+          !leaseManager.isAccountModelInCooldown(account.id, requestedModel),
       );
-    if (usableAccounts.length === 0) return 'keys';
-    // A saturated key pool would only queue or 429; send the turn to accounts.
-    if (!geminiApiPool.hasImmediateCapacity(model)) return 'accounts';
+    if (usableAccounts.length === 0) return keyModel ?? requestedModel;
+    if (!keyModel) return null;
 
     const preferAccounts = sharedModelTurn % 2 === 0;
     sharedModelTurn += 1;
-    return preferAccounts ? 'accounts' : 'keys';
+    return preferAccounts ? null : keyModel;
   };
 
   const proxyApiRequest = async (
@@ -474,7 +484,12 @@ export async function createServer(): Promise<{
       getApiKeys: gatewayApiKeys,
       recordTraffic: (record) => store.addTrafficRecord(record),
       getProxyAgent: (keyId) => proxyManager.getApiKeyProxyAgent(keyId),
-      shouldUseKeyPool: (model) => sharedModelProvider(model) === 'keys',
+      onProxyRateLimited: (keyId) => {
+        // Proxy IPs occasionally get throttled by Google; keep the key working
+        // direct for 24 hours instead of failing every call.
+        proxyManager.markApiKeyProxyRateLimited(keyId);
+      },
+      chooseKeyModel: (model) => sharedModelProvider(model),
     });
     if (handledByApiKeys) return;
 

@@ -128,6 +128,9 @@ export class ProxyManager {
   private persistedApiKeyAssignments = new Map<string, string>();
   private apiKeyAgentCache = new Map<string, HttpsProxyAgent<string>>();
   private apiKeyRoundRobin = 0;
+  // A key's proxy that Google throttles is temporarily bypassed: the key keeps
+  // running (direct) instead of failing with a proxy-induced 429.
+  private apiKeyProxyBypassUntil = new Map<string, number>();
   // Egress health: a proxy freed from a banned account cools down before it is
   // reused; a retired proxy is never assigned again.
   private quarantineUntil = new Map<string, number>();
@@ -181,6 +184,7 @@ export class ProxyManager {
     if (!enabled) {
       this.apiKeyAssignments.clear();
       this.apiKeyAgentCache.clear();
+      this.apiKeyProxyBypassUntil.clear();
       if (!this.enabled) this.clearInventory();
     }
     return true;
@@ -213,6 +217,7 @@ export class ProxyManager {
     this.assignments.clear();
     this.apiKeyAssignments.clear();
     this.apiKeyAgentCache.clear();
+    this.apiKeyProxyBypassUntil.clear();
     this.lastFetchedAt = 0;
   }
 
@@ -622,6 +627,9 @@ export class ProxyManager {
 
   /** Cached HTTPS-over-HTTP agent for a key's assigned proxy. */
   getApiKeyProxyAgent(keyId: string): HttpsProxyAgent<string> | null {
+    // A recently throttled proxy is bypassed so the key itself stays usable.
+    if (this.isApiKeyProxyBypassed(keyId)) return null;
+
     const url = this.getApiKeyProxyUrl(keyId);
     if (!url) return null;
 
@@ -631,6 +639,20 @@ export class ProxyManager {
     const agent = new HttpsProxyAgent<string>(url);
     this.apiKeyAgentCache.set(url, agent);
     return agent;
+  }
+
+  /** True while a key's proxy is being skipped after a proxy-induced failure. */
+  isApiKeyProxyBypassed(keyId: string): boolean {
+    return (this.apiKeyProxyBypassUntil.get(keyId) ?? 0) > Date.now();
+  }
+
+  /**
+   * Skip a key's proxy for `durationMs`. Google can throttle a proxy IP (429)
+   * even when the key/project still has quota; retrying the key directly keeps
+   * the pool working. The proxy returns automatically when the window expires.
+   */
+  markApiKeyProxyRateLimited(keyId: string, durationMs = 24 * 60 * 60 * 1000): void {
+    this.apiKeyProxyBypassUntil.set(keyId, Date.now() + Math.max(60_000, durationMs));
   }
 
   getApiKeyProxySummary(
@@ -676,6 +698,8 @@ export class ProxyManager {
 
   /** Egress identity for an AI Studio key, for traffic attribution. */
   getEgressForKey(keyId: string): { address: string; country: string | null } | null {
+    // A bypassed proxy means the call actually left from the gateway host.
+    if (this.isApiKeyProxyBypassed(keyId)) return null;
     const proxy = this.getApiKeyProxySummary(keyId);
     if (!proxy) return null;
     return { address: proxy.address, country: proxy.country };

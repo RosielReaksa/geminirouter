@@ -18,11 +18,13 @@ export interface GeminiApiProxyOptions {
   recordTraffic: (record: TrafficRecord) => void;
   /** Optional per-key proxy agent (Webshare). Null means direct. */
   getProxyAgent?: (keyId: string) => HttpsProxyAgent<string> | null;
+  /** Called when a key's proxy gets a 429/timeout; the key is retried direct. */
+  onProxyRateLimited?: (keyId: string) => void;
   /**
-   * Decide whether the key pool should serve a shared-model request. Returning
-   * false makes the handler fall through to the OAuth account pool.
+   * Choose the shared model the key pool should serve for this request. Return
+   * null to send the request to the OAuth account pool instead.
    */
-  shouldUseKeyPool?: (model: string) => boolean;
+  chooseKeyModel?: (model: string) => string | null;
 }
 
 function parseJsonBody(request: FastifyRequest): any | null {
@@ -52,12 +54,20 @@ function extractBearer(request: FastifyRequest): string | undefined {
   return match ? match[1].trim() : undefined;
 }
 
+function upstreamErrorBody(data: any): any {
+  return Array.isArray(data) ? data[0] : data;
+}
+
 function retryAfterMs(headers: Record<string, any>, data: any): number {
   const headerValue = headers?.['retry-after'];
   const parsedHeader = Number.parseInt(String(headerValue ?? ''), 10);
   if (Number.isFinite(parsedHeader) && parsedHeader > 0) return parsedHeader * 1000;
 
-  const details = data?.error?.details;
+  // The OpenAI-compatible endpoint can return the Google error as a one-item
+  // array. Look inside it for the RetryInfo delay (daily quota resets use an
+  // hours-long delay that must not be truncated to one minute).
+  const body = Array.isArray(data) ? data[0] : data;
+  const details = body?.error?.details;
   if (Array.isArray(details)) {
     for (const detail of details) {
       const delay = String(detail?.retryDelay ?? '');
@@ -100,12 +110,20 @@ export async function handleGeminiApiRequest(
   const body = parseJsonBody(request);
   if (!body || typeof body.model !== 'string' || !Array.isArray(body.messages)) return false;
 
-  const model = canonicalModelId(body.model);
-  if (!(GEMINI_API_MODELS as readonly string[]).includes(model)) return false;
+  const requestedModel = canonicalModelId(body.model);
+  if (!(GEMINI_API_MODELS as readonly string[]).includes(requestedModel)) return false;
 
-  // The two shared models can also be served by the OAuth account pool; let the
-  // caller decide which provider gets this request.
-  if (options.shouldUseKeyPool && !options.shouldUseKeyPool(model)) return false;
+  // The two shared models can also be served by the OAuth account pool. Balanced
+  // routing returns null here for account turns, or the other flash-lite model
+  // when this model's key quota is exhausted.
+  const servedModel = options.chooseKeyModel
+    ? options.chooseKeyModel(requestedModel)
+    : requestedModel;
+  if (!servedModel) return false;
+  let model = (GEMINI_API_MODELS as readonly string[]).includes(servedModel)
+    ? servedModel
+    : requestedModel;
+  let switchedFallback = false;
 
   // /v1 is public at the bridge; without this check the key pool would be an
   // unauthenticated gateway. An empty configuration keeps local dev open.
@@ -153,7 +171,7 @@ export async function handleGeminiApiRequest(
       timestamp: new Date().toISOString(),
       clientName: String(request.headers['user-agent'] || 'API Client'),
       clientIp: request.ip || '127.0.0.1',
-      modelRequested: model,
+      modelRequested: requestedModel,
       modelRouted: model,
       backingAccountEmail: `Gemini API · ${lease.record.label}`,
       accountId: `gemini-api:${lease.record.id}`,
@@ -181,9 +199,8 @@ export async function handleGeminiApiRequest(
 
       const startedAt = Date.now();
       const proxyAgent = options.getProxyAgent?.(lease.record.id) ?? null;
-      let response: any;
-      try {
-        response = await axios.post(url, upstreamBody, {
+      const post = (agent: HttpsProxyAgent<string> | null) =>
+        axios.post(url, upstreamBody, {
           headers: {
             Authorization: `Bearer ${lease.record.key}`,
             'Content-Type': 'application/json',
@@ -192,15 +209,35 @@ export async function handleGeminiApiRequest(
           responseType: stream ? 'stream' : 'json',
           validateStatus: () => true,
           timeout: timeoutMs,
-          // Key traffic is direct unless a Webshare proxy is assigned.
-          ...(proxyAgent ? { httpAgent: proxyAgent, httpsAgent: proxyAgent } : {}),
+          ...(agent ? { httpAgent: agent, httpsAgent: agent } : {}),
           proxy: false,
         });
+
+      let response: any;
+      try {
+        response = await post(proxyAgent);
+        // A proxy IP can be throttled by Google while the key itself is fine.
+        // Skip that proxy and retry the same key directly before benching it.
+        if (proxyAgent && response.status === 429) {
+          options.onProxyRateLimited?.(lease.record.id);
+          response = await post(null);
+        }
       } catch (error: any) {
-        options.pool.settle(lease, { cooldownMs: 15_000 });
-        lastError = { message: error?.message || String(error) };
-        lastStatus = 0;
-        continue;
+        if (!proxyAgent) {
+          options.pool.settle(lease, { cooldownMs: 15_000 });
+          lastError = { message: error?.message || String(error) };
+          lastStatus = 0;
+          continue;
+        }
+        options.onProxyRateLimited?.(lease.record.id);
+        try {
+          response = await post(null);
+        } catch (directError: any) {
+          options.pool.settle(lease, { cooldownMs: 15_000 });
+          lastError = { message: directError?.message || String(directError) };
+          lastStatus = 0;
+          continue;
+        }
       }
 
       const status = response.status || 500;
@@ -262,20 +299,31 @@ export async function handleGeminiApiRequest(
 
       // Per-key limits: bench and try the next key.
       if (status === 429) {
-        options.pool.settle(lease, {
-          cooldownMs: retryAfterMs(response.headers as Record<string, any>, response.data),
-        });
-        lastError = response.data;
+        const cooldown = retryAfterMs(response.headers as Record<string, any>, response.data);
+        options.pool.settle(lease, { cooldownMs: cooldown });
+        // A daily-quota reset is hours away; park the model for every key so the
+        // next request does not probe it again.
+        if (cooldown >= 5 * 60 * 1000) options.pool.blockModel(model, cooldown);
+        lastError = upstreamErrorBody(response.data);
+
+        // If this model's free-tier quota is gone, serve the same request with
+        // the other flash-lite model rather than failing the client.
+        const alternate = (GEMINI_API_MODELS as readonly string[]).find((id) => id !== model);
+        if (!switchedFallback && alternate && cooldown >= 5 * 60 * 1000) {
+          switchedFallback = true;
+          model = alternate;
+          upstreamBody.model = alternate;
+        }
         continue;
       }
       if (status === 401 || status === 403) {
         options.pool.settle(lease, { cooldownMs: 5 * 60 * 1000, keyWide: true });
-        lastError = response.data;
+        lastError = upstreamErrorBody(response.data);
         continue;
       }
       if (status >= 500) {
         options.pool.settle(lease, { cooldownMs: 30_000 });
-        lastError = response.data;
+        lastError = upstreamErrorBody(response.data);
         continue;
       }
 

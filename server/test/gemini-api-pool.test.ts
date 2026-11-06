@@ -181,6 +181,18 @@ test('maskApiKey hides short secrets completely', () => {
   assert.equal(maskApiKey('AIzaSy0123456789abcd'), 'AIza…abcd');
 });
 
+test('blockModel parks every key for one model only', () => {
+  const pool = new GeminiApiPool([key('a'), key('b')], {
+    limits: { rpm: 15, tpm: 250_000, rpd: 500 },
+  });
+
+  pool.blockModel('gemini-3.5-flash-lite', 6 * 60 * 60 * 1000);
+
+  assert.equal(pool.hasImmediateCapacity('gemini-3.5-flash-lite'), false);
+  assert.equal(pool.hasImmediateCapacity('gemini-3.1-flash-lite'), true);
+  assert.ok(pool.nextAvailabilityMs('gemini-3.5-flash-lite') > 5 * 60 * 60 * 1000);
+});
+
 test('hasImmediateCapacity is false once the key bucket is saturated', async () => {
   const pool = new GeminiApiPool([key('a')], {
     limits: { rpm: 1, tpm: 100_000, rpd: 10 },

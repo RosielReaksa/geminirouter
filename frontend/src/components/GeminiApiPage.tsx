@@ -380,7 +380,8 @@ export const GeminiApiPage: React.FC<GeminiApiPageProps> = ({ onReady }) => {
                     : 'These two models use connected Google accounts only.'}
               </div>
               <div className="mt-1 text-[10px] text-[#9E988F]">
-                Other Gemini models always use connected accounts.
+                Other Gemini models always use connected accounts. If a key model's
+                daily quota is exhausted, the key turn uses the other Flash Lite model.
               </div>
             </div>
           </div>
