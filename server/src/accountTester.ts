@@ -14,7 +14,24 @@ export interface AccountTestResult {
   httpStatus?: number;
   sample?: string;
   error?: string;
+  /** Account the core actually used, when it reported one. */
+  servedAccountId?: string;
   timestamp: string;
+}
+
+/**
+ * The core falls back to another account when the pinned one is ineligible
+ * (cooldown, rate limit, validation). A 200 from someone else is NOT a passing
+ * test for the account under test, so surface it as a failure.
+ */
+export function describeServedAccountMismatch(
+  accountId: string,
+  servedAccountId: string | undefined,
+): string | null {
+  if (!servedAccountId || servedAccountId === accountId) {
+    return null;
+  }
+  return `This account was not used: the gateway answered with a different account (${servedAccountId}). It is currently in cooldown, rate-limited, or rejected upstream.`;
 }
 
 export function summarizeModelAccountTests(
@@ -99,6 +116,7 @@ export class AccountTester {
     let sample: string | undefined;
     let error: string | undefined;
     let httpStatus: number | undefined;
+    let servedAccountId: string | undefined;
 
     try {
       const response = await axios.post(
@@ -119,19 +137,36 @@ export class AccountTester {
         }
       );
 
+      servedAccountId =
+        typeof response.headers['x-antigravity-account-id'] === 'string'
+          ? response.headers['x-antigravity-account-id']
+          : undefined;
       sample =
         response.data?.choices?.[0]?.message?.content?.toString().trim() || 'ok';
       ok = response.status === 200;
       httpStatus = response.status;
 
-      // If test call succeeded, clear any previous validation requirement
-      this.validationRequiredAccounts.delete(account.id);
-      this.freshValidationUrls.delete(account.id);
+      // The core silently fails over when the pinned account is ineligible.
+      // A 200 served by another account must never be reported as a pass.
+      const mismatch = describeServedAccountMismatch(account.id, servedAccountId);
+      if (mismatch) {
+        ok = false;
+        error = mismatch;
+      } else {
+        // If test call succeeded on this account, clear any previous validation requirement
+        this.validationRequiredAccounts.delete(account.id);
+        this.freshValidationUrls.delete(account.id);
+      }
     } catch (err: any) {
       ok = false;
       const status = err?.response?.status;
       httpStatus = status;
+      servedAccountId =
+        typeof err?.response?.headers?.['x-antigravity-account-id'] === 'string'
+          ? err.response.headers['x-antigravity-account-id']
+          : undefined;
       const data = err?.response?.data;
+      const mismatch = describeServedAccountMismatch(account.id, servedAccountId);
 
       // Check for Google's VALIDATION_REQUIRED in 403 error body
       const details = data?.error?.details || data?.details;
@@ -176,7 +211,9 @@ export class AccountTester {
         }
       }
 
-      if (requiresValidation) {
+      if (mismatch) {
+        error = mismatch;
+      } else if (requiresValidation) {
         this.validationRequiredAccounts.add(account.id);
         if (freshValidationUrl) {
           this.freshValidationUrls.set(account.id, {
@@ -202,6 +239,7 @@ export class AccountTester {
       httpStatus,
       sample,
       error,
+      servedAccountId,
       timestamp: new Date().toISOString(),
     };
 

@@ -1,6 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { summarizeModelAccountTests, type AccountTestResult } from '../src/accountTester.js';
+import {
+  describeServedAccountMismatch,
+  summarizeModelAccountTests,
+  type AccountTestResult,
+} from '../src/accountTester.js';
 
 const result = (overrides: Partial<AccountTestResult> = {}): AccountTestResult => ({
   accountId: 'account-1',
@@ -49,4 +53,13 @@ test('verification is reported only when every account needs verification', () =
   ]);
 
   assert.equal(summary.status, 'needs_verification');
+});
+
+test('a test answered by another account is not a pass', () => {
+  const mismatch = describeServedAccountMismatch('account-1', 'account-2');
+  assert.match(mismatch || '', /not used/i);
+  assert.match(mismatch || '', /different account/i);
+
+  assert.equal(describeServedAccountMismatch('account-1', 'account-1'), null);
+  assert.equal(describeServedAccountMismatch('account-1', undefined), null);
 });
