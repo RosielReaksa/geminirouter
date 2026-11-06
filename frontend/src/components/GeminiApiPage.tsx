@@ -573,6 +573,10 @@ export const GeminiApiPage: React.FC<GeminiApiPageProps> = ({ onReady }) => {
               Retry-After; requests wait up to {Math.round(config.queue.maxWaitMs / 1000)}s for a
               free slot, with {config.queue.maxConcurrentPerKey} concurrent calls per key.
             </div>
+            <div className="mt-1 text-[10px] text-[#B0AAA2]">
+              Usage is tracked by this gateway (today, UTC) and survives restarts. Google's
+              own quota page also counts requests from other clients.
+            </div>
           </div>
           <span className="font-mono-code text-xs text-[#C25938]">{keys.length} key(s)</span>
         </div>
@@ -631,6 +635,23 @@ export const GeminiApiPage: React.FC<GeminiApiPageProps> = ({ onReady }) => {
                           last used {formatWhen(key.usage.lastUsedAt)}
                         </div>
                       )}
+                      <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-[#706B65]">
+                        <span>
+                          Gateway today:{' '}
+                          <span className="font-mono-code text-[#2A2723]">
+                            {key.usage.requestsToday}
+                          </span>{' '}
+                          requests
+                        </span>
+                        <span>
+                          <span className="font-mono-code text-[#2A2723]">
+                            {formatCompact(key.usage.tokensToday)}
+                          </span>{' '}
+                          tokens
+                        </span>
+                        <span>{formatCompact(key.usage.rpm)} RPM now</span>
+                        <span>{formatCompact(key.usage.tpm)} TPM now</span>
+                      </div>
                     </div>
 
                     <div className="flex items-center gap-2">
@@ -678,12 +699,17 @@ export const GeminiApiPage: React.FC<GeminiApiPageProps> = ({ onReady }) => {
                       >
                         <div className="flex items-center justify-between text-[10px] font-semibold text-[#706B65]">
                           <span>{modelId}</span>
-                          <span
-                            className={
-                              bucket.active > 0 ? 'text-[#C25938]' : 'text-[#9E988F]'
-                            }
-                          >
-                            {bucket.active} in flight
+                          <span className="flex items-center gap-2">
+                            <span className="text-[#9E988F]">
+                              {Math.max(0, bucket.limitRpd - bucket.rpd)} left today
+                            </span>
+                            <span
+                              className={
+                                bucket.active > 0 ? 'text-[#C25938]' : 'text-[#9E988F]'
+                              }
+                            >
+                              {bucket.active} in flight
+                            </span>
                           </span>
                         </div>
                         <div className="mt-2 flex flex-wrap gap-3">

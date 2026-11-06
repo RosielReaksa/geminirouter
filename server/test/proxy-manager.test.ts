@@ -630,6 +630,20 @@ test('the Webshare key survives a store reload and never leaks into gateway conf
 
     first.setProxyRoutingEnabled(false);
     first.setProxyAssignments({ a1: '96.62.148.198:7408' });
+    first.setGeminiApiUsageState({
+      savedAt: new Date().toISOString(),
+      keys: {
+        'gk-1': {
+          models: {
+            'gemini-3.5-flash-lite': {
+              dayKey: '2026-11-06',
+              rpd: 42,
+              tokensToday: 1234,
+            },
+          },
+        },
+      },
+    });
 
     const reloaded = new LocalStateStore(dataDir);
     assert.equal(reloaded.getWebshareApiKey(), 'ws-secret-key');
@@ -638,6 +652,11 @@ test('the Webshare key survives a store reload and never leaks into gateway conf
       reloaded.getProxyAssignments(),
       { a1: '96.62.148.198:7408' },
       'the account -> IP mapping survives restart',
+    );
+    assert.equal(
+      reloaded.getGeminiApiUsageState()?.keys['gk-1'].models['gemini-3.5-flash-lite'].rpd,
+      42,
+      'per-key usage survives restart',
     );
     assert.equal(JSON.stringify(reloaded.getConfig()).includes('ws-secret-key'), false);
 

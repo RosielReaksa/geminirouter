@@ -181,6 +181,32 @@ test('maskApiKey hides short secrets completely', () => {
   assert.equal(maskApiKey('AIzaSy0123456789abcd'), 'AIza…abcd');
 });
 
+test('usage counters and cooldowns survive a new pool instance', async () => {
+  const first = new GeminiApiPool([key('a')], {
+    limits: { rpm: 15, tpm: 250_000, rpd: 500 },
+  });
+  const lease = await first.acquire('gemini-3.5-flash-lite', 10, 'client');
+  assert.ok(lease);
+  first.settle(lease!, { actualTokens: 1_234, cooldownMs: 60 * 60 * 1000 });
+
+  const state = first.exportUsageState();
+  const saved = state.keys.a.models['gemini-3.5-flash-lite'];
+  assert.equal(saved.rpd, 1);
+  assert.equal(saved.tokensToday, 1_234);
+  assert.ok(saved.cooldownUntil && saved.cooldownUntil > Date.now());
+
+  const second = new GeminiApiPool([key('a')], {
+    limits: { rpm: 15, tpm: 250_000, rpd: 500 },
+  });
+  second.hydrateUsageState(state);
+
+  const [snapshot] = second.snapshot();
+  assert.equal(snapshot.usage.requestsToday, 1);
+  assert.equal(snapshot.usage.tokensToday, 1_234);
+  assert.equal(snapshot.models['gemini-3.5-flash-lite'].rpd, 1);
+  assert.equal(second.hasImmediateCapacity('gemini-3.5-flash-lite'), false);
+});
+
 test('acquire fails fast when the next slot is beyond the client wait', async () => {
   const pool = new GeminiApiPool([key('a')], {
     limits: { rpm: 15, tpm: 100_000, rpd: 10 },

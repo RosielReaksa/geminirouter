@@ -72,6 +72,27 @@ export interface GatewayConfig {
 /** How the two shared flash-lite models pick a provider. */
 export type GeminiApiSharedRouting = 'balanced' | 'keys' | 'accounts';
 
+/** Persisted per-key/model usage so dashboard counters survive a restart. */
+export interface GeminiApiUsageState {
+  savedAt: string;
+  keys: Record<
+    string,
+    {
+      keyCooldownUntil?: number;
+      models: Record<
+        string,
+        {
+          dayKey: string;
+          rpd: number;
+          tokensToday: number;
+          cooldownUntil?: number;
+          lastUsedAt?: string;
+        }
+      >;
+    }
+  >;
+}
+
 export interface TrafficRecord {
   id: string;
   timestamp: string;
@@ -181,6 +202,7 @@ export class LocalStateStore {
   // For the two shared flash-lite models, decide whether the core account pool,
   // the AI Studio keys, or an even split serves a request.
   private geminiApiSharedRouting: GeminiApiSharedRouting = 'balanced';
+  private geminiApiUsageState: GeminiApiUsageState | null = null;
   // Whether key traffic should leave through the Webshare inventory, and the
   // stable keyId -> "address:port" pins.
   private geminiApiProxyEnabled = false;
@@ -236,6 +258,10 @@ export class LocalStateStore {
       loaded.geminiApiSharedRouting === 'keys' || loaded.geminiApiSharedRouting === 'accounts'
         ? loaded.geminiApiSharedRouting
         : 'balanced';
+    this.geminiApiUsageState =
+      loaded.geminiApiUsageState && typeof loaded.geminiApiUsageState === 'object'
+        ? loaded.geminiApiUsageState
+        : null;
     this.geminiApiProxyAssignments =
       loaded.geminiApiProxyAssignments && typeof loaded.geminiApiProxyAssignments === 'object'
         ? { ...loaded.geminiApiProxyAssignments }
@@ -256,6 +282,7 @@ export class LocalStateStore {
     geminiApiKeys?: GeminiApiKeyRecord[];
     geminiApiProxyEnabled?: boolean;
     geminiApiSharedRouting?: GeminiApiSharedRouting;
+    geminiApiUsageState?: GeminiApiUsageState | null;
     geminiApiProxyAssignments?: Record<string, string>;
   } {
     if (fs.existsSync(this.stateFile)) {
@@ -287,6 +314,7 @@ export class LocalStateStore {
             geminiApiKeys: this.geminiApiKeys,
             geminiApiProxyEnabled: this.geminiApiProxyEnabled,
             geminiApiSharedRouting: this.geminiApiSharedRouting,
+            geminiApiUsageState: this.geminiApiUsageState,
             geminiApiProxyAssignments: this.geminiApiProxyAssignments,
           },
           null,
@@ -432,6 +460,15 @@ export class LocalStateStore {
 
   setGeminiApiSharedRouting(routing: GeminiApiSharedRouting): void {
     this.geminiApiSharedRouting = routing;
+    this.saveState();
+  }
+
+  getGeminiApiUsageState(): GeminiApiUsageState | null {
+    return this.geminiApiUsageState;
+  }
+
+  setGeminiApiUsageState(state: GeminiApiUsageState): void {
+    this.geminiApiUsageState = state;
     this.saveState();
   }
 

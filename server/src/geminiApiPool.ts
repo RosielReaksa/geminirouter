@@ -1,4 +1,4 @@
-import type { GeminiApiKeyRecord } from './store.js';
+import type { GeminiApiKeyRecord, GeminiApiUsageState } from './store.js';
 
 /** Models served by AI Studio keys for now. Others stay on the account pool. */
 export const GEMINI_API_MODELS = ['gemini-3.1-flash-lite', 'gemini-3.5-flash-lite'] as const;
@@ -604,6 +604,69 @@ export class GeminiApiPool {
     this.queues.clear();
     this.clientOrder = [];
     this.queueDepth = 0;
+  }
+
+  /** Persisted per-key/model usage so dashboard counters survive a restart. */
+  exportUsageState(): GeminiApiUsageState {
+    const now = this.now();
+    const keys: GeminiApiUsageState['keys'] = {};
+
+    for (const key of this.keys) {
+      const models: GeminiApiUsageState['keys'][string]['models'] = {};
+      for (const model of GEMINI_API_MODELS) {
+        const bucket = this.bucketFor(key.id, model);
+        const cooling = bucket.cooldownUntil > now;
+        if (bucket.rpd === 0 && bucket.tokensToday === 0 && !cooling && !bucket.lastUsedAt) {
+          continue;
+        }
+        models[model] = {
+          dayKey: bucket.dayKey,
+          rpd: bucket.rpd,
+          tokensToday: bucket.tokensToday,
+          ...(cooling ? { cooldownUntil: bucket.cooldownUntil } : {}),
+          ...(bucket.lastUsedAt ? { lastUsedAt: bucket.lastUsedAt } : {}),
+        };
+      }
+      const keyCooldown = this.keyCooldowns.get(key.id) ?? 0;
+      if (Object.keys(models).length > 0 || keyCooldown > now) {
+        keys[key.id] = {
+          models,
+          ...(keyCooldown > now ? { keyCooldownUntil: keyCooldown } : {}),
+        };
+      }
+    }
+
+    return { savedAt: new Date(now).toISOString(), keys };
+  }
+
+  /** Restore counters and cooldowns saved by `exportUsageState`. */
+  hydrateUsageState(state: GeminiApiUsageState | null | undefined): void {
+    if (!state || typeof state !== 'object' || !state.keys) return;
+    const now = this.now();
+    const today = utcDay(now);
+    const known = new Set(this.keys.map((key) => key.id));
+
+    for (const [keyId, entry] of Object.entries(state.keys)) {
+      if (!known.has(keyId) || !entry || typeof entry !== 'object') continue;
+
+      if (Number.isFinite(entry.keyCooldownUntil) && (entry.keyCooldownUntil ?? 0) > now) {
+        this.keyCooldowns.set(keyId, entry.keyCooldownUntil as number);
+      }
+
+      for (const [model, saved] of Object.entries(entry.models || {})) {
+        if (!(GEMINI_API_MODELS as readonly string[]).includes(model)) continue;
+        if (!saved || typeof saved !== 'object') continue;
+        const bucket = this.bucketFor(keyId, model);
+        if (saved.dayKey === today) {
+          bucket.rpd = Math.max(0, Number(saved.rpd) || 0);
+          bucket.tokensToday = Math.max(0, Number(saved.tokensToday) || 0);
+        }
+        if (Number.isFinite(saved.cooldownUntil) && (saved.cooldownUntil ?? 0) > now) {
+          bucket.cooldownUntil = Math.max(bucket.cooldownUntil, saved.cooldownUntil as number);
+        }
+        if (typeof saved.lastUsedAt === 'string') bucket.lastUsedAt = saved.lastUsedAt;
+      }
+    }
   }
 
   snapshot(): GeminiApiKeyPublic[] {

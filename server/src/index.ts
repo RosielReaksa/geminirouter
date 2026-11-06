@@ -136,6 +136,20 @@ export async function createServer(): Promise<{
   // AI Studio keys serve the two flash-lite models; everything else keeps using
   // the OAuth account pool through the core.
   const geminiApiPool = new GeminiApiPool(store.getGeminiApiKeys());
+  // Restore today's per-key counters and cooldowns so the dashboard does not
+  // reset to zero on every bridge restart.
+  geminiApiPool.hydrateUsageState(store.getGeminiApiUsageState());
+
+  // Persist usage every few seconds, only when it actually changed.
+  let lastUsageSnapshot = '';
+  const geminiUsageSaveTimer = setInterval(() => {
+    const state = geminiApiPool.exportUsageState();
+    const serialized = JSON.stringify(state.keys);
+    if (serialized === lastUsageSnapshot) return;
+    lastUsageSnapshot = serialized;
+    store.setGeminiApiUsageState(state);
+  }, 5_000);
+  geminiUsageSaveTimer.unref();
   const gatewayApiKeys = (): string[] =>
     [
       process.env.GEMINIROUTER_API_KEY || '',
