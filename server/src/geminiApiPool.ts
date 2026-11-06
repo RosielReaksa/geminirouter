@@ -227,6 +227,19 @@ export class GeminiApiPool {
     return this.keys.some((key) => key.enabled);
   }
 
+  /**
+   * True when at least one enabled key can accept this model right now without
+   * waiting (no cooldown, concurrency, RPM, TPM or RPD block). Used to keep
+   * balanced routing away from a key pool that is already saturated.
+   */
+  hasImmediateCapacity(model: string, estimatedTokens = 1): boolean {
+    const tokens = Math.max(1, Math.ceil(estimatedTokens));
+    if (tokens > this.limits.tpm) return true;
+    return this.keys.some(
+      (key) => key.enabled && this.canServe(key, this.bucketFor(key.id, model), tokens),
+    );
+  }
+
   getLimits(): GeminiApiLimits {
     return { ...this.limits };
   }

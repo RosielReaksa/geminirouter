@@ -49,6 +49,7 @@ test('config starts empty with the two Gemini models', async () => {
   assert.equal(body.limits.rpd, 500);
   assert.equal(body.proxy.enabled, false);
   assert.equal(body.proxy.available, 0);
+  assert.equal(body.sharedRouting, 'balanced');
   assert.deepEqual(body.keys, []);
 });
 
@@ -60,6 +61,29 @@ test('enabling key proxies without a Webshare key is refused', async () => {
   });
   assert.equal(res.statusCode, 400);
   assert.match(res.json().error, /Webshare/i);
+});
+
+test('shared-model routing defaults to balanced and can be pinned', async () => {
+  const bad = await app.inject({
+    method: 'POST',
+    url: '/api/gemini/routing',
+    payload: { routing: 'nope' },
+  });
+  assert.equal(bad.statusCode, 400);
+  assert.match(bad.json().error, /balanced, keys or accounts/);
+
+  for (const routing of ['keys', 'accounts', 'balanced'] as const) {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/gemini/routing',
+      payload: { routing },
+    });
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.json().sharedRouting, routing);
+  }
+
+  const config = await app.inject({ method: 'GET', url: '/api/gemini/config' });
+  assert.equal(config.json().sharedRouting, 'balanced');
 });
 
 test('adds several keys at once and only returns them masked', async () => {

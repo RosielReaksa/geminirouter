@@ -18,6 +18,11 @@ export interface GeminiApiProxyOptions {
   recordTraffic: (record: TrafficRecord) => void;
   /** Optional per-key proxy agent (Webshare). Null means direct. */
   getProxyAgent?: (keyId: string) => HttpsProxyAgent<string> | null;
+  /**
+   * Decide whether the key pool should serve a shared-model request. Returning
+   * false makes the handler fall through to the OAuth account pool.
+   */
+  shouldUseKeyPool?: (model: string) => boolean;
 }
 
 function parseJsonBody(request: FastifyRequest): any | null {
@@ -97,6 +102,10 @@ export async function handleGeminiApiRequest(
 
   const model = canonicalModelId(body.model);
   if (!(GEMINI_API_MODELS as readonly string[]).includes(model)) return false;
+
+  // The two shared models can also be served by the OAuth account pool; let the
+  // caller decide which provider gets this request.
+  if (options.shouldUseKeyPool && !options.shouldUseKeyPool(model)) return false;
 
   // /v1 is public at the bridge; without this check the key pool would be an
   // unauthenticated gateway. An empty configuration keeps local dev open.

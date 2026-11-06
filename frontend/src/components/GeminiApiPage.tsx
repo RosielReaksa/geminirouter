@@ -12,9 +12,15 @@ import {
   Sparkles,
   Trash2,
   XCircle,
+  Users,
   Zap,
 } from 'lucide-react';
-import { GeminiApiConfig, GeminiApiKey, GeminiApiTestResult } from '../types';
+import {
+  GeminiApiConfig,
+  GeminiApiKey,
+  GeminiApiSharedRouting,
+  GeminiApiTestResult,
+} from '../types';
 import { api } from '../services/api';
 
 interface GeminiApiPageProps {
@@ -26,6 +32,7 @@ const FALLBACK_CONFIG: GeminiApiConfig = {
   limits: { rpm: 15, tpm: 250000, rpd: 500 },
   queue: { depth: 0, active: 0, maxWaitMs: 30000, maxConcurrentPerKey: 4, maxQueueSize: 200 },
   proxy: { enabled: false, available: 0, hasApiKey: false, assigned: 0 },
+  sharedRouting: 'balanced',
   keys: [],
 };
 
@@ -36,9 +43,31 @@ const MODEL_META: Record<string, { name: string; note: string }> = {
   },
   'gemini-3.5-flash-lite': {
     name: 'Gemini 3.5 Flash Lite',
-    note: 'Newest lite model, also served by the same key pool.',
+    note: 'Newest lite model, served by AI Studio keys or connected accounts.',
   },
 };
+
+const ROUTING_OPTIONS: Array<{
+  key: GeminiApiSharedRouting;
+  label: string;
+  note: string;
+}> = [
+  {
+    key: 'balanced',
+    label: 'Balanced',
+    note: 'Alternates calls between AI Studio keys and connected Google accounts.',
+  },
+  {
+    key: 'keys',
+    label: 'API keys',
+    note: 'Only the AI Studio keys serve these two models.',
+  },
+  {
+    key: 'accounts',
+    label: 'Accounts',
+    note: 'Only the connected Google accounts serve these two models.',
+  },
+];
 
 const formatCompact = (value: number): string => {
   if (!Number.isFinite(value)) return '0';
@@ -95,6 +124,7 @@ export const GeminiApiPage: React.FC<GeminiApiPageProps> = ({ onReady }) => {
   const [keysText, setKeysText] = useState('');
   const [busy, setBusy] = useState(false);
   const [proxyBusy, setProxyBusy] = useState(false);
+  const [routingBusy, setRoutingBusy] = useState(false);
   const [testingId, setTestingId] = useState<string | null>(null);
   const [testResults, setTestResults] = useState<Record<string, GeminiApiTestResult>>({});
   const [message, setMessage] = useState<string | null>(null);
@@ -232,6 +262,28 @@ export const GeminiApiPage: React.FC<GeminiApiPageProps> = ({ onReady }) => {
     }
   };
 
+  const handleRouting = async (routing: GeminiApiSharedRouting) => {
+    if (routing === config.sharedRouting) return;
+    setRoutingBusy(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const data = await api.setGeminiApiRouting(routing);
+      setConfig(data);
+      setMessage(
+        routing === 'balanced'
+          ? 'Balanced routing enabled: keys and connected accounts share these two models.'
+          : routing === 'keys'
+            ? 'These two models now use AI Studio keys only.'
+            : 'These two models now use connected Google accounts only.',
+      );
+    } catch (err: any) {
+      setError(err?.message || 'Could not change the routing mode.');
+    } finally {
+      setRoutingBusy(false);
+    }
+  };
+
   return (
     <div className="space-y-8 animate-in fade-in duration-200">
       <div className="flex flex-wrap items-start justify-between gap-4">
@@ -308,6 +360,51 @@ export const GeminiApiPage: React.FC<GeminiApiPageProps> = ({ onReady }) => {
           <div className="text-[11px] text-[#9E988F]">
             {config.limits.rpd.toLocaleString()} RPD · waits up to{' '}
             {Math.round(config.queue.maxWaitMs / 1000)}s
+          </div>
+        </div>
+      </div>
+
+      <div className="rounded-2xl border border-[#EAE5DE] bg-[#FFFFFF] p-5 shadow-soft">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div className="flex items-start gap-3">
+            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-[#FAF2EF] text-[#C25938]">
+              <Users className="h-4 w-4" />
+            </span>
+            <div>
+              <div className="text-sm font-semibold text-[#2A2723]">Provider routing</div>
+              <div className="text-xs text-[#706B65]">
+                {config.sharedRouting === 'balanced'
+                  ? 'Keys and connected accounts alternate on these two models.'
+                  : config.sharedRouting === 'keys'
+                    ? 'These two models use the AI Studio key pool only.'
+                    : 'These two models use connected Google accounts only.'}
+              </div>
+              <div className="mt-1 text-[10px] text-[#9E988F]">
+                Other Gemini models always use connected accounts.
+              </div>
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {ROUTING_OPTIONS.map((option) => (
+              <button
+                key={option.key}
+                type="button"
+                onClick={() => void handleRouting(option.key)}
+                disabled={routingBusy}
+                title={option.note}
+                className={`rounded-xl border px-3 py-2 text-xs font-medium transition-all disabled:cursor-not-allowed disabled:opacity-50 ${
+                  config.sharedRouting === option.key
+                    ? 'border-[#C25938] bg-[#C25938] text-white'
+                    : 'border-[#EAE5DE] bg-[#FAF7F2] text-[#706B65] hover:bg-[#F2ECE4] hover:text-[#2A2723]'
+                }`}
+              >
+                {routingBusy && config.sharedRouting === option.key ? (
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                ) : (
+                  option.label
+                )}
+              </button>
+            ))}
           </div>
         </div>
       </div>

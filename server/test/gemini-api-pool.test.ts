@@ -180,3 +180,24 @@ test('maskApiKey hides short secrets completely', () => {
   assert.equal(maskApiKey('short'), '••••');
   assert.equal(maskApiKey('AIzaSy0123456789abcd'), 'AIza…abcd');
 });
+
+test('hasImmediateCapacity is false once the key bucket is saturated', async () => {
+  const pool = new GeminiApiPool([key('a')], {
+    limits: { rpm: 1, tpm: 100_000, rpd: 10 },
+  });
+
+  assert.equal(pool.hasImmediateCapacity('gemini-3.1-flash-lite'), true);
+  const lease = await pool.acquire('gemini-3.1-flash-lite', 10, 'client');
+  assert.ok(lease);
+  assert.equal(
+    pool.hasImmediateCapacity('gemini-3.1-flash-lite'),
+    false,
+    'the RPM token was consumed',
+  );
+  pool.settle(lease!);
+  assert.equal(
+    pool.hasImmediateCapacity('gemini-3.1-flash-lite'),
+    false,
+    'settling does not refill RPM instantly',
+  );
+});

@@ -478,6 +478,7 @@ export class ApiClient {
         limits: { rpm: 15, tpm: 250000, rpd: 500 },
         queue: { depth: 0, active: 0, maxWaitMs: 30000, maxConcurrentPerKey: 4, maxQueueSize: 200 },
         proxy: { enabled: false, available: 0, hasApiKey: false, assigned: 0 },
+        sharedRouting: 'balanced',
         keys: [],
       })
     );
@@ -521,6 +522,15 @@ export class ApiClient {
     return this.mutateJson<GeminiApiConfig>('/api/gemini/proxy', {
       method: 'POST',
       body: JSON.stringify({ enabled }),
+    });
+  }
+
+  async setGeminiApiRouting(
+    routing: 'balanced' | 'keys' | 'accounts',
+  ): Promise<GeminiApiConfig> {
+    return this.mutateJson<GeminiApiConfig>('/api/gemini/routing', {
+      method: 'POST',
+      body: JSON.stringify({ routing }),
     });
   }
 

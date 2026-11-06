@@ -69,6 +69,9 @@ export interface GatewayConfig {
   queueTimeoutMs: number;
 }
 
+/** How the two shared flash-lite models pick a provider. */
+export type GeminiApiSharedRouting = 'balanced' | 'keys' | 'accounts';
+
 export interface TrafficRecord {
   id: string;
   timestamp: string;
@@ -175,6 +178,9 @@ export class LocalStateStore {
   // AI Studio keys used by the Gemini API provider. Stored server-side only and
   // never returned in full by the API.
   private geminiApiKeys: GeminiApiKeyRecord[] = [];
+  // For the two shared flash-lite models, decide whether the core account pool,
+  // the AI Studio keys, or an even split serves a request.
+  private geminiApiSharedRouting: GeminiApiSharedRouting = 'balanced';
   // Whether key traffic should leave through the Webshare inventory, and the
   // stable keyId -> "address:port" pins.
   private geminiApiProxyEnabled = false;
@@ -226,6 +232,10 @@ export class LocalStateStore {
           }))
       : [];
     this.geminiApiProxyEnabled = loaded.geminiApiProxyEnabled === true;
+    this.geminiApiSharedRouting =
+      loaded.geminiApiSharedRouting === 'keys' || loaded.geminiApiSharedRouting === 'accounts'
+        ? loaded.geminiApiSharedRouting
+        : 'balanced';
     this.geminiApiProxyAssignments =
       loaded.geminiApiProxyAssignments && typeof loaded.geminiApiProxyAssignments === 'object'
         ? { ...loaded.geminiApiProxyAssignments }
@@ -245,6 +255,7 @@ export class LocalStateStore {
     retiredProxies?: string[];
     geminiApiKeys?: GeminiApiKeyRecord[];
     geminiApiProxyEnabled?: boolean;
+    geminiApiSharedRouting?: GeminiApiSharedRouting;
     geminiApiProxyAssignments?: Record<string, string>;
   } {
     if (fs.existsSync(this.stateFile)) {
@@ -275,6 +286,7 @@ export class LocalStateStore {
             retiredProxies: this.retiredProxies,
             geminiApiKeys: this.geminiApiKeys,
             geminiApiProxyEnabled: this.geminiApiProxyEnabled,
+            geminiApiSharedRouting: this.geminiApiSharedRouting,
             geminiApiProxyAssignments: this.geminiApiProxyAssignments,
           },
           null,
@@ -411,6 +423,15 @@ export class LocalStateStore {
 
   setGeminiApiProxyEnabled(enabled: boolean): void {
     this.geminiApiProxyEnabled = enabled;
+    this.saveState();
+  }
+
+  getGeminiApiSharedRouting(): GeminiApiSharedRouting {
+    return this.geminiApiSharedRouting;
+  }
+
+  setGeminiApiSharedRouting(routing: GeminiApiSharedRouting): void {
+    this.geminiApiSharedRouting = routing;
     this.saveState();
   }
 

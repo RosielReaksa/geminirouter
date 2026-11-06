@@ -277,12 +277,16 @@ export interface GeminiApiQueue {
   maxQueueSize: number;
 }
 
+export type GeminiApiSharedRouting = 'balanced' | 'keys' | 'accounts';
+
 export interface GeminiApiConfig {
   models: string[];
   limits: GeminiApiLimits;
   queue: GeminiApiQueue;
   proxy: GeminiApiProxyState;
   keys: GeminiApiKey[];
+  /** Provider choice for the two shared flash-lite models. */
+  sharedRouting: GeminiApiSharedRouting;
   added?: number;
   skipped?: number;
 }

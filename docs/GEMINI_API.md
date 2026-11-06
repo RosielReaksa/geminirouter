@@ -69,15 +69,24 @@ off, and vice versa.
 
 ## Routing
 
-`POST /v1/chat/completions` is intercepted when:
+`gemini-3.1-flash-lite` and `gemini-3.5-flash-lite` can be served by **either**
+the AI Studio key pool or the connected Google accounts. The Gemini API page
+exposes three modes:
 
-- the model is `gemini-3.1-flash-lite` or `gemini-3.5-flash-lite`, and
-- at least one enabled key exists.
+| Mode | Behaviour |
+|---|---|
+| **Balanced** (default) | Alternates between keys and accounts. If one side is out of capacity or cooling down, every call goes to the other side. |
+| **API keys** | These two models use the key pool only. |
+| **Accounts** | These two models use the connected accounts only. |
 
-The request is forwarded to
+Key calls are forwarded to
 `https://generativelanguage.googleapis.com/v1beta/openai/chat/completions` with
-the selected key. Both JSON and SSE streaming are supported. The response carries
-`x-egress-provider: gemini-api`.
+the selected key. Both JSON and SSE streaming are supported, and the response
+carries `x-egress-provider: gemini-api`.
+
+Account calls take the normal core path, so they appear on the Traffic page with
+the account email and that account's egress proxy. Every other Gemini model always
+uses the connected accounts.
 
 The bridge validates the caller's `Authorization: Bearer …` against the gateway
 keys before using the pool. Without keys, or for any other model, the request

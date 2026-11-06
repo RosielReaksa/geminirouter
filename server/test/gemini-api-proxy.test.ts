@@ -165,6 +165,29 @@ test('other Gemini models still go to the account pool, not the key pool', async
   assert.equal(calls.length, 0);
 });
 
+test('accounts routing bypasses the key pool for the shared models', async () => {
+  const setRouting = await fetch(`http://127.0.0.1:${bridgePort}/api/gemini/routing`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ routing: 'accounts' }),
+  });
+  assert.equal(setRouting.status, 200);
+
+  calls.length = 0;
+  const res = await chat({
+    model: 'gemini-3.5-flash-lite',
+    messages: [{ role: 'user', content: 'ping' }],
+  });
+  assert.notEqual(res.status, 200, 'no accounts are configured in this sandbox');
+  assert.equal(calls.length, 0, 'the key pool must not be touched');
+
+  await fetch(`http://127.0.0.1:${bridgePort}/api/gemini/routing`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ routing: 'balanced' }),
+  });
+});
+
 test('per-key usage is visible without exposing the key', async () => {
   const res = await fetch(`http://127.0.0.1:${bridgePort}/api/gemini/config`);
   const body = await res.json();

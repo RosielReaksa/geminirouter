@@ -150,6 +150,9 @@ export async function createServer(): Promise<{
     limits: geminiApiPool.getLimits(),
     queue: geminiApiPool.getQueueStats(),
     keys: geminiApiPool.snapshot(),
+    // How the two shared flash-lite models choose between the key pool and the
+    // connected Google accounts.
+    sharedRouting: store.getGeminiApiSharedRouting(),
   });
   // Webshare proxy routing. The bridge only decides which proxy each account
   // should use; the core performs the proxying (accounts.proxy_url) so its
@@ -434,6 +437,34 @@ export async function createServer(): Promise<{
   // /v1beta is the Gemini-native path used by the dubbing app
   // (/v1beta/models/<model>:generateContent). It goes through the same leases,
   // quota checks and failover as /v1, and the path is forwarded unchanged.
+  // Round-robin turn for the two shared flash-lite models under balanced routing.
+  let sharedModelTurn = 0;
+  /**
+   * Pick the provider for a shared model. Balanced alternates, but always uses
+   * the key pool when no connected account can take the call (error state or
+   * model cooldown), so the account side never blocks a request it cannot serve.
+   */
+  const sharedModelProvider = (model: string): 'keys' | 'accounts' => {
+    const routing = store.getGeminiApiSharedRouting();
+    if (routing === 'keys') return 'keys';
+    if (routing === 'accounts') return 'accounts';
+
+    const usableAccounts = store
+      .getAccounts()
+      .filter(
+        (account) =>
+          account.status !== 'error' &&
+          !leaseManager.isAccountModelInCooldown(account.id, model),
+      );
+    if (usableAccounts.length === 0) return 'keys';
+    // A saturated key pool would only queue or 429; send the turn to accounts.
+    if (!geminiApiPool.hasImmediateCapacity(model)) return 'accounts';
+
+    const preferAccounts = sharedModelTurn % 2 === 0;
+    sharedModelTurn += 1;
+    return preferAccounts ? 'accounts' : 'keys';
+  };
+
   const proxyApiRequest = async (
     request: FastifyRequest,
     reply: FastifyReply,
@@ -443,6 +474,7 @@ export async function createServer(): Promise<{
       getApiKeys: gatewayApiKeys,
       recordTraffic: (record) => store.addTrafficRecord(record),
       getProxyAgent: (keyId) => proxyManager.getApiKeyProxyAgent(keyId),
+      shouldUseKeyPool: (model) => sharedModelProvider(model) === 'keys',
     });
     if (handledByApiKeys) return;
 
@@ -2139,6 +2171,17 @@ export async function createServer(): Promise<{
 
     store.setGeminiApiProxyEnabled(enabled);
     syncApiKeyProxyAssignments();
+    return geminiConfig();
+  });
+
+  // Balanced: alternate between the key pool and the account pool. `keys` and
+  // `accounts` pin the two shared flash-lite models to one side.
+  app.post<{ Body?: { routing?: string } }>('/api/gemini/routing', async (request, reply) => {
+    const routing = request.body?.routing;
+    if (routing !== 'balanced' && routing !== 'keys' && routing !== 'accounts') {
+      return reply.code(400).send({ error: 'routing must be balanced, keys or accounts' });
+    }
+    store.setGeminiApiSharedRouting(routing);
     return geminiConfig();
   });
 
