@@ -144,6 +144,8 @@ export async function createServer(): Promise<{
   const effectiveProxyKey = envProxyKey || persistedProxyKey;
   if (effectiveProxyKey) {
     proxyManager.setApiKey(effectiveProxyKey);
+    // Restore the last account -> proxy mapping so a restart keeps the same IP.
+    proxyManager.hydrateAssignments(store.getProxyAssignments());
     // A key alone does not mean routing is wanted: honour the dashboard's last
     // choice. With no saved choice yet (fresh install plus env key), enabling is
     // the sensible default.
@@ -157,12 +159,19 @@ export async function createServer(): Promise<{
    * which is how a previously configured proxy gets cleared. Only changed
    * accounts are written, and the core reloads its account cache afterwards.
    */
-  const runProxySync = () =>
-    syncProxyRouting(
+  const runProxySync = async () => {
+    const result = await syncProxyRouting(
       proxyManager,
       store.getAccounts().map((account) => account.id),
       (procedure, input) => coreClient.callRpc(procedure, input),
     );
+    // Persist the chosen mapping (address:port only) so the next process keeps
+    // accounts on the same IPs instead of re-dealing the inventory.
+    store.setProxyAssignments(
+      proxyManager.isEnabled() ? proxyManager.getAssignmentKeys() : {},
+    );
+    return result;
+  };
 
   /**
    * Attach the egress IP and country to each traffic record.

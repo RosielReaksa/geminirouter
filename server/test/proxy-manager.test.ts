@@ -375,6 +375,46 @@ test('egress identity follows the assigned proxy and disappears when disabled', 
   assert.equal(manager.getEgressForAccount('a1'), null, 'no proxy label when routing is off');
 });
 
+test('a restart keeps every account on the same proxy', async () => {
+  const proxies = inventory([1, 2, 3]);
+  const first = new ProxyManager({ fetchInventory: async () => proxies });
+  first.setApiKey('test-key');
+  first.setEnabled(true);
+  await first.refreshProxies();
+  const before = first.reconcile(['a1', 'a2', 'a3']);
+  const saved = first.getAssignmentKeys();
+  assert.deepEqual(Object.keys(saved).sort(), ['a1', 'a2', 'a3']);
+  assert.match(saved.a1, /^1\.1\.1\.1:9001$/, 'keys never contain credentials');
+
+  // Simulate a process restart: new manager, same inventory, restored mapping.
+  const second = new ProxyManager({ fetchInventory: async () => proxies });
+  second.setApiKey('test-key');
+  second.setEnabled(true);
+  second.hydrateAssignments(saved);
+  await second.refreshProxies();
+
+  assert.deepEqual(second.reconcile(['a1', 'a2', 'a3']), before);
+});
+
+test('a vanished proxy forces only the affected account to be re-assigned', async () => {
+  const first = new ProxyManager({ fetchInventory: async () => inventory([1, 2]) });
+  first.setApiKey('test-key');
+  first.setEnabled(true);
+  await first.refreshProxies();
+  const before = new Map(first.reconcile(['a1', 'a2']).map((a) => [a.accountId, a.proxyUrl]));
+
+  // Proxy 1 disappears; a1 must move, a2 must keep its IP.
+  const second = new ProxyManager({ fetchInventory: async () => inventory([2, 3]) });
+  second.setApiKey('test-key');
+  second.setEnabled(true);
+  second.hydrateAssignments(first.getAssignmentKeys());
+  await second.refreshProxies();
+  const after = new Map(second.reconcile(['a1', 'a2']).map((a) => [a.accountId, a.proxyUrl]));
+
+  assert.notEqual(after.get('a1'), before.get('a1'));
+  assert.equal(after.get('a2'), before.get('a2'));
+});
+
 test('sync results never expose proxy credentials to API clients', async () => {
   const { manager } = await managerWith(inventory([1]), ['a1']);
   const rpc = async () => ({ success: true });
@@ -407,10 +447,16 @@ test('the Webshare key survives a store reload and never leaks into gateway conf
     assert.equal(JSON.stringify(first.getConfig()).includes('ws-secret-key'), false);
 
     first.setProxyRoutingEnabled(false);
+    first.setProxyAssignments({ a1: '96.62.148.198:7408' });
 
     const reloaded = new LocalStateStore(dataDir);
     assert.equal(reloaded.getWebshareApiKey(), 'ws-secret-key');
     assert.equal(reloaded.getProxyRoutingEnabled(), false, 'a disabled choice survives restart');
+    assert.deepEqual(
+      reloaded.getProxyAssignments(),
+      { a1: '96.62.148.198:7408' },
+      'the account -> IP mapping survives restart',
+    );
     assert.equal(JSON.stringify(reloaded.getConfig()).includes('ws-secret-key'), false);
 
     reloaded.setWebshareApiKey('');

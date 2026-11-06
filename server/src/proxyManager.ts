@@ -111,6 +111,12 @@ export class ProxyManager {
    * re-writing every account (and reloading the core) on every refresh cycle.
    */
   private pushed = new Map<string, string | null>();
+  /**
+   * accountId -> "address:port" of the proxy it used in a previous process.
+   * Restored after a refresh so a bridge restart does not rotate every account
+   * onto a different IP.
+   */
+  private persistedAssignments = new Map<string, string>();
 
   /**
    * @param options.fetchInventory Injectable inventory source. Production uses
@@ -233,6 +239,27 @@ export class ProxyManager {
   }
 
   /**
+   * Restore the account -> proxy mapping persisted by a previous process.
+   * Keys are `address:port`; unknown or vanished proxies are ignored and the
+   * account is re-assigned on the next reconcile.
+   */
+  hydrateAssignments(assignments: Record<string, string>): void {
+    this.persistedAssignments.clear();
+    for (const [accountId, key] of Object.entries(assignments || {})) {
+      if (typeof key === 'string' && key) this.persistedAssignments.set(accountId, key);
+    }
+  }
+
+  /** Current mapping as `accountId -> "address:port"`, for persistence. */
+  getAssignmentKeys(): Record<string, string> {
+    const result: Record<string, string> = {};
+    for (const [accountId, proxy] of this.assignments) {
+      result[accountId] = proxyKey(proxy);
+    }
+    return result;
+  }
+
+  /**
    * After a refresh, keep each account on its previous proxy while that proxy is
    * still in the inventory. Assignments for vanished proxies are dropped and
    * re-created by `reconcile`.
@@ -244,6 +271,14 @@ export class ProxyManager {
     this.assignments.clear();
     for (const [accountId, oldProxy] of previous) {
       const match = byKey.get(proxyKey(oldProxy));
+      if (match) this.assignments.set(accountId, match);
+    }
+
+    // Fresh process (or an account missing from the in-memory map): fall back to
+    // the persisted mapping so restarting the bridge does not change the IP.
+    for (const [accountId, key] of this.persistedAssignments) {
+      if (this.assignments.has(accountId)) continue;
+      const match = byKey.get(key);
       if (match) this.assignments.set(accountId, match);
     }
   }

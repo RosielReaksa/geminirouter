@@ -153,6 +153,9 @@ export class LocalStateStore {
   // Persisted routing intent: null until the dashboard has set it once, so a
   // key supplied only by the environment can still default to enabled.
   private proxyRoutingEnabled: boolean | null = null;
+  // accountId -> "address:port" of the assigned proxy, so a restart keeps the
+  // account on the same IP. The credentials are not stored here.
+  private proxyAssignments: Record<string, string> = {};
   // Debounce timer: traffic writes are batched so disk I/O is not on the hot
   // request path. Config/account changes still flush immediately.
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -174,6 +177,10 @@ export class LocalStateStore {
     this.webshareApiKey = typeof loaded.webshareApiKey === 'string' ? loaded.webshareApiKey : '';
     this.proxyRoutingEnabled =
       typeof loaded.proxyRoutingEnabled === 'boolean' ? loaded.proxyRoutingEnabled : null;
+    this.proxyAssignments =
+      loaded.proxyAssignments && typeof loaded.proxyAssignments === 'object'
+        ? { ...loaded.proxyAssignments }
+        : {};
     this.gatewayPort = this.config.port || 8045;
   }
 
@@ -184,6 +191,7 @@ export class LocalStateStore {
     modelTests?: Record<string, ModelAvailabilityResult>;
     webshareApiKey?: string;
     proxyRoutingEnabled?: boolean;
+    proxyAssignments?: Record<string, string>;
   } {
     if (fs.existsSync(this.stateFile)) {
       try {
@@ -208,6 +216,7 @@ export class LocalStateStore {
             modelTests: this.modelTests,
             webshareApiKey: this.webshareApiKey,
             proxyRoutingEnabled: this.proxyRoutingEnabled,
+            proxyAssignments: this.proxyAssignments,
           },
           null,
           2
@@ -284,6 +293,20 @@ export class LocalStateStore {
 
   setProxyRoutingEnabled(enabled: boolean): void {
     this.proxyRoutingEnabled = enabled;
+    this.saveState();
+  }
+
+  /** accountId -> "address:port" of the assigned proxy (no credentials). */
+  getProxyAssignments(): Record<string, string> {
+    return { ...this.proxyAssignments };
+  }
+
+  setProxyAssignments(assignments: Record<string, string>): void {
+    const next: Record<string, string> = {};
+    for (const [accountId, key] of Object.entries(assignments || {})) {
+      if (typeof key === 'string' && key) next[accountId] = key;
+    }
+    this.proxyAssignments = next;
     this.saveState();
   }
 
