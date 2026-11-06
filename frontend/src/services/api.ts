@@ -125,12 +125,31 @@ export class ApiClient {
 
   /** Mutation helper: surface the server's error message instead of mock data. */
   private async mutateJson<T>(endpoint: string, options: RequestInit): Promise<T> {
-    const { response, data } = await this.fetchJson<T>(endpoint, options);
+    const method = (options.method || 'GET').toUpperCase();
+    // Fastify rejects an empty body when Content-Type is application/json; send
+    // an empty object for body-less POST/PATCH/DELETE calls.
+    const requestOptions: RequestInit = {
+      ...options,
+      ...(method !== 'GET' && method !== 'HEAD' && options.body === undefined
+        ? { body: '{}' }
+        : {}),
+    };
+    const { response, data } = await this.fetchJson<T>(endpoint, requestOptions);
     if (!response.ok) {
-      const message =
-        (data as any)?.error ||
-        (data as any)?.message ||
-        `Request failed (HTTP ${response.status}).`;
+      const raw =
+        (data as any)?.error ??
+        (data as any)?.message;
+      let message: string;
+      if (typeof raw === 'string' && raw.trim()) {
+        message = raw;
+      } else if (raw && typeof raw === 'object') {
+        message =
+          (typeof (raw as any).message === 'string' && (raw as any).message) ||
+          (typeof (raw as any).type === 'string' && (raw as any).type) ||
+          JSON.stringify(raw);
+      } else {
+        message = `Request failed (HTTP ${response.status}).`;
+      }
       throw new Error(String(message));
     }
     return data as T;
