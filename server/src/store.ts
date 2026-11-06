@@ -168,6 +168,10 @@ export class LocalStateStore {
   // accountId -> "address:port" of the assigned proxy, so a restart keeps the
   // account on the same IP. The credentials are not stored here.
   private proxyAssignments: Record<string, string> = {};
+  // Egress health: a proxy freed from a banned account cools down; retired
+  // proxies are never assigned again.
+  private proxyQuarantines: Record<string, number> = {};
+  private retiredProxies: string[] = [];
   // AI Studio keys used by the Gemini API provider. Stored server-side only and
   // never returned in full by the API.
   private geminiApiKeys: GeminiApiKeyRecord[] = [];
@@ -200,6 +204,13 @@ export class LocalStateStore {
       loaded.proxyAssignments && typeof loaded.proxyAssignments === 'object'
         ? { ...loaded.proxyAssignments }
         : {};
+    this.proxyQuarantines =
+      loaded.proxyQuarantines && typeof loaded.proxyQuarantines === 'object'
+        ? { ...loaded.proxyQuarantines }
+        : {};
+    this.retiredProxies = Array.isArray(loaded.retiredProxies)
+      ? loaded.retiredProxies.filter((key): key is string => typeof key === 'string' && Boolean(key))
+      : [];
     this.geminiApiKeys = Array.isArray(loaded.geminiApiKeys)
       ? loaded.geminiApiKeys
           .filter((key): key is GeminiApiKeyRecord =>
@@ -230,6 +241,8 @@ export class LocalStateStore {
     webshareApiKey?: string;
     proxyRoutingEnabled?: boolean;
     proxyAssignments?: Record<string, string>;
+    proxyQuarantines?: Record<string, number>;
+    retiredProxies?: string[];
     geminiApiKeys?: GeminiApiKeyRecord[];
     geminiApiProxyEnabled?: boolean;
     geminiApiProxyAssignments?: Record<string, string>;
@@ -258,6 +271,8 @@ export class LocalStateStore {
             webshareApiKey: this.webshareApiKey,
             proxyRoutingEnabled: this.proxyRoutingEnabled,
             proxyAssignments: this.proxyAssignments,
+            proxyQuarantines: this.proxyQuarantines,
+            retiredProxies: this.retiredProxies,
             geminiApiKeys: this.geminiApiKeys,
             geminiApiProxyEnabled: this.geminiApiProxyEnabled,
             geminiApiProxyAssignments: this.geminiApiProxyAssignments,
@@ -351,6 +366,32 @@ export class LocalStateStore {
       if (typeof key === 'string' && key) next[accountId] = key;
     }
     this.proxyAssignments = next;
+    this.saveState();
+  }
+
+  getProxyQuarantines(): Record<string, number> {
+    return { ...this.proxyQuarantines };
+  }
+
+  setProxyQuarantines(quarantines: Record<string, number>): void {
+    const next: Record<string, number> = {};
+    for (const [key, until] of Object.entries(quarantines || {})) {
+      if (typeof key === 'string' && key && Number.isFinite(until) && until > 0) {
+        next[key] = until;
+      }
+    }
+    this.proxyQuarantines = next;
+    this.saveState();
+  }
+
+  getRetiredProxies(): string[] {
+    return [...this.retiredProxies];
+  }
+
+  setRetiredProxies(proxies: string[]): void {
+    this.retiredProxies = Array.isArray(proxies)
+      ? [...new Set(proxies.filter((key) => typeof key === 'string' && key))]
+      : [];
     this.saveState();
   }
 

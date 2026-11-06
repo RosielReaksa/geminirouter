@@ -8,8 +8,10 @@ import {
   XCircle,
   Loader2,
   Copy,
+  Ban,
+  Clock,
 } from 'lucide-react';
-import { ProxyConfig, ProxyListSummary } from '../types';
+import { ProxyConfig, ProxyHealthStatus, ProxyListSummary } from '../types';
 import { api } from '../services/api';
 
 interface ProxyPageProps {
@@ -39,6 +41,7 @@ export const ProxyPage: React.FC<ProxyPageProps> = ({ onReady }) => {
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  const [statusBusy, setStatusBusy] = useState<string | null>(null);
 
   const fetchConfig = useCallback(async () => {
     try {
@@ -143,6 +146,33 @@ export const ProxyPage: React.FC<ProxyPageProps> = ({ onReady }) => {
     }
   };
 
+  const handleProxyStatus = async (
+    proxy: ProxyListSummary['proxies'][number],
+    action: 'quarantine' | 'retire' | 'restore',
+  ) => {
+    const key = `${proxy.address}:${proxy.port}`;
+    setStatusBusy(key);
+    setError(null);
+    setMessage(null);
+    try {
+      const { data } = await api.setProxyStatus(proxy.address, proxy.port, action);
+      setProxyList(data);
+      setMessage(
+        action === 'quarantine'
+          ? `${key} quarantined for 24 hours. Accounts and keys on it were moved to healthy IPs.`
+          : action === 'retire'
+            ? `${key} retired. It will not be assigned again until restored.`
+            : `${key} restored and available for assignment.`,
+      );
+      setTimeout(() => setMessage(null), 5000);
+      await fetchConfig();
+    } catch (err: any) {
+      setError(err?.message || 'Could not update the proxy status.');
+    } finally {
+      setStatusBusy(null);
+    }
+  };
+
   const toggleKeyVisibility = () => setShowKey((p) => !p);
 
   const copyKey = () => {
@@ -150,6 +180,20 @@ export const ProxyPage: React.FC<ProxyPageProps> = ({ onReady }) => {
     navigator.clipboard.writeText(formApiKey);
     setMessage('API key copied to clipboard.');
     setTimeout(() => setMessage(null), 2000);
+  };
+
+  const statusLabel: Record<ProxyHealthStatus, string> = {
+    assigned: 'In use',
+    available: 'Available',
+    cooling: 'Cooling',
+    retired: 'Retired',
+  };
+
+  const statusClass: Record<ProxyHealthStatus, string> = {
+    assigned: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+    available: 'bg-stone-50 text-stone-600 border-stone-200',
+    cooling: 'bg-amber-50 text-amber-700 border-amber-200',
+    retired: 'bg-red-50 text-red-700 border-red-200',
   };
 
   return (
@@ -357,6 +401,8 @@ export const ProxyPage: React.FC<ProxyPageProps> = ({ onReady }) => {
                   <th className="py-3 px-4">Port</th>
                   <th className="py-3 px-4">Country</th>
                   <th className="py-3 px-4">Assigned Accounts</th>
+                  <th className="py-3 px-4">Status</th>
+                  <th className="py-3 px-4 text-right">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-[#EAE5DE] text-[#2A2723]">
@@ -368,11 +414,78 @@ export const ProxyPage: React.FC<ProxyPageProps> = ({ onReady }) => {
                     <td className="py-3.5 px-4 font-mono-code text-[#504C46]">
                       {p.assignedTo ? p.assignedTo : <span className="text-stone-400">—</span>}
                     </td>
+                  <td className="py-3.5 px-4">
+                      <span
+                        className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-semibold ${statusClass[p.status]}`}
+                      >
+                        {p.status === 'cooling' && <Clock className="h-3 w-3" />}
+                        {p.status === 'retired' && <Ban className="h-3 w-3" />}
+                        {statusLabel[p.status]}
+                      </span>
+                      {p.status === 'cooling' && p.quarantineUntil && (
+                        <div className="mt-1 text-[10px] text-[#9E988F]">
+                          until {new Date(p.quarantineUntil).toLocaleString()}
+                        </div>
+                      )}
+                    </td>
+                    <td className="py-3.5 px-4">
+                      <div className="flex items-center justify-end gap-1.5">
+                        {(p.status === 'cooling' || p.status === 'retired') && (
+                          <button
+                            type="button"
+                            onClick={() => void handleProxyStatus(p, 'restore')}
+                            disabled={statusBusy !== null}
+                            className="inline-flex items-center gap-1 rounded-lg border border-[#EAE5DE] bg-[#FAF7F2] px-2 py-1 text-[10px] font-medium text-[#504C46] transition-colors hover:bg-[#F2ECE4] hover:text-[#C25938] disabled:opacity-50"
+                          >
+                            {statusBusy === `${p.address}:${p.port}` ? (
+                              <Loader2 className="h-3 w-3 animate-spin" />
+                            ) : (
+                              <RotateCcw className="h-3 w-3" />
+                            )}
+                            Restore
+                          </button>
+                        )}
+                        {p.status !== 'cooling' && p.status !== 'retired' && (
+                          <button
+                            type="button"
+                            onClick={() => void handleProxyStatus(p, 'quarantine')}
+                            disabled={statusBusy !== null}
+                            className="inline-flex items-center gap-1 rounded-lg border border-amber-200 bg-amber-50 px-2 py-1 text-[10px] font-medium text-amber-700 transition-colors hover:bg-amber-100 disabled:opacity-50"
+                          >
+                            {statusBusy === `${p.address}:${p.port}` ? (
+                              <Loader2 className="h-3 w-3 animate-spin" />
+                            ) : (
+                              <Clock className="h-3 w-3" />
+                            )}
+                            Quarantine
+                          </button>
+                        )}
+                        {p.status !== 'retired' && (
+                          <button
+                            type="button"
+                            onClick={() => void handleProxyStatus(p, 'retire')}
+                            disabled={statusBusy !== null}
+                            className="inline-flex items-center gap-1 rounded-lg border border-red-200 bg-red-50 px-2 py-1 text-[10px] font-medium text-red-700 transition-colors hover:bg-red-100 disabled:opacity-50"
+                          >
+                            {statusBusy === `${p.address}:${p.port}` ? (
+                              <Loader2 className="h-3 w-3 animate-spin" />
+                            ) : (
+                              <Ban className="h-3 w-3" />
+                            )}
+                            Retire
+                          </button>
+                        )}
+                      </div>
+                    </td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
+          <p className="mt-4 text-[10px] text-[#9E988F]">
+            Removing a banned account quarantines its IP for 24 hours before another account or API key can use it.
+            Retire an IP permanently when it has caused repeat bans; a retired IP is never assigned until restored.
+          </p>
         </div>
       )}
 

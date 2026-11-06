@@ -168,6 +168,10 @@ export async function createServer(): Promise<{
     // Restore the last account -> proxy mapping so a restart keeps the same IP.
     proxyManager.hydrateAssignments(store.getProxyAssignments());
     proxyManager.hydrateApiKeyAssignments(store.getGeminiApiProxyAssignments());
+    proxyManager.hydrateHealthState(
+      store.getProxyQuarantines(),
+      store.getRetiredProxies(),
+    );
     if (store.isGeminiApiProxyEnabled()) proxyManager.setApiKeyProxyEnabled(true);
     // A key alone does not mean routing is wanted: honour the dashboard's last
     // choice. With no saved choice yet (fresh install plus env key), enabling is
@@ -193,6 +197,28 @@ export async function createServer(): Promise<{
       proxy: proxyManager.getApiKeyProxySummary(key.id),
     })),
   });
+
+  /** Inventory plus the account emails pinned to each proxy and its health. */
+  const proxyListResponse = () => {
+    const emailById = new Map(store.getAccounts().map((account) => [account.id, account.email]));
+    const proxies = proxyManager.getProxyListSummary().map((entry) => {
+      const { assignedAccountIds, ...rest } = entry;
+      const emails = assignedAccountIds
+        .map((id) => emailById.get(id) ?? id)
+        .sort((a, b) => a.localeCompare(b));
+      return {
+        ...rest,
+        assignedTo: emails.length > 0 ? emails.join(', ') : null,
+      };
+    });
+    return { enabled: proxyManager.isEnabled(), proxies };
+  };
+
+  const persistProxyHealth = () => {
+    const health = proxyManager.getHealthState();
+    store.setProxyQuarantines(health.quarantines);
+    store.setRetiredProxies(health.retired);
+  };
 
   /**
    * Compute the desired per-account proxy state and push the changes to the
@@ -1507,6 +1533,7 @@ export async function createServer(): Promise<{
   // 4. DELETE /api/accounts/:id
   app.delete<{ Params: { id: string } }>('/api/accounts/:id', async (request, reply) => {
     const { id } = request.params;
+    const proxyKey = proxyManager.getAccountProxyKey(id);
     if (await coreClient.isCoreAlive()) {
       try {
         await coreClient.callRpc('accountDelete', { accountId: id });
@@ -1516,6 +1543,15 @@ export async function createServer(): Promise<{
     }
 
     const removed = store.removeAccount(id);
+    if (removed && proxyKey) {
+      // A freed IP from a removed (possibly banned) account cools down before it
+      // can be assigned to another account or API key.
+      proxyManager.quarantineProxy(proxyKey, 24 * 60 * 60 * 1000);
+      persistProxyHealth();
+      await runProxySync();
+      syncApiKeyProxyAssignments();
+    }
+
     return {
       success: removed,
       accounts: store.getAccounts(),
@@ -1892,21 +1928,46 @@ export async function createServer(): Promise<{
 
   // 10c. GET /api/proxy/list — inventory plus the accounts pinned to each proxy.
   // Account ids are joined to emails so the dashboard never shows opaque ids.
-  app.get('/api/proxy/list', async () => {
-    const emailById = new Map(store.getAccounts().map((account) => [account.id, account.email]));
-    const proxies = proxyManager.getProxyListSummary().map((entry) => {
-      const emails = entry.assignedAccountIds
-        .map((id) => emailById.get(id) ?? id)
-        .sort((a, b) => a.localeCompare(b));
-      return {
-        address: entry.address,
-        port: entry.port,
-        country: entry.country,
-        assignedTo: emails.length > 0 ? emails.join(', ') : null,
-      };
-    });
+  app.get('/api/proxy/list', async () => proxyListResponse());
 
-    return { enabled: proxyManager.isEnabled(), proxies };
+  // 10c-i. POST /api/proxy/status — quarantine, retire or restore an IP.
+  app.post<{
+    Body?: {
+      address?: string;
+      port?: number;
+      action?: 'quarantine' | 'retire' | 'restore';
+      hours?: number;
+    };
+  }>('/api/proxy/status', async (request, reply) => {
+    const body = request.body || {};
+    const address = typeof body.address === 'string' ? body.address.trim() : '';
+    const port = Number(body.port);
+    const action = body.action;
+    if (!address || !Number.isFinite(port) || port <= 0) {
+      return reply.code(400).send({ error: 'address and port are required' });
+    }
+    if (action !== 'quarantine' && action !== 'retire' && action !== 'restore') {
+      return reply.code(400).send({ error: 'action must be quarantine, retire or restore' });
+    }
+
+    const key = proxyManager.proxyKeyFor(address, port);
+    const changed =
+      action === 'retire'
+        ? proxyManager.retireProxy(key)
+        : action === 'restore'
+          ? proxyManager.restoreProxy(key)
+          : proxyManager.quarantineProxy(
+              key,
+              Math.max(1, Math.min(24 * 30, Number(body.hours) || 24)) * 60 * 60 * 1000,
+            );
+
+    if (!changed) return reply.code(404).send({ error: 'Proxy not found' });
+
+    persistProxyHealth();
+    // Move any account/key still pinned to this proxy onto a healthy one.
+    await runProxySync();
+    syncApiKeyProxyAssignments();
+    return proxyListResponse();
   });
 
   // 10d. Gemini API keys (AI Studio). These serve gemini-3.1-flash-lite and

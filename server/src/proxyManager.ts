@@ -60,6 +60,9 @@ export interface ProxyListEntry {
   port: number;
   country: string;
   assignedAccountIds: string[];
+  /** Assignment / health state for the dashboard. */
+  status: 'assigned' | 'cooling' | 'retired' | 'available';
+  quarantineUntil: number | null;
 }
 
 const WEBSHARE_API_URL = 'https://proxy.webshare.io/api/v2/proxy/list/';
@@ -125,6 +128,10 @@ export class ProxyManager {
   private persistedApiKeyAssignments = new Map<string, string>();
   private apiKeyAgentCache = new Map<string, HttpsProxyAgent<string>>();
   private apiKeyRoundRobin = 0;
+  // Egress health: a proxy freed from a banned account cools down before it is
+  // reused; a retired proxy is never assigned again.
+  private quarantineUntil = new Map<string, number>();
+  private retiredProxies = new Set<string>();
 
   /**
    * @param options.fetchInventory Injectable inventory source. Production uses
@@ -298,6 +305,94 @@ export class ProxyManager {
     }
   }
 
+  /** Restore proxy health (quarantines and retired IPs) after a restart. */
+  hydrateHealthState(quarantines: Record<string, number>, retired: string[]): void {
+    this.quarantineUntil.clear();
+    for (const [key, until] of Object.entries(quarantines || {})) {
+      if (typeof key === 'string' && Number.isFinite(until) && until > Date.now()) {
+        this.quarantineUntil.set(key, until);
+      }
+    }
+    this.retiredProxies = new Set(
+      Array.isArray(retired) ? retired.filter((key) => typeof key === 'string' && key) : [],
+    );
+  }
+
+  getHealthState(): { quarantines: Record<string, number>; retired: string[] } {
+    const quarantines: Record<string, number> = {};
+    const now = Date.now();
+    for (const [key, until] of this.quarantineUntil) {
+      if (until > now) quarantines[key] = until;
+    }
+    return { quarantines, retired: [...this.retiredProxies] };
+  }
+
+  /** A proxy is assignable when it is neither retired nor cooling. */
+  isProxyAvailable(proxy: WebshareProxy): boolean {
+    const key = proxyKey(proxy);
+    if (this.retiredProxies.has(key)) return false;
+    const until = this.quarantineUntil.get(key) ?? 0;
+    return until <= Date.now();
+  }
+
+  private availableProxies(): WebshareProxy[] {
+    return this.proxyList.filter((proxy) => this.isProxyAvailable(proxy));
+  }
+
+  /** The `address:port` key of a proxy, for the dashboard actions. */
+  proxyKeyFor(address: string, port: number): string {
+    return `${address}:${port}`;
+  }
+
+  /** Proxy pinned to an account, as `address:port`, or null. */
+  getAccountProxyKey(accountId: string): string | null {
+    const proxy = this.assignments.get(accountId);
+    return proxy ? proxyKey(proxy) : null;
+  }
+
+  /** Quarantine a proxy for the given duration; it will not be assigned. */
+  quarantineProxy(key: string, durationMs: number): boolean {
+    if (!this.proxyList.some((proxy) => proxyKey(proxy) === key)) return false;
+    this.retiredProxies.delete(key);
+    this.quarantineUntil.set(key, Date.now() + Math.max(60_000, durationMs));
+    return true;
+  }
+
+  /** Permanently keep a proxy out of assignment. */
+  retireProxy(key: string): boolean {
+    if (!this.proxyList.some((proxy) => proxyKey(proxy) === key)) return false;
+    this.retiredProxies.add(key);
+    this.quarantineUntil.delete(key);
+    return true;
+  }
+
+  /** Clear quarantine and retirement so the proxy can be assigned again. */
+  restoreProxy(key: string): boolean {
+    if (!this.proxyList.some((proxy) => proxyKey(proxy) === key)) return false;
+    this.retiredProxies.delete(key);
+    this.quarantineUntil.delete(key);
+    return true;
+  }
+
+  getProxyStatus(proxy: WebshareProxy): {
+    status: 'assigned' | 'cooling' | 'retired' | 'available';
+    quarantineUntil: number | null;
+  } {
+    const key = proxyKey(proxy);
+    const until = this.quarantineUntil.get(key) ?? 0;
+    const assigned =
+      [...this.assignments.values()].some((entry) => proxyKey(entry) === key) ||
+      [...this.apiKeyAssignments.values()].some((entry) => proxyKey(entry) === key);
+    const status = this.retiredProxies.has(key)
+      ? 'retired'
+      : until > Date.now()
+        ? 'cooling'
+        : assigned
+          ? 'assigned'
+          : 'available';
+    return { status, quarantineUntil: until > Date.now() ? until : null };
+  }
+
   /** Current mapping as `accountId -> "address:port"`, for persistence. */
   getAssignmentKeys(): Record<string, string> {
     const result: Record<string, string> = {};
@@ -328,7 +423,7 @@ export class ProxyManager {
     this.assignments.clear();
     for (const [accountId, oldProxy] of previous) {
       const match = byKey.get(proxyKey(oldProxy));
-      if (match) this.assignments.set(accountId, match);
+      if (match && this.isProxyAvailable(match)) this.assignments.set(accountId, match);
     }
 
     // Fresh process (or an account missing from the in-memory map): fall back to
@@ -336,7 +431,7 @@ export class ProxyManager {
     for (const [accountId, key] of this.persistedAssignments) {
       if (this.assignments.has(accountId)) continue;
       const match = byKey.get(key);
-      if (match) this.assignments.set(accountId, match);
+      if (match && this.isProxyAvailable(match)) this.assignments.set(accountId, match);
     }
   }
 
@@ -348,12 +443,12 @@ export class ProxyManager {
     this.apiKeyAssignments.clear();
     for (const [keyId, oldProxy] of previous) {
       const match = byKey.get(proxyKey(oldProxy));
-      if (match) this.apiKeyAssignments.set(keyId, match);
+      if (match && this.isProxyAvailable(match)) this.apiKeyAssignments.set(keyId, match);
     }
     for (const [keyId, key] of this.persistedApiKeyAssignments) {
       if (this.apiKeyAssignments.has(keyId)) continue;
       const match = byKey.get(key);
-      if (match) this.apiKeyAssignments.set(keyId, match);
+      if (match && this.isProxyAvailable(match)) this.apiKeyAssignments.set(keyId, match);
     }
   }
 
@@ -387,7 +482,7 @@ export class ProxyManager {
 
       for (const accountId of uniqueIds) {
         const current = this.assignments.get(accountId);
-        if (!current || !byKey.has(proxyKey(current))) {
+        if (!current || !byKey.has(proxyKey(current)) || !this.isProxyAvailable(current)) {
           this.assignProxyToAccount(accountId, byKey);
         }
       }
@@ -407,24 +502,25 @@ export class ProxyManager {
     accountId: string,
     byKey: Map<string, WebshareProxy>,
   ): WebshareProxy | null {
-    if (!this.isEnabled() || this.proxyList.length === 0) {
+    const candidates = this.availableProxies();
+    if (!this.isEnabled() || candidates.length === 0) {
       this.assignments.delete(accountId);
       return null;
     }
 
     const usage = new Map<string, number>();
-    for (const proxy of this.proxyList) usage.set(proxyKey(proxy), 0);
+    for (const proxy of candidates) usage.set(proxyKey(proxy), 0);
     for (const [id, proxy] of this.assignments) {
       if (id === accountId) continue;
       const key = proxyKey(proxy);
       if (usage.has(key)) usage.set(key, (usage.get(key) ?? 0) + 1);
     }
 
-    const count = this.proxyList.length;
+    const count = candidates.length;
     let best: WebshareProxy | null = null;
     let bestUsage = Number.POSITIVE_INFINITY;
     for (let offset = 0; offset < count; offset += 1) {
-      const candidate = this.proxyList[(this.roundRobinIndex + offset) % count];
+      const candidate = candidates[(this.roundRobinIndex + offset) % count];
       const candidateUsage = usage.get(proxyKey(candidate)) ?? 0;
       if (candidateUsage < bestUsage) {
         best = candidate;
@@ -470,7 +566,7 @@ export class ProxyManager {
 
     for (const keyId of unique) {
       const current = this.apiKeyAssignments.get(keyId);
-      if (!current || !byKey.has(proxyKey(current))) {
+      if (!current || !byKey.has(proxyKey(current)) || !this.isProxyAvailable(current)) {
         this.assignProxyToApiKey(keyId, byKey);
       }
     }
@@ -480,24 +576,25 @@ export class ProxyManager {
     keyId: string,
     byKey: Map<string, WebshareProxy>,
   ): WebshareProxy | null {
-    if (!this.isApiKeyProxyEnabled() || this.proxyList.length === 0) {
+    const candidates = this.availableProxies();
+    if (!this.isApiKeyProxyEnabled() || candidates.length === 0) {
       this.apiKeyAssignments.delete(keyId);
       return null;
     }
 
     const usage = new Map<string, number>();
-    for (const proxy of this.proxyList) usage.set(proxyKey(proxy), 0);
+    for (const proxy of candidates) usage.set(proxyKey(proxy), 0);
     for (const [id, proxy] of this.apiKeyAssignments) {
       if (id === keyId) continue;
       const key = proxyKey(proxy);
       if (usage.has(key)) usage.set(key, (usage.get(key) ?? 0) + 1);
     }
 
-    const count = this.proxyList.length;
+    const count = candidates.length;
     let best: WebshareProxy | null = null;
     let bestUsage = Number.POSITIVE_INFINITY;
     for (let offset = 0; offset < count; offset += 1) {
-      const candidate = this.proxyList[(this.apiKeyRoundRobin + offset) % count];
+      const candidate = candidates[(this.apiKeyRoundRobin + offset) % count];
       const candidateUsage = usage.get(proxyKey(candidate)) ?? 0;
       if (candidateUsage < bestUsage) {
         best = candidate;
@@ -519,7 +616,8 @@ export class ProxyManager {
   getApiKeyProxyUrl(keyId: string): string | null {
     if (!this.isApiKeyProxyEnabled()) return null;
     const proxy = this.apiKeyAssignments.get(keyId);
-    return proxy ? toProxyUrl(proxy) : null;
+    if (!proxy || !this.isProxyAvailable(proxy)) return null;
+    return toProxyUrl(proxy);
   }
 
   /** Cached HTTPS-over-HTTP agent for a key's assigned proxy. */
@@ -540,7 +638,7 @@ export class ProxyManager {
   ): { address: string; port: number; country: string | null } | null {
     if (!this.isApiKeyProxyEnabled()) return null;
     const proxy = this.apiKeyAssignments.get(keyId);
-    if (!proxy) return null;
+    if (!proxy || !this.isProxyAvailable(proxy)) return null;
     return {
       address: proxy.proxy_address,
       port: proxyPort(proxy),
@@ -631,6 +729,7 @@ export class ProxyManager {
       port: proxyPort(proxy),
       country: proxy.country_code,
       assignedAccountIds: accountsByProxy.get(proxyKey(proxy)) ?? [],
+      ...this.getProxyStatus(proxy),
     }));
   }
 }

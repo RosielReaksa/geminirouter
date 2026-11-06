@@ -27,6 +27,26 @@ Assignments survive an inventory refresh: an account keeps its proxy as long as
 that proxy is still listed. If a proxy disappears, only the orphaned account is
 re-assigned.
 
+The same inventory is shared with the AI Studio key pool. Account routing and key
+routing are independent switches, but they draw from one list of IPs, and a
+quarantined or retired IP is excluded from both.
+
+## Quarantine and retirement
+
+An IP freed from a banned account is not handed straight to the next account:
+
+- **Removing an account** (`DELETE /api/accounts/:id`) quarantines the IP it was
+  using for 24 hours and immediately re-assigns that account's peers if needed.
+- **Cooling** IPs are skipped by least-used assignment for both accounts and AI
+  Studio keys. The Proxy page shows `cooling until …`.
+- **Retire** keeps an IP out of rotation permanently. Use it when the same IP has
+  caused repeat bans or repeated validation challenges.
+- **Restore** clears the quarantine or retirement and puts the IP back in the
+  pool.
+
+Health state is persisted (`proxyQuarantines`, `retiredProxies`) and restored on
+startup, so a restart does not silently revive a retired IP.
+
 ## Configuration
 
 | Setting | Where | Notes |
@@ -47,7 +67,8 @@ silently re-enables routing that the operator turned off.
 | `GET` | `/api/proxy/config` | Redacted snapshot: enabled, `hasApiKey`, counts, last fetch, last error. |
 | `POST` | `/api/proxy/config` | Save key and/or toggle routing, refresh inventory, apply assignments. Always 200; failures surface in `error` / `sync.failed`. |
 | `POST` | `/api/proxy/refresh` | Force an inventory refresh and re-apply assignments. |
-| `GET` | `/api/proxy/list` | Inventory with the emails of the accounts pinned to each proxy. |
+| `GET` | `/api/proxy/list` | Inventory with the emails of the accounts pinned to each proxy, plus `status` and `quarantineUntil`. |
+| `POST` | `/api/proxy/status` | `{ address, port, action: "quarantine" \\| "retire" \\| "restore", hours? }`. Quarantine defaults to 24 hours (1–720). |
 
 ## Failure behaviour
 

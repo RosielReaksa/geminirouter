@@ -461,6 +461,115 @@ test('key proxy pins survive a refresh and a restart', async () => {
   }
 });
 
+test('quarantining an assigned proxy moves the account onto a healthy IP', async () => {
+  const { manager } = await managerWith(inventory([1, 2]), ['a1', 'a2']);
+  const before = new Map(
+    manager.reconcile(['a1', 'a2']).map((assignment) => [assignment.accountId, assignment.proxyUrl]),
+  );
+  const a1 = new URL(before.get('a1')!);
+  const quarantinedKey = `${a1.hostname}:${a1.port}`;
+
+  assert.equal(manager.quarantineProxy(quarantinedKey, 60 * 60 * 1000), true);
+  const after = new Map(
+    manager.reconcile(['a1', 'a2']).map((assignment) => [assignment.accountId, assignment.proxyUrl]),
+  );
+
+  assert.ok(after.get('a1'));
+  assert.notEqual(after.get('a1'), before.get('a1'), 'the account leaves the cooling IP');
+  assert.equal(after.get('a2'), before.get('a2'), 'the unaffected account keeps its IP');
+
+  const entry = manager
+    .getProxyListSummary()
+    .find((proxy) => `${proxy.address}:${proxy.port}` === quarantinedKey)!;
+  assert.equal(entry.status, 'cooling');
+  assert.ok(entry.quarantineUntil && entry.quarantineUntil > Date.now());
+});
+
+test('a cooling proxy is not assigned to new accounts until it is restored', async () => {
+  const manager = new ProxyManager({ fetchInventory: async () => inventory([1, 2]) });
+  manager.setApiKey('test-key');
+  manager.setEnabled(true);
+  await manager.refreshProxies();
+  manager.reconcile(['a1', 'a2']);
+
+  manager.quarantineProxy('1.1.1.1:9001', 2 * 60 * 60 * 1000);
+  const during = new Map(
+    manager.reconcile(['a1', 'a2', 'a3']).map((assignment) => [assignment.accountId, assignment.proxyUrl]),
+  );
+  assert.equal(new URL(during.get('a3')!).hostname, '2.2.2.2', 'only the healthy IP is used');
+
+  assert.equal(manager.restoreProxy('1.1.1.1:9001'), true);
+  const after = new Map(
+    manager.reconcile(['a1', 'a2', 'a3', 'a4']).map((assignment) => [assignment.accountId, assignment.proxyUrl]),
+  );
+  assert.equal(new URL(after.get('a4')!).hostname, '1.1.1.1', 'the restored IP is back in rotation');
+});
+
+test('a retired proxy stays out of rotation and can be restored', async () => {
+  const { manager } = await managerWith(inventory([1, 2]), ['a1']);
+
+  assert.equal(manager.retireProxy('1.1.1.1:9001'), true);
+  assert.equal(manager.retireProxy('1.1.1.1:9001'), true, 'retiring twice is harmless');
+  const assignments = manager.reconcile(['a1', 'a2']);
+  for (const assignment of assignments) {
+    assert.ok(assignment.proxyUrl);
+    assert.equal(new URL(assignment.proxyUrl!).hostname, '2.2.2.2');
+  }
+
+  const retired = manager
+    .getProxyListSummary()
+    .find((proxy) => `${proxy.address}:${proxy.port}` === '1.1.1.1:9001')!;
+  assert.equal(retired.status, 'retired');
+  assert.equal(retired.quarantineUntil, null);
+
+  assert.equal(manager.restoreProxy('1.1.1.1:9001'), true);
+  const restored = manager
+    .getProxyListSummary()
+    .find((proxy) => `${proxy.address}:${proxy.port}` === '1.1.1.1:9001')!;
+  assert.equal(restored.status, 'available');
+});
+
+test('quarantines and retirements survive a restart', async () => {
+  const proxies = inventory([1, 2, 3]);
+  const first = new ProxyManager({ fetchInventory: async () => proxies });
+  first.setApiKey('test-key');
+  first.setEnabled(true);
+  await first.refreshProxies();
+  first.reconcile(['a1', 'a2']);
+
+  first.quarantineProxy('1.1.1.1:9001', 60 * 60 * 1000);
+  first.retireProxy('3.3.3.3:9003');
+  const health = first.getHealthState();
+  assert.deepEqual(health.retired, ['3.3.3.3:9003']);
+
+  const second = new ProxyManager({ fetchInventory: async () => proxies });
+  second.setApiKey('test-key');
+  second.setEnabled(true);
+  second.hydrateHealthState(health.quarantines, health.retired);
+  await second.refreshProxies();
+
+  const hosts = second
+    .reconcile(['a1', 'a2', 'a3'])
+    .map((assignment) => new URL(assignment.proxyUrl!).hostname);
+  assert.deepEqual(hosts, ['2.2.2.2', '2.2.2.2', '2.2.2.2']);
+});
+
+test('proxy health survives a store reload', () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gr-proxy-health-'));
+  try {
+    const first = new LocalStateStore(dataDir);
+    const until = Date.now() + 60_000;
+    first.setProxyQuarantines({ '96.62.148.198:7408': until });
+    first.setRetiredProxies(['195.40.128.173:6893', '195.40.128.173:6893']);
+
+    const reloaded = new LocalStateStore(dataDir);
+    assert.deepEqual(reloaded.getProxyQuarantines(), { '96.62.148.198:7408': until });
+    assert.deepEqual(reloaded.getRetiredProxies(), ['195.40.128.173:6893']);
+  } finally {
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
 test('sync results never expose proxy credentials to API clients', async () => {
   const { manager } = await managerWith(inventory([1]), ['a1']);
   const rpc = async () => ({ success: true });

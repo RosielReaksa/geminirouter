@@ -334,6 +334,8 @@ export interface ProxyRefreshResult {
   error?: string;
 }
 
+export type ProxyHealthStatus = 'assigned' | 'cooling' | 'retired' | 'available';
+
 export interface ProxyListSummary {
   enabled: boolean;
   proxies: Array<{
@@ -341,6 +343,9 @@ export interface ProxyListSummary {
     port: number;
     country: string;
     assignedTo: string | null;
+    status: ProxyHealthStatus;
+    /** Epoch ms when a cooling proxy becomes assignable again. */
+    quarantineUntil: number | null;
   }>;
 }
 

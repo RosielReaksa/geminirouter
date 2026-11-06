@@ -445,6 +445,22 @@ export class ApiClient {
     );
   }
 
+  async setProxyStatus(
+    address: string,
+    port: number,
+    action: 'quarantine' | 'retire' | 'restore',
+    hours?: number,
+  ): Promise<{ data: ProxyListSummary; isLiveApi: boolean }> {
+    return this.fetchWithFallback<ProxyListSummary>(
+      '/api/proxy/status',
+      { method: 'POST', body: JSON.stringify({ address, port, action, hours }) },
+      () => ({
+        enabled: false,
+        proxies: [],
+      })
+    );
+  }
+
   async getGeminiApiConfig(): Promise<{ data: GeminiApiConfig; isLiveApi: boolean }> {
     return this.fetchWithFallback<GeminiApiConfig>(
       '/api/gemini/config',

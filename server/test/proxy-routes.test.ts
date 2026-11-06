@@ -95,3 +95,31 @@ test('GET /api/proxy/list is empty and does not expose credentials', async () =>
   assert.equal(res.statusCode, 200);
   assert.deepEqual(res.json(), { enabled: false, proxies: [] });
 });
+
+test('POST /api/proxy/status validates its input', async () => {
+  const missing = await app.inject({
+    method: 'POST',
+    url: '/api/proxy/status',
+    payload: {},
+  });
+  assert.equal(missing.statusCode, 400);
+  assert.match(missing.json().error, /address and port/i);
+
+  const badAction = await app.inject({
+    method: 'POST',
+    url: '/api/proxy/status',
+    payload: { address: '1.1.1.1', port: 9001, action: 'ban' },
+  });
+  assert.equal(badAction.statusCode, 400);
+  assert.match(badAction.json().error, /quarantine, retire or restore/i);
+});
+
+test('POST /api/proxy/status rejects a proxy outside the inventory', async () => {
+  const res = await app.inject({
+    method: 'POST',
+    url: '/api/proxy/status',
+    payload: { address: '9.9.9.9', port: 9009, action: 'retire' },
+  });
+  assert.equal(res.statusCode, 404);
+  assert.match(res.json().error, /not found/i);
+});
