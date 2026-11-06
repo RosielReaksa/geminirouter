@@ -31,6 +31,8 @@ import { mapCoreTrafficItems as mapCoreTrafficItemsFromCore } from './trafficMap
 import { getSharedCoreAuditDb } from './coreAuditDb.js';
 import { getSharedProxyManager } from './proxyManager.js';
 import { syncProxyAssignments as syncProxyRouting } from './proxySync.js';
+import { applyEgress } from './egress.js';
+import { getDirectEgressInfo } from './egressInfo.js';
 import { AccountTester, type AccountTestResult } from './accountTester.js';
 import {
   isModelFailureText,
@@ -162,6 +164,36 @@ export async function createServer(): Promise<{
       (procedure, input) => coreClient.callRpc(procedure, input),
     );
 
+  /**
+   * Attach the egress IP and country to each traffic record.
+   *
+   * Proxied accounts get the static Webshare IP they are pinned to. Anything
+   * else (no proxy, or the core has not routed through one) is labelled with
+   * the gateway host's public IP, looked up once per 30 minutes.
+   */
+  const withTrafficEgress = async (records: TrafficRecord[]): Promise<TrafficRecord[]> => {
+    if (records.length === 0) return records;
+
+    const idByEmail = new Map(
+      store.getAccounts().map((account) => [account.email.toLowerCase(), account.id]),
+    );
+    const resolveProxy = (record: TrafficRecord) => {
+      const accountId =
+        record.accountId ?? idByEmail.get((record.backingAccountEmail || '').toLowerCase());
+      return accountId ? proxyManager.getEgressForAccount(accountId) : null;
+    };
+
+    const needsDirect = records.some((record) => !resolveProxy(record));
+    const direct = needsDirect ? await getDirectEgressInfo() : null;
+
+    return applyEgress(records, (record) => {
+      const proxy = resolveProxy(record);
+      if (proxy) return { ip: proxy.address, country: proxy.country, via: 'proxy' };
+      if (direct) return { ip: direct.ip, country: direct.country, via: 'direct' };
+      return null;
+    });
+  };
+
   // Scheduled Webshare inventory refresh so proxy IPs stay current. The
   // interval is configurable via WEBSHARE_REFRESH_INTERVAL_MS (min 60s).
   const proxyRefreshIntervalMs = Math.max(
@@ -176,6 +208,12 @@ export async function createServer(): Promise<{
       if (!refresh.ok) {
         console.warn('[ProxyManager] Scheduled refresh failed:', refresh.error);
         return;
+      }
+      // Pick up accounts added since the last cycle before assigning proxies.
+      try {
+        await loadCoreAccounts();
+      } catch {
+        // Keep the last known pool; sync still runs against the store.
       }
       const sync = await runProxySync();
       if (sync.failed > 0) {
@@ -1760,6 +1798,13 @@ export async function createServer(): Promise<{
         }
       }
 
+      // Pick up accounts added since the last cycle before pushing assignments.
+      try {
+        await loadCoreAccounts();
+      } catch {
+        // Keep the last known pool; sync still runs against the store.
+      }
+
       const sync = await runProxySync();
       return {
         ...proxyManager.getConfigSnapshot(),
@@ -1783,6 +1828,12 @@ export async function createServer(): Promise<{
 
     const refresh = await proxyManager.refreshProxies();
     if (!refresh.ok) return { ...refresh, applied: 0, failed: 0, errors: [] as string[] };
+
+    try {
+      await loadCoreAccounts();
+    } catch {
+      // Keep the last known pool; sync still runs against the store.
+    }
 
     const sync = await runProxySync();
     return { ...refresh, ...sync };
@@ -1817,12 +1868,13 @@ export async function createServer(): Promise<{
     });
     const records = liveTraffic?.records ?? store.getTraffic();
     if (hasValidRange) {
-      return records.filter((record) => {
+      const filtered = records.filter((record) => {
         const timestamp = Date.parse(record.timestamp);
         return timestamp >= (from as number) && timestamp < (to as number);
       });
+      return withTrafficEgress(filtered);
     }
-    return records.slice(0, 50);
+    return withTrafficEgress(records.slice(0, 50));
   });
 
   // 11b. GET /api/usage/cache — prompt-token cache savings from the core audit SQLite DB.

@@ -40,6 +40,7 @@ export function mapCoreTrafficItems(
       modelRouted: canonicalModelId(routedModel),
       backingAccountEmail:
         emailsByAccountId.get(item.attributedAccountId) || item.attributedAccountId || 'unknown',
+      accountId: item.attributedAccountId || undefined,
       status: stale ? 0 : item.status ?? 0,
       outcome: stale ? 'aborted' : item.outcome ?? undefined,
       latencyMs: item.durationMs ?? 0,

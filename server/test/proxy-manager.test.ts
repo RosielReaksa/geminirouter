@@ -365,6 +365,16 @@ test('an assignment the core refused is retried on the next sync', async () => {
   assert.equal(second.reloaded, true);
 });
 
+test('egress identity follows the assigned proxy and disappears when disabled', async () => {
+  const { manager } = await managerWith(inventory([1]), ['a1']);
+
+  assert.deepEqual(manager.getEgressForAccount('a1'), { address: '1.1.1.1', country: 'US' });
+  assert.equal(manager.getEgressForAccount('not-in-pool'), null);
+
+  manager.setEnabled(false);
+  assert.equal(manager.getEgressForAccount('a1'), null, 'no proxy label when routing is off');
+});
+
 test('sync results never expose proxy credentials to API clients', async () => {
   const { manager } = await managerWith(inventory([1]), ['a1']);
   const rpc = async () => ({ success: true });

@@ -167,6 +167,8 @@ export interface TrafficRecord {
   modelRequested: string; // e.g. "gemini-2.5-pro", "gemini-2.5-flash"
   modelRouted: string;
   backingAccountEmail: string;
+  /** Core account id that served the call. */
+  accountId?: string;
   status: number; // 200, 429, 500, etc.
   latencyMs: number;
   promptTokens: number;
@@ -175,6 +177,12 @@ export interface TrafficRecord {
   cachedTokens?: number;
   /** completed | in_progress | auth_failed | internal_error */
   outcome?: string;
+  /** Public IP this call left from (proxy or gateway host). */
+  egressIp?: string;
+  /** ISO 3166-1 alpha-2 country for `egressIp`. */
+  egressCountry?: string | null;
+  /** proxy = account's Webshare IP, direct = gateway host. */
+  egressVia?: 'proxy' | 'direct';
 }
 
 export interface CacheFamilyStats {

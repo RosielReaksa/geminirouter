@@ -62,21 +62,33 @@ silently re-enables routing that the operator turned off.
 
 ## Applying changes to a running core
 
-`accountSetProxy` writes `accounts.proxy_url` in the core database. The core's
-gateway keeps its account tokens (including the resolved proxy URL) in memory
-and only rebuilds that cache at startup or after an account reload, so a
-**running core keeps using the previous proxy** until it reloads.
+`accountSetProxy` writes `accounts.proxy_url` in the core database. The bridge
+reloads the core's account cache through the `accountLeaseReload` RPC right
+after a successful change, so a running gateway picks up the new proxy without a
+manual restart. Only changed accounts are written; an unchanged refresh does not
+trigger a reload (which would drop session affinity).
 
-After the first enable, or after the assignment changes (a proxy was replaced),
-restart the core once:
+Older cores without that RPC return no result; the dashboard then reports
+`Assignments saved, but the core could not reload them` and the operator must
+restart the core once.
 
-```bash
-sudo systemctl restart geminirouter-core
-```
+## Traffic attribution
 
-Check the core log for `Proxy source: account proxy_url` when
-`DEBUG_PROXY_TRACE=1`. A future core build exposes a reload RPC so the bridge can
-do this automatically; until then, the restart is the reliable step.
+`GET /api/traffic` adds the egress identity to every record:
+
+| Field | Meaning |
+|---|---|
+| `egressIp` | public IP the call left from |
+| `egressCountry` | ISO 3166-1 alpha-2 country |
+| `egressVia` | `proxy` (account's Webshare IP) or `direct` (gateway host) |
+
+Proxied accounts use the address and country from the Webshare inventory, so the
+label matches the static IP. Everything else uses the gateway host's public IP,
+looked up from `EGRESS_LOOKUP_URL` (default `https://ipinfo.io/json`) and cached
+for 30 minutes; if the lookup is blocked the fields stay empty.
+
+The Traffic page renders the country flag from `egressCountry`, with the proxy
+address and a `proxy` / `direct` marker.
 
 ## Verification
 

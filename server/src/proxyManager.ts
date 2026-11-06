@@ -342,6 +342,20 @@ export class ProxyManager {
   }
 
   /**
+   * Egress identity for an account's traffic: the assigned proxy address and
+   * its country. Null when the account is not routed through a proxy.
+   */
+  getEgressForAccount(accountId: string): { address: string; country: string | null } | null {
+    if (!this.isEnabled()) return null;
+    const proxy = this.assignments.get(accountId);
+    if (!proxy) return null;
+    return {
+      address: proxy.proxy_address,
+      country: proxy.country_code ? proxy.country_code.toUpperCase() : null,
+    };
+  }
+
+  /**
    * Filter a desired state down to the accounts whose core value actually
    * differs from the last successful push. An empty result means the core is
    * already in sync and should not be touched (or reloaded).

@@ -44,6 +44,40 @@ interface TrafficPageProps {
   onReady?: () => void;
 }
 
+const EgressCell: React.FC<{ record: TrafficRecord }> = ({ record }) => {
+  if (!record.egressIp) {
+    return <span className="text-[#9E988F]">—</span>;
+  }
+  const country = record.egressCountry?.toUpperCase() ?? '';
+  const viaProxy = record.egressVia === 'proxy';
+  return (
+    <div
+      className="flex items-center gap-2"
+      title={viaProxy ? "Left through this account's Webshare proxy" : 'Left directly from the gateway host'}
+    >
+      {country ? (
+        <img
+          src={`https://flagcdn.com/w20/${country.toLowerCase()}.png`}
+          srcSet={`https://flagcdn.com/w40/${country.toLowerCase()}.png 2x`}
+          alt={country}
+          width={20}
+          height={15}
+          loading="lazy"
+          className="h-[15px] w-5 shrink-0 rounded-[2px] object-cover ring-1 ring-black/5"
+        />
+      ) : (
+        <span className="inline-block h-[15px] w-5 shrink-0 rounded-[2px] bg-stone-200" aria-hidden />
+      )}
+      <div className="flex flex-col leading-tight">
+        <span className="font-mono-code text-[11px] text-[#2A2723]">{record.egressIp}</span>
+        <span className="text-[10px] text-[#9E988F]">
+          {country || 'Unknown'} · {viaProxy ? 'proxy' : 'direct'}
+        </span>
+      </div>
+    </div>
+  );
+};
+
 export const TrafficPage: React.FC<TrafficPageProps> = ({ traffic, onReady }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | '200' | '429'>('all');
@@ -259,18 +293,19 @@ export const TrafficPage: React.FC<TrafficPageProps> = ({ traffic, onReady }) =>
                 <th className="py-3.5 px-4">Tokens (In / Out)</th>
                 <th className="py-3.5 px-4">Cached</th>
                 <th className="py-3.5 px-4">Served By Account</th>
+                <th className="py-3.5 px-4">Egress IP</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-[#EAE5DE] text-[#2A2723]">
               {rangeLoading ? (
                 <tr>
-                  <td colSpan={8} className="py-10 text-center text-[#706B65]">
+                  <td colSpan={9} className="py-10 text-center text-[#706B65]">
                     <span className="inline-flex items-center gap-2"><Loader2 className="h-4 w-4 animate-spin text-[#C25938]" />Loading matching requests…</span>
                   </td>
                 </tr>
               ) : filteredTraffic.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="text-center py-10 text-[#706B65]">
+                  <td colSpan={9} className="text-center py-10 text-[#706B65]">
                     {timeRange ? 'No requests were recorded during this hour.' : 'No traffic records matched your filter.'}
                   </td>
                 </tr>
@@ -387,6 +422,9 @@ export const TrafficPage: React.FC<TrafficPageProps> = ({ traffic, onReady }) =>
                         {isPending && t.backingAccountEmail === 'unknown'
                           ? 'Not assigned yet'
                           : t.backingAccountEmail}
+                      </td>
+                      <td className="py-3.5 px-4 whitespace-nowrap">
+                        <EgressCell record={t} />
                       </td>
                     </tr>
                   );

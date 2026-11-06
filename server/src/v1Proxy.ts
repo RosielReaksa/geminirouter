@@ -309,6 +309,7 @@ export async function handleV1ProxyRequest(
                 modelRequested: requestedModel || 'unknown',
                 modelRouted: requestedModel || 'unknown',
                 backingAccountEmail: recordAccount.email,
+                accountId: recordAccount.id,
                 status,
                 latencyMs: durationMs,
                 promptTokens: 0,

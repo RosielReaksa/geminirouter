@@ -67,6 +67,8 @@ export interface TrafficRecord {
   modelRequested: string;
   modelRouted: string;
   backingAccountEmail: string;
+  /** Core account id that served the call, when known. */
+  accountId?: string;
   status: number;
   latencyMs: number;
   promptTokens: number;
@@ -75,6 +77,12 @@ export interface TrafficRecord {
   cachedTokens?: number;
   /** Core audit outcome: completed | in_progress | auth_failed | internal_error. */
   outcome?: string;
+  /** Public IP this call left from (proxy address, or the gateway host). */
+  egressIp?: string;
+  /** ISO 3166-1 alpha-2 country of `egressIp`, when known. */
+  egressCountry?: string | null;
+  /** Whether the call left through the account's proxy or the gateway host. */
+  egressVia?: 'proxy' | 'direct';
 }
 
 export interface ModelAvailabilityResult {
