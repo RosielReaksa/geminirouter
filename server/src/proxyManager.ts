@@ -128,6 +128,9 @@ export class ProxyManager {
   private persistedApiKeyAssignments = new Map<string, string>();
   private apiKeyAgentCache = new Map<string, HttpsProxyAgent<string>>();
   private apiKeyRoundRobin = 0;
+  // Maximum keys packed onto one proxy IP. Keeps the inventory small instead of
+  // burning a fresh IP per key (configurable with WEBSHARE_KEYS_PER_PROXY).
+  private keysPerProxy = 3;
   // A key's proxy that Google throttles is temporarily bypassed: the key keeps
   // running (direct) instead of failing with a proxy-induced 429.
   private apiKeyProxyBypassUntil = new Map<string, number>();
@@ -141,9 +144,12 @@ export class ProxyManager {
    *   the Webshare API; tests supply a fixed list.
    * @param options.apiBaseUrl Override for the Webshare list endpoint (tests).
    */
-  constructor(options: { fetchInventory?: () => Promise<WebshareProxy[]>; apiBaseUrl?: string } = {}) {
+  constructor(options: { fetchInventory?: () => Promise<WebshareProxy[]>; apiBaseUrl?: string; keysPerProxy?: number } = {}) {
     this.apiBaseUrl = options.apiBaseUrl ?? WEBSHARE_API_URL;
     this.fetchInventoryImpl = options.fetchInventory ?? (() => this.fetchInventoryFromWebshare());
+    const fromEnv = Number.parseInt(process.env.WEBSHARE_KEYS_PER_PROXY || '', 10);
+    const wanted = options.keysPerProxy ?? (Number.isFinite(fromEnv) ? fromEnv : 3);
+    this.keysPerProxy = Math.min(20, Math.max(1, wanted));
   }
 
   /** Store (or clear) the Webshare API key. Clearing also disables routing. */
@@ -577,6 +583,14 @@ export class ProxyManager {
     }
   }
 
+  /** Re-deal every key using the current keys-per-proxy capacity. */
+  rebalanceApiKeyAssignments(keyIds: string[]): void {
+    this.apiKeyAssignments.clear();
+    this.apiKeyAgentCache.clear();
+    this.apiKeyRoundRobin = 0;
+    this.reconcileApiKeyAssignments(keyIds);
+  }
+
   private assignProxyToApiKey(
     keyId: string,
     byKey: Map<string, WebshareProxy>,
@@ -596,14 +610,32 @@ export class ProxyManager {
     }
 
     const count = candidates.length;
+    const capacity = Math.max(1, this.keysPerProxy);
     let best: WebshareProxy | null = null;
-    let bestUsage = Number.POSITIVE_INFINITY;
+    // Pack up to `keysPerProxy`, preferring the fullest proxy that still has a
+    // slot. This keeps two or three keys on one IP instead of one IP per key.
+    let bestUsage = -1;
     for (let offset = 0; offset < count; offset += 1) {
       const candidate = candidates[(this.apiKeyRoundRobin + offset) % count];
       const candidateUsage = usage.get(proxyKey(candidate)) ?? 0;
-      if (candidateUsage < bestUsage) {
+      if (candidateUsage >= capacity) continue;
+      if (candidateUsage > bestUsage) {
         best = candidate;
         bestUsage = candidateUsage;
+      }
+    }
+
+    // More keys than capacity allows: fall back to the least-used proxy so an
+    // extra key still gets service.
+    if (!best) {
+      bestUsage = Number.POSITIVE_INFINITY;
+      for (let offset = 0; offset < count; offset += 1) {
+        const candidate = candidates[(this.apiKeyRoundRobin + offset) % count];
+        const candidateUsage = usage.get(proxyKey(candidate)) ?? 0;
+        if (candidateUsage < bestUsage) {
+          best = candidate;
+          bestUsage = candidateUsage;
+        }
       }
     }
 
@@ -673,12 +705,14 @@ export class ProxyManager {
     available: number;
     hasApiKey: boolean;
     assigned: number;
+    keysPerProxy: number;
   } {
     return {
       enabled: this.isApiKeyProxyEnabled(),
       available: this.proxyList.length,
       hasApiKey: this.hasApiKey(),
       assigned: this.apiKeyAssignments.size,
+      keysPerProxy: this.keysPerProxy,
     };
   }
 

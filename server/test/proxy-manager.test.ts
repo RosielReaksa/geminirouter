@@ -415,7 +415,7 @@ test('a vanished proxy forces only the affected account to be re-assigned', asyn
   assert.equal(after.get('a2'), before.get('a2'));
 });
 
-test('AI Studio keys get their own proxy pins, spread least-used', async () => {
+test('AI Studio keys pack onto shared proxies instead of one each', async () => {
   const { manager } = await managerWith(inventory([1, 2]), ['a1']);
   assert.equal(manager.setApiKeyProxyEnabled(true), true);
 
@@ -425,16 +425,64 @@ test('AI Studio keys get their own proxy pins, spread least-used', async () => {
   assert.match(urls[0]!, /^http:\/\/user\d:pass\d@\d+\.\d+\.\d+\.\d+:900\d$/);
 
   const hosts = urls.map((url) => new URL(url!).hostname);
-  assert.equal(new Set(hosts).size, 2, 'three keys share two proxies');
+  assert.equal(new Set(hosts).size, 1, 'three keys share one proxy (cap 3)');
 
   const state = manager.getApiKeyProxyState();
   assert.equal(state.enabled, true);
   assert.equal(state.available, 2);
   assert.equal(state.assigned, 3);
+  assert.equal(state.keysPerProxy, 3);
 
   manager.setApiKeyProxyEnabled(false);
   assert.equal(manager.getApiKeyProxyUrl('k1'), null);
   assert.equal(manager.getApiKeyProxyState().assigned, 0);
+});
+
+test('keysPerProxy caps how many API keys share one IP', async () => {
+  const manager = new ProxyManager({
+    fetchInventory: async () => inventory([1, 2, 3]),
+    keysPerProxy: 2,
+  });
+  manager.setApiKey('test-key');
+  manager.setApiKeyProxyEnabled(true);
+  await manager.refreshProxies();
+
+  const ids = ['k1', 'k2', 'k3', 'k4', 'k5'];
+  manager.reconcileApiKeyAssignments(ids);
+  const counts = new Map<string, number>();
+  for (const id of ids) {
+    const host = new URL(manager.getApiKeyProxyUrl(id)!).hostname;
+    counts.set(host, (counts.get(host) ?? 0) + 1);
+  }
+
+  assert.equal(counts.size, 3, 'five keys spread across three IPs at cap 2');
+  assert.ok([...counts.values()].every((count) => count <= 2), 'no IP carries more than 2');
+});
+
+test('rebalance packs existing one-per-IP pins onto shared proxies', async () => {
+  const spread = new ProxyManager({
+    fetchInventory: async () => inventory([1, 2, 3]),
+    keysPerProxy: 1,
+  });
+  spread.setApiKey('test-key');
+  spread.setApiKeyProxyEnabled(true);
+  await spread.refreshProxies();
+  spread.reconcileApiKeyAssignments(['k1', 'k2', 'k3']);
+  const saved = spread.getApiKeyAssignmentKeys();
+  assert.equal(new Set(Object.values(saved)).size, 3, 'started spread across three IPs');
+
+  const packed = new ProxyManager({
+    fetchInventory: async () => inventory([1, 2, 3]),
+    keysPerProxy: 3,
+  });
+  packed.setApiKey('test-key');
+  packed.setApiKeyProxyEnabled(true);
+  packed.hydrateApiKeyAssignments(saved);
+  await packed.refreshProxies();
+  packed.rebalanceApiKeyAssignments(['k1', 'k2', 'k3']);
+
+  const hosts = ['k1', 'k2', 'k3'].map((id) => new URL(packed.getApiKeyProxyUrl(id)!).hostname);
+  assert.equal(new Set(hosts).size, 1, 're-dealt into one shared IP');
 });
 
 test('key proxy pins survive a refresh and a restart', async () => {

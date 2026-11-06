@@ -189,7 +189,10 @@ export async function createServer(): Promise<{
       store.getProxyQuarantines(),
       store.getRetiredProxies(),
     );
-    if (store.isGeminiApiProxyEnabled()) proxyManager.setApiKeyProxyEnabled(true);
+    // Key proxies are always on once a Webshare key exists; there is no
+    // dashboard switch to turn them off.
+    proxyManager.setApiKeyProxyEnabled(true);
+    store.setGeminiApiProxyEnabled(true);
     // A key alone does not mean routing is wanted: honour the dashboard's last
     // choice. With no saved choice yet (fresh install plus env key), enabling is
     // the sensible default.
@@ -198,9 +201,10 @@ export async function createServer(): Promise<{
   }
 
   /** Assign a stable proxy to every AI Studio key and persist the mapping. */
-  const syncApiKeyProxyAssignments = (): void => {
+  const syncApiKeyProxyAssignments = (rebalance = false): void => {
     const keyIds = store.getGeminiApiKeys().map((key) => key.id);
-    proxyManager.reconcileApiKeyAssignments(keyIds);
+    if (rebalance) proxyManager.rebalanceApiKeyAssignments(keyIds);
+    else proxyManager.reconcileApiKeyAssignments(keyIds);
     store.setGeminiApiProxyAssignments(
       proxyManager.isApiKeyProxyEnabled() ? proxyManager.getApiKeyAssignmentKeys() : {},
     );
@@ -343,7 +347,7 @@ export async function createServer(): Promise<{
           console.warn('[ProxyManager] Could not apply some proxy assignments:', sync.errors.join('; '));
         }
       }
-      if (proxyManager.isApiKeyProxyEnabled()) syncApiKeyProxyAssignments();
+      if (proxyManager.isApiKeyProxyEnabled()) syncApiKeyProxyAssignments(true);
     })();
   }
   const initialCfg = store.getConfig();
@@ -1999,6 +2003,11 @@ export async function createServer(): Promise<{
       }
 
       const sync = await runProxySync();
+      // A saved Webshare key immediately turns key proxies on and assigns them.
+      if (proxyManager.hasApiKey()) {
+        proxyManager.setApiKeyProxyEnabled(true);
+        syncApiKeyProxyAssignments(true);
+      }
       return {
         ...proxyManager.getConfigSnapshot(),
         sync,
@@ -2029,6 +2038,10 @@ export async function createServer(): Promise<{
     }
 
     const sync = await runProxySync();
+    if (proxyManager.hasApiKey()) {
+      proxyManager.setApiKeyProxyEnabled(true);
+      syncApiKeyProxyAssignments(true);
+    }
     return { ...refresh, ...sync };
   });
 
@@ -2127,6 +2140,15 @@ export async function createServer(): Promise<{
 
       store.setGeminiApiKeys(current);
       geminiApiPool.setKeys(current);
+      // Proxies are automatic: make sure a key added on a fresh install gets an
+      // egress proxy as soon as the inventory is available.
+      if (proxyManager.hasApiKey()) {
+        proxyManager.setApiKeyProxyEnabled(true);
+        if (proxyManager.getConfigSnapshot().proxyCount === 0) {
+          const refresh = await proxyManager.refreshProxies();
+          if (!refresh.ok) app.log.warn({ err: refresh.error }, 'key proxies: inventory unavailable');
+        }
+      }
       syncApiKeyProxyAssignments();
       return { added, skipped, ...geminiConfig() };
     },
@@ -2164,36 +2186,30 @@ export async function createServer(): Promise<{
     return geminiConfig();
   });
 
-  // Route AI Studio key traffic through the Webshare inventory (one proxy per key).
-  app.post<{ Body?: { enabled?: boolean } }>('/api/gemini/proxy', async (request, reply) => {
-    const enabled = request.body?.enabled === true;
-
-    if (enabled) {
-      if (!proxyManager.hasApiKey()) {
-        return reply
-          .code(400)
-          .send({ error: 'Save a Webshare API key on the Proxy page first.' });
-      }
-      if (proxyManager.getConfigSnapshot().proxyCount === 0) {
-        const refresh = await proxyManager.refreshProxies();
-        if (!refresh.ok) {
-          return reply
-            .code(502)
-            .send({ error: refresh.error || 'Could not load the proxy inventory.' });
-        }
-      }
-      if (proxyManager.getConfigSnapshot().proxyCount === 0) {
-        return reply.code(400).send({ error: 'No Webshare proxies are available.' });
-      }
-      if (!proxyManager.setApiKeyProxyEnabled(true)) {
-        return reply.code(400).send({ error: 'Could not enable key proxies.' });
-      }
-    } else {
-      proxyManager.setApiKeyProxyEnabled(false);
+  // Key proxies are automatic. This endpoint keeps the old callers working: it
+// ensures the inventory is loaded and reports the current assignment state.
+  app.post('/api/gemini/proxy', async (request, reply) => {
+    if (!proxyManager.hasApiKey()) {
+      return reply
+        .code(400)
+        .send({ error: 'Save a Webshare API key on the Proxy page first.' });
     }
-
-    store.setGeminiApiProxyEnabled(enabled);
-    syncApiKeyProxyAssignments();
+    if (proxyManager.getConfigSnapshot().proxyCount === 0) {
+      const refresh = await proxyManager.refreshProxies();
+      if (!refresh.ok) {
+        return reply
+          .code(502)
+          .send({ error: refresh.error || 'Could not load the proxy inventory.' });
+      }
+    }
+    if (proxyManager.getConfigSnapshot().proxyCount === 0) {
+      return reply.code(400).send({ error: 'No Webshare proxies are available.' });
+    }
+    if (!proxyManager.setApiKeyProxyEnabled(true)) {
+      return reply.code(400).send({ error: 'Could not enable key proxies.' });
+    }
+    store.setGeminiApiProxyEnabled(true);
+    syncApiKeyProxyAssignments(true);
     return geminiConfig();
   });
 

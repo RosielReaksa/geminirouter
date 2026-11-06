@@ -31,7 +31,7 @@ const FALLBACK_CONFIG: GeminiApiConfig = {
   models: ['gemini-3.1-flash-lite', 'gemini-3.5-flash-lite'],
   limits: { rpm: 15, tpm: 250000, rpd: 500 },
   queue: { depth: 0, active: 0, maxWaitMs: 30000, maxConcurrentPerKey: 4, maxQueueSize: 200 },
-  proxy: { enabled: false, available: 0, hasApiKey: false, assigned: 0 },
+  proxy: { enabled: false, available: 0, hasApiKey: false, assigned: 0, keysPerProxy: 3 },
   sharedRouting: 'balanced',
   keys: [],
 };
@@ -137,7 +137,6 @@ export const GeminiApiPage: React.FC<GeminiApiPageProps> = ({ onReady }) => {
   const [label, setLabel] = useState('');
   const [keysText, setKeysText] = useState('');
   const [busy, setBusy] = useState(false);
-  const [proxyBusy, setProxyBusy] = useState(false);
   const [routingBusy, setRoutingBusy] = useState(false);
   const [testingId, setTestingId] = useState<string | null>(null);
   const [testResults, setTestResults] = useState<Record<string, GeminiApiTestResult>>({});
@@ -254,25 +253,6 @@ export const GeminiApiPage: React.FC<GeminiApiPageProps> = ({ onReady }) => {
       setError(err?.message || 'Could not test the key.');
     } finally {
       setTestingId(null);
-    }
-  };
-
-  const handleToggleProxy = async () => {
-    setProxyBusy(true);
-    setError(null);
-    setMessage(null);
-    try {
-      const data = await api.setGeminiApiProxy(!config.proxy.enabled);
-      setConfig(data);
-      setMessage(
-        data.proxy.enabled
-          ? `Key proxies enabled — ${data.proxy.assigned} key(s) assigned across ${data.proxy.available} IPs.`
-          : 'Key proxies disabled; key traffic goes direct.',
-      );
-    } catch (err: any) {
-      setError(err?.message || 'Could not change the key proxy setting.');
-    } finally {
-      setProxyBusy(false);
     }
   };
 
@@ -431,34 +411,23 @@ export const GeminiApiPage: React.FC<GeminiApiPageProps> = ({ onReady }) => {
               <Network className="h-4 w-4" />
             </span>
             <div>
-              <div className="text-sm font-semibold text-[#2A2723]">Egress proxies</div>
+              <div className="flex items-center gap-2 text-sm font-semibold text-[#2A2723]">
+                Egress proxies
+                <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-emerald-700">
+                  Always on
+                </span>
+              </div>
               <div className="text-xs text-[#706B65]">
                 {config.proxy.hasApiKey
-                  ? `${config.proxy.available} Webshare proxies available · ${config.proxy.assigned} key(s) assigned · one static IP per key`
-                  : 'Save a Webshare API key on the Proxy page to enable per-key proxies.'}
+                  ? `${config.proxy.assigned} key(s) assigned across up to ${config.proxy.available} IPs · max ${config.proxy.keysPerProxy} keys per IP`
+                  : 'Add a Webshare API key on the Proxy page; key proxies turn on automatically.'}
               </div>
               <div className="mt-1 text-[10px] text-[#9E988F]">
-                Proxies change the egress IP only; they do not add rate-limit quota.
+                No switch: every key is assigned automatically. Proxies change the egress
+                IP only; they do not add rate-limit quota.
               </div>
             </div>
           </div>
-          <button
-            type="button"
-            onClick={() => void handleToggleProxy()}
-            disabled={proxyBusy || !config.proxy.hasApiKey}
-            className={`flex items-center gap-1.5 rounded-xl border px-4 py-2 text-xs font-medium transition-all disabled:cursor-not-allowed disabled:opacity-50 ${
-              config.proxy.enabled
-                ? 'border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100'
-                : 'border-[#C25938] bg-[#C25938] text-white hover:border-[#a5462b] hover:bg-[#a5462b]'
-            }`}
-          >
-            {proxyBusy ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <Network className="h-3.5 w-3.5" />
-            )}
-            {config.proxy.enabled ? 'Disable proxies' : 'Enable proxies'}
-          </button>
         </div>
       </div>
 

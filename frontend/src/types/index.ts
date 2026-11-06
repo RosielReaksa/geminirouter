@@ -271,6 +271,7 @@ export interface GeminiApiProxyState {
   available: number;
   hasApiKey: boolean;
   assigned: number;
+  keysPerProxy: number;
 }
 
 export interface GeminiApiQueue {
