@@ -193,6 +193,22 @@ test('blockModel parks every key for one model only', () => {
   assert.ok(pool.nextAvailabilityMs('gemini-3.5-flash-lite') > 5 * 60 * 60 * 1000);
 });
 
+test('a model block can be restored into a fresh pool', () => {
+  const first = new GeminiApiPool([key('a')], {
+    limits: { rpm: 15, tpm: 250_000, rpd: 500 },
+  });
+  first.blockModel('gemini-3.5-flash-lite', 6 * 60 * 60 * 1000);
+  const saved = first.getModelBlocks();
+
+  const second = new GeminiApiPool([key('a')], {
+    limits: { rpm: 15, tpm: 250_000, rpd: 500 },
+  });
+  second.hydrateModelBlocks(saved);
+
+  assert.equal(second.hasImmediateCapacity('gemini-3.5-flash-lite'), false);
+  assert.equal(second.hasImmediateCapacity('gemini-3.1-flash-lite'), true);
+});
+
 test('hasImmediateCapacity is false once the key bucket is saturated', async () => {
   const pool = new GeminiApiPool([key('a')], {
     limits: { rpm: 1, tpm: 100_000, rpd: 10 },

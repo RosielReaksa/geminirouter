@@ -181,6 +181,9 @@ export class LocalStateStore {
   // For the two shared flash-lite models, decide whether the core account pool,
   // the AI Studio keys, or an even split serves a request.
   private geminiApiSharedRouting: GeminiApiSharedRouting = 'balanced';
+  // Model id -> epoch ms until which the free-tier daily quota is exhausted.
+  // Persisted so a restart does not spend the first client request on a 429.
+  private geminiApiModelBlocks: Record<string, number> = {};
   // Whether key traffic should leave through the Webshare inventory, and the
   // stable keyId -> "address:port" pins.
   private geminiApiProxyEnabled = false;
@@ -236,6 +239,14 @@ export class LocalStateStore {
       loaded.geminiApiSharedRouting === 'keys' || loaded.geminiApiSharedRouting === 'accounts'
         ? loaded.geminiApiSharedRouting
         : 'balanced';
+    this.geminiApiModelBlocks =
+      loaded.geminiApiModelBlocks && typeof loaded.geminiApiModelBlocks === 'object'
+        ? Object.fromEntries(
+            Object.entries(loaded.geminiApiModelBlocks).filter(
+              ([model, until]) => typeof model === 'string' && Number.isFinite(until) && until > Date.now(),
+            ),
+          )
+        : {};
     this.geminiApiProxyAssignments =
       loaded.geminiApiProxyAssignments && typeof loaded.geminiApiProxyAssignments === 'object'
         ? { ...loaded.geminiApiProxyAssignments }
@@ -256,6 +267,7 @@ export class LocalStateStore {
     geminiApiKeys?: GeminiApiKeyRecord[];
     geminiApiProxyEnabled?: boolean;
     geminiApiSharedRouting?: GeminiApiSharedRouting;
+    geminiApiModelBlocks?: Record<string, number>;
     geminiApiProxyAssignments?: Record<string, string>;
   } {
     if (fs.existsSync(this.stateFile)) {
@@ -287,6 +299,7 @@ export class LocalStateStore {
             geminiApiKeys: this.geminiApiKeys,
             geminiApiProxyEnabled: this.geminiApiProxyEnabled,
             geminiApiSharedRouting: this.geminiApiSharedRouting,
+            geminiApiModelBlocks: this.geminiApiModelBlocks,
             geminiApiProxyAssignments: this.geminiApiProxyAssignments,
           },
           null,
@@ -432,6 +445,19 @@ export class LocalStateStore {
 
   setGeminiApiSharedRouting(routing: GeminiApiSharedRouting): void {
     this.geminiApiSharedRouting = routing;
+    this.saveState();
+  }
+
+  getGeminiApiModelBlocks(): Record<string, number> {
+    const now = Date.now();
+    return Object.fromEntries(
+      Object.entries(this.geminiApiModelBlocks).filter(([, until]) => until > now),
+    );
+  }
+
+  setGeminiApiModelBlock(model: string, untilMs: number): void {
+    if (!model || !Number.isFinite(untilMs) || untilMs <= Date.now()) return;
+    this.geminiApiModelBlocks[model] = untilMs;
     this.saveState();
   }
 

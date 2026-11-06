@@ -89,10 +89,10 @@ the account email and that account's egress proxy. Every other Gemini model alwa
 uses the connected accounts.
 
 The free tier is capped per key, project and model (500 requests/day for these
-models). When a model's daily quota is exhausted, the key side serves the other
-Flash Lite model instead of returning 429; the Traffic row shows the requested id
-and the model that actually answered. The pool also parks the exhausted model
-until Google's stated reset time, so later requests do not probe it again.
+models). When a model's daily quota is exhausted, balanced routing sends those
+requests to the account pool **for the same model** and parks the exhausted key
+model until Google's stated reset time. Models are never substituted: the served
+model always matches `model` in the request.
 
 The bridge validates the caller's `Authorization: Bearer …` against the gateway
 keys before using the pool. Without keys, or for any other model, the request

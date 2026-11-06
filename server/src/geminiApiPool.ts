@@ -183,6 +183,9 @@ function utcDay(now: number): string {
 export class GeminiApiPool {
   private keys: GeminiApiKeyRecord[] = [];
   private buckets = new Map<string, BucketState>();
+  // Persisted daily-quota blocks, kept separately so a fresh process can park
+  // the same models without probing Google again.
+  private modelBlocks = new Map<string, number>();
   private keyCooldowns = new Map<string, number>();
   private queues = new Map<string, Waiter[]>();
   private clientOrder: string[] = [];
@@ -561,11 +564,41 @@ export class GeminiApiPool {
    */
   blockModel(model: string, cooldownMs: number): void {
     const until = this.now() + Math.max(60_000, cooldownMs);
+    this.modelBlocks.set(model, until);
     for (const key of this.keys) {
       const bucket = this.bucketFor(key.id, model);
       bucket.cooldownUntil = Math.max(bucket.cooldownUntil, until);
     }
     this.schedulePump();
+  }
+
+  /** Restore persisted model blocks (model -> epoch ms). */
+  hydrateModelBlocks(blocks: Record<string, number>): void {
+    const now = this.now();
+    this.modelBlocks.clear();
+    for (const [model, until] of Object.entries(blocks || {})) {
+      if (!Number.isFinite(until) || until <= now) continue;
+      this.modelBlocks.set(model, until);
+      for (const key of this.keys) {
+        const bucket = this.bucketFor(key.id, model);
+        bucket.cooldownUntil = Math.max(bucket.cooldownUntil, until);
+      }
+    }
+  }
+
+  /** Active model blocks (model -> epoch ms), for persistence. */
+  getModelBlocks(): Record<string, number> {
+    const now = this.now();
+    const result: Record<string, number> = {};
+    for (const [model, until] of this.modelBlocks) {
+      if (until > now) result[model] = until;
+    }
+    return result;
+  }
+
+  /** Remaining block for a model, or 0 when it is not parked. */
+  modelBlockedForMs(model: string): number {
+    return Math.max(0, (this.modelBlocks.get(model) ?? 0) - this.now());
   }
 
   /** Earliest time (ms from now) a model could accept work. */

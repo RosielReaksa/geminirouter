@@ -136,6 +136,8 @@ export async function createServer(): Promise<{
   // AI Studio keys serve the two flash-lite models; everything else keeps using
   // the OAuth account pool through the core.
   const geminiApiPool = new GeminiApiPool(store.getGeminiApiKeys());
+  // Restore daily-quota blocks so a restart does not probe an exhausted model.
+  geminiApiPool.hydrateModelBlocks(store.getGeminiApiModelBlocks());
   const gatewayApiKeys = (): string[] =>
     [
       process.env.GEMINIROUTER_API_KEY || '',
@@ -442,23 +444,17 @@ export async function createServer(): Promise<{
   /**
    * Pick the model the key pool should serve, or null for an account turn.
    *
-   * Balanced alternates providers. When the requested model's key quota is
-   * exhausted, the key turn uses the other flash-lite model if it still has
-   * capacity (the traffic log records the requested and served ids separately).
-   * When no account can take the call, keys always get it.
+   * The exact requested model is always preserved: a key is only used when that
+   * model has key capacity. Otherwise balanced routing sends the request to an
+   * account, which can serve the same model. When no account can take the call,
+   * keys get it (and may return Google's 429 until the quota resets).
    */
   const sharedModelProvider = (requestedModel: string): string | null => {
     const routing = store.getGeminiApiSharedRouting();
-    const fallbackModel =
-      GEMINI_API_MODELS.find((id) => id !== requestedModel) ?? requestedModel;
-    const keyModel = geminiApiPool.hasImmediateCapacity(requestedModel)
-      ? requestedModel
-      : geminiApiPool.hasImmediateCapacity(fallbackModel)
-        ? fallbackModel
-        : null;
+    const keyReady = geminiApiPool.hasImmediateCapacity(requestedModel);
 
     if (routing === 'accounts') return null;
-    if (routing === 'keys') return keyModel ?? requestedModel;
+    if (routing === 'keys') return requestedModel;
 
     const usableAccounts = store
       .getAccounts()
@@ -467,12 +463,12 @@ export async function createServer(): Promise<{
           account.status !== 'error' &&
           !leaseManager.isAccountModelInCooldown(account.id, requestedModel),
       );
-    if (usableAccounts.length === 0) return keyModel ?? requestedModel;
-    if (!keyModel) return null;
+    if (usableAccounts.length === 0) return requestedModel;
+    if (!keyReady) return null;
 
     const preferAccounts = sharedModelTurn % 2 === 0;
     sharedModelTurn += 1;
-    return preferAccounts ? null : keyModel;
+    return preferAccounts ? null : requestedModel;
   };
 
   const proxyApiRequest = async (
@@ -489,6 +485,7 @@ export async function createServer(): Promise<{
         // direct for 24 hours instead of failing every call.
         proxyManager.markApiKeyProxyRateLimited(keyId);
       },
+      onModelBlocked: (model, untilMs) => store.setGeminiApiModelBlock(model, untilMs),
       chooseKeyModel: (model) => sharedModelProvider(model),
     });
     if (handledByApiKeys) return;

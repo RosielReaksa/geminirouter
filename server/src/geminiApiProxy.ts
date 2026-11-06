@@ -20,6 +20,8 @@ export interface GeminiApiProxyOptions {
   getProxyAgent?: (keyId: string) => HttpsProxyAgent<string> | null;
   /** Called when a key's proxy gets a 429/timeout; the key is retried direct. */
   onProxyRateLimited?: (keyId: string) => void;
+  /** Notify the caller that a model's daily key quota is exhausted. */
+  onModelBlocked?: (model: string, untilMs: number) => void;
   /**
    * Choose the shared model the key pool should serve for this request. Return
    * null to send the request to the OAuth account pool instead.
@@ -114,16 +116,15 @@ export async function handleGeminiApiRequest(
   if (!(GEMINI_API_MODELS as readonly string[]).includes(requestedModel)) return false;
 
   // The two shared models can also be served by the OAuth account pool. Balanced
-  // routing returns null here for account turns, or the other flash-lite model
-  // when this model's key quota is exhausted.
+  // routing returns null here for account turns; the requested model is always
+  // preserved.
   const servedModel = options.chooseKeyModel
     ? options.chooseKeyModel(requestedModel)
     : requestedModel;
   if (!servedModel) return false;
-  let model = (GEMINI_API_MODELS as readonly string[]).includes(servedModel)
+  const model = (GEMINI_API_MODELS as readonly string[]).includes(servedModel)
     ? servedModel
     : requestedModel;
-  let switchedFallback = false;
 
   // /v1 is public at the bridge; without this check the key pool would be an
   // unauthenticated gateway. An empty configuration keeps local dev open.
@@ -134,6 +135,24 @@ export async function handleGeminiApiRequest(
       reply.code(401).send(openAiError('Invalid API key.', 401, 'auth_error'));
       return true;
     }
+  }
+
+  // A daily-quota block is known; fail fast instead of queueing 30 seconds.
+  const blockedFor = options.pool.modelBlockedForMs(model);
+  if (blockedFor > 0) {
+    reply.header('Retry-After', String(Math.ceil(blockedFor / 1000)));
+    reply
+      .code(429)
+      .send(
+        openAiError(
+          `The ${model} free-tier daily quota is exhausted. Retry after ${Math.ceil(
+            blockedFor / 60_000,
+          )} minutes, or send the request to the connected account pool.`,
+          429,
+          'rate_limit_error',
+        ),
+      );
+    return true;
   }
 
   const stream = body.stream === true;
@@ -301,18 +320,14 @@ export async function handleGeminiApiRequest(
       if (status === 429) {
         const cooldown = retryAfterMs(response.headers as Record<string, any>, response.data);
         options.pool.settle(lease, { cooldownMs: cooldown });
-        // A daily-quota reset is hours away; park the model for every key so the
-        // next request does not probe it again.
-        if (cooldown >= 5 * 60 * 1000) options.pool.blockModel(model, cooldown);
         lastError = upstreamErrorBody(response.data);
 
-        // If this model's free-tier quota is gone, serve the same request with
-        // the other flash-lite model rather than failing the client.
-        const alternate = (GEMINI_API_MODELS as readonly string[]).find((id) => id !== model);
-        if (!switchedFallback && alternate && cooldown >= 5 * 60 * 1000) {
-          switchedFallback = true;
-          model = alternate;
-          upstreamBody.model = alternate;
+        // A multi-hour reset means the whole project/model is exhausted; trying
+        // another key cannot help and the model must never be substituted.
+        if (cooldown >= 5 * 60 * 1000) {
+          options.pool.blockModel(model, cooldown);
+          options.onModelBlocked?.(model, Date.now() + cooldown);
+          break;
         }
         continue;
       }

@@ -179,37 +179,35 @@ test('streaming responses are piped through', async () => {
   assert.ok(calls.every((call) => call.stream === true));
 });
 
-test('an exhausted key model falls back to the other flash-lite model', async () => {
+test('an exhausted key model is never substituted with another model', async () => {
   exhaustedModels.add('gemini-3.5-flash-lite');
   try {
     calls.length = 0;
+    const started = Date.now();
     const res = await chat({
       model: 'gemini-3.5-flash-lite',
       messages: [{ role: 'user', content: 'ping' }],
     });
-    assert.equal(res.status, 200, 'the client must not receive a 429');
-    const body = await res.json();
-    assert.equal(body.model, 'gemini-3.1-flash-lite', 'the fallback model answered');
+    assert.equal(res.status, 429, 'no silent downgrade to 3.1');
+    assert.ok(Date.now() - started < 10_000, 'a daily block fails fast instead of queueing');
     assert.ok(
-      calls.some((call) => call.model === 'gemini-3.1-flash-lite'),
-      'a key served the fallback model',
+      calls.every((call) => call.model === 'gemini-3.5-flash-lite'),
+      'the requested model is the only one sent to Google',
     );
+    const body = await res.json();
+    assert.match(body.error.message, /quota/i);
+
+    // The block is now known, so the next call fails without touching Google.
+    calls.length = 0;
+    const again = await chat({
+      model: 'gemini-3.5-flash-lite',
+      messages: [{ role: 'user', content: 'ping' }],
+    });
+    assert.equal(again.status, 429);
+    assert.equal(calls.length, 0, 'the parked model is not probed again');
   } finally {
     exhaustedModels.delete('gemini-3.5-flash-lite');
   }
-
-  const traffic = (await (
-    await fetch(`http://127.0.0.1:${bridgePort}/api/traffic`)
-  ).json()) as Array<{ modelRequested: string; modelRouted: string; provider?: string }>;
-  assert.ok(
-    traffic.some(
-      (record) =>
-        record.provider === 'gemini-api' &&
-        record.modelRequested === 'gemini-3.5-flash-lite' &&
-        record.modelRouted === 'gemini-3.1-flash-lite',
-    ),
-    'traffic records the requested and served model separately',
-  );
 });
 
 test('other Gemini models still go to the account pool, not the key pool', async () => {
