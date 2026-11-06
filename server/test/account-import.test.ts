@@ -17,6 +17,11 @@ process.env.USERPROFILE = tempHome;
 process.env.HOME = tempHome;
 process.env.GEMINIROUTER_ADMIN_PASSWORD = '';
 process.env.LOG_LEVEL = 'error';
+// Deterministic isolation: pin the core endpoint to a dead pipe. Windows pipe
+// auto-discovery is skipped only when the custom HOME is visible through
+// os.homedir(), which Node may already have cached before this file ran, so a
+// real core on the developer machine could otherwise answer the import.
+process.env.ANTIGRAVITY_CORE_PIPE = '\\\\.\\pipe\\geminirouter-test-core-offline';
 
 const { createServer } = await import('../src/index.js');
 

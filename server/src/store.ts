@@ -139,6 +139,16 @@ export class LocalStateStore {
   private startTime = Date.now();
   private gatewayRunning = true;
   private gatewayPort = 8045;
+  // Webshare API key. Kept out of GatewayConfig so it can never ride along on
+  // /api/config responses; it is only ever read by the proxy manager.
+  private webshareApiKey = '';
+  // Persisted routing intent: null until the dashboard has set it once, so a
+  // key supplied only by the environment can still default to enabled.
+  private proxyRoutingEnabled: boolean | null = null;
+  // Debounce timer: traffic writes are batched so disk I/O is not on the hot
+  // request path. Config/account changes still flush immediately.
+  private saveTimer: ReturnType<typeof setTimeout> | null = null;
+  private static readonly TRAFFIC_FLUSH_DELAY_MS = 3000;
 
   constructor(dataDir?: string) {
     this.dataDir = dataDir || path.resolve(process.cwd(), '.data');
@@ -153,6 +163,9 @@ export class LocalStateStore {
     this.accounts = loaded.accounts || [...DEFAULT_ACCOUNTS];
     this.traffic = loaded.traffic || [...DEFAULT_TRAFFIC];
     this.modelTests = loaded.modelTests || {};
+    this.webshareApiKey = typeof loaded.webshareApiKey === 'string' ? loaded.webshareApiKey : '';
+    this.proxyRoutingEnabled =
+      typeof loaded.proxyRoutingEnabled === 'boolean' ? loaded.proxyRoutingEnabled : null;
     this.gatewayPort = this.config.port || 8045;
   }
 
@@ -161,6 +174,8 @@ export class LocalStateStore {
     accounts?: GoogleAccount[];
     traffic?: TrafficRecord[];
     modelTests?: Record<string, ModelAvailabilityResult>;
+    webshareApiKey?: string;
+    proxyRoutingEnabled?: boolean;
   } {
     if (fs.existsSync(this.stateFile)) {
       try {
@@ -181,17 +196,36 @@ export class LocalStateStore {
           {
             config: this.config,
             accounts: this.accounts,
-            traffic: this.traffic.slice(0, 100), // persist recent 100 logs
+            traffic: this.traffic.slice(0, 500), // persist up to 500 records
             modelTests: this.modelTests,
+            webshareApiKey: this.webshareApiKey,
+            proxyRoutingEnabled: this.proxyRoutingEnabled,
           },
           null,
           2
         ),
-        'utf-8'
+        { encoding: 'utf-8', mode: 0o600 }
       );
+      // `mode` only applies when the file is created; tighten an existing file
+      // too, because it now holds the Webshare API key.
+      try {
+        fs.chmodSync(this.stateFile, 0o600);
+      } catch {
+        // Windows and read-only filesystems do not support chmod.
+      }
     } catch (e) {
       console.error('Failed to save server state', e);
     }
+  }
+
+  // Deferred save: coalesces rapid traffic writes into one disk flush.
+  // Structural changes (config, accounts) still call saveState() directly.
+  private scheduleSave(): void {
+    if (this.saveTimer !== null) return; // already scheduled
+    this.saveTimer = setTimeout(() => {
+      this.saveTimer = null;
+      this.saveState();
+    }, LocalStateStore.TRAFFIC_FLUSH_DELAY_MS);
   }
 
   getConfig(): GatewayConfig {
@@ -219,6 +253,30 @@ export class LocalStateStore {
 
   getAccounts(): GoogleAccount[] {
     return [...this.accounts];
+  }
+
+  /** Webshare API key. Never returned to clients; only the proxy manager reads it. */
+  getWebshareApiKey(): string {
+    return this.webshareApiKey;
+  }
+
+  hasWebshareApiKey(): boolean {
+    return this.webshareApiKey.trim().length > 0;
+  }
+
+  setWebshareApiKey(key: string): void {
+    this.webshareApiKey = key.trim();
+    this.saveState();
+  }
+
+  /** Persisted routing intent, or null when it has never been set. */
+  getProxyRoutingEnabled(): boolean | null {
+    return this.proxyRoutingEnabled;
+  }
+
+  setProxyRoutingEnabled(enabled: boolean): void {
+    this.proxyRoutingEnabled = enabled;
+    this.saveState();
   }
 
   setAccounts(accounts: GoogleAccount[]): void {
@@ -259,10 +317,11 @@ export class LocalStateStore {
 
   addTrafficRecord(record: TrafficRecord): void {
     this.traffic.unshift(record);
-    if (this.traffic.length > 500) {
-      this.traffic.pop();
+    if (this.traffic.length > 2000) {
+      this.traffic.length = 2000; // cap in-memory ring at 2000
     }
-    this.saveState();
+    // Batch disk writes: don't block the hot request path with sync I/O.
+    this.scheduleSave();
   }
 
   setGatewayRunning(running: boolean, port?: number): void {

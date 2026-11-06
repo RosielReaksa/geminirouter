@@ -257,19 +257,20 @@ export const TrafficPage: React.FC<TrafficPageProps> = ({ traffic, onReady }) =>
                 <th className="py-3.5 px-4">Status</th>
                 <th className="py-3.5 px-4">Latency</th>
                 <th className="py-3.5 px-4">Tokens (In / Out)</th>
+                <th className="py-3.5 px-4">Cached</th>
                 <th className="py-3.5 px-4">Served By Account</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-[#EAE5DE] text-[#2A2723]">
               {rangeLoading ? (
                 <tr>
-                  <td colSpan={7} className="py-10 text-center text-[#706B65]">
+                  <td colSpan={8} className="py-10 text-center text-[#706B65]">
                     <span className="inline-flex items-center gap-2"><Loader2 className="h-4 w-4 animate-spin text-[#C25938]" />Loading matching requests…</span>
                   </td>
                 </tr>
               ) : filteredTraffic.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="text-center py-10 text-[#706B65]">
+                  <td colSpan={8} className="text-center py-10 text-[#706B65]">
                     {timeRange ? 'No requests were recorded during this hour.' : 'No traffic records matched your filter.'}
                   </td>
                 </tr>
@@ -369,6 +370,17 @@ export const TrafficPage: React.FC<TrafficPageProps> = ({ traffic, onReady }) =>
                               ({t.promptTokens} / {t.completionTokens})
                             </span>
                           </div>
+                        )}
+                      </td>
+                      <td className="py-3.5 px-4 font-mono-code text-xs whitespace-nowrap">
+                        {isPending ? (
+                          <span className="text-[#9E988F]">—</span>
+                        ) : t.cachedTokens && t.cachedTokens > 0 ? (
+                          <span className="text-[#1d4ed8] font-semibold">
+                            {t.cachedTokens.toLocaleString()}
+                          </span>
+                        ) : (
+                          <span className="text-[#9E988F]">—</span>
                         )}
                       </td>
                       <td className="py-3.5 px-4 font-mono-code text-xs text-[#706B65] whitespace-nowrap">

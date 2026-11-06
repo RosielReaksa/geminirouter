@@ -177,6 +177,89 @@ export interface TrafficRecord {
   outcome?: string;
 }
 
+export interface CacheFamilyStats {
+  family: 'gemini' | 'claude' | 'gpt';
+  label: string;
+  requests: number;
+  inputTokens: number;
+  cachedTokens: number;
+  outputTokens: number;
+  reasoningTokens: number;
+  requestsWithCache: number;
+  hitRate: number;
+}
+
+export interface CacheStats {
+  available: boolean;
+  totalRequests: number;
+  totalInputTokens: number;
+  totalCachedTokens: number;
+  totalOutputTokens: number;
+  totalReasoningTokens: number;
+  requestsWithCache: number;
+  overallHitRate: number;
+  byModel: Array<{
+    model: string;
+    family: 'gemini' | 'claude' | 'gpt';
+    requests: number;
+    inputTokens: number;
+    cachedTokens: number;
+    outputTokens: number;
+    reasoningTokens: number;
+    requestsWithCache: number;
+    hitRate: number;
+  }>;
+  byFamily: CacheFamilyStats[];
+}
+
+export interface ProxySyncResult {
+  ok: boolean;
+  /** Assignments that differed from the last successful push. */
+  changed: number;
+  applied: number;
+  failed: number;
+  errors: string[];
+  /** null when nothing changed and no reload was needed. */
+  reloaded: boolean | null;
+}
+
+export interface ProxyConfig {
+  enabled: boolean;
+  /** True when a Webshare API key is stored server-side. */
+  hasApiKey: boolean;
+  proxyCount: number;
+  accountCount: number;
+  lastFetchedAt: number;
+  fetchIntervalMs: number;
+  /** Last inventory refresh failure, cleared by the next successful refresh. */
+  lastError: string | null;
+  /** Present on POST /api/proxy/config: result of pushing assignments to the core. */
+  sync?: ProxySyncResult;
+  /** Present on POST /api/proxy/config when the save could not fully apply. */
+  error?: string;
+}
+
+export interface ProxyRefreshResult {
+  ok: boolean;
+  proxyCount: number;
+  changed?: number;
+  applied?: number;
+  failed?: number;
+  errors?: string[];
+  reloaded?: boolean | null;
+  error?: string;
+}
+
+export interface ProxyListSummary {
+  enabled: boolean;
+  proxies: Array<{
+    address: string;
+    port: number;
+    country: string;
+    assignedTo: string | null;
+  }>;
+}
+
 export interface GatewayConfig {
   port: number;
   host: string;

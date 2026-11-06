@@ -24,7 +24,7 @@ export class ConcurrencyLeaseManager extends EventEmitter {
     super();
     this.maxConcurrentRequestsPerAccount = options.maxConcurrentRequestsPerAccount ?? 10;
     this.capacityPolicy = options.capacityPolicy ?? 'queue';
-    this.queueTimeoutMs = options.queueTimeoutMs ?? 5000;
+    this.queueTimeoutMs = options.queueTimeoutMs ?? 15_000; // raised: 5 s was too tight for burst traffic
     this.cooldownTtlMs = options.cooldownTtlMs ?? 30 * 60 * 1000;
   }
 
@@ -215,6 +215,13 @@ export class ConcurrencyLeaseManager extends EventEmitter {
 
       if (candidates.length === 0) return null;
 
+      // Pre-compute quota percentages once per selection round so the sort
+      // comparator doesn't recalculate them O(N log N) times.
+      const quotaCache = new Map<string, number>();
+      for (const acc of candidates) {
+        quotaCache.set(acc.id, this.getAccountRemainingQuota(acc, options?.model));
+      }
+
       // Sort by fewest in-flight leases ascending
       candidates.sort((a, b) => {
         const inFlightA = this.getInFlight(a.id);
@@ -224,8 +231,8 @@ export class ConcurrencyLeaseManager extends EventEmitter {
         }
 
         // Tie-breaker: least quota used (highest remaining quota)
-        const quotaA = this.getAccountRemainingQuota(a, options?.model);
-        const quotaB = this.getAccountRemainingQuota(b, options?.model);
+        const quotaA = quotaCache.get(a.id) ?? 0;
+        const quotaB = quotaCache.get(b.id) ?? 0;
         return quotaB - quotaA; // higher remaining percentage comes first
       });
 

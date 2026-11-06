@@ -10,9 +10,11 @@ import {
   ExternalLink,
   ShieldCheck,
   LogOut,
+  BarChart3,
+  ShieldAlert,
 } from 'lucide-react';
 
-export type NavTab = 'overview' | 'accounts' | 'models' | 'playground' | 'gateway' | 'traffic' | 'settings';
+export type NavTab = 'overview' | 'accounts' | 'models' | 'playground' | 'gateway' | 'traffic' | 'usage' | 'settings' | 'proxy';
 
 interface SidebarProps {
   currentTab: NavTab;
@@ -68,6 +70,18 @@ export const Sidebar: React.FC<SidebarProps> = ({
       label: 'Traffic Monitor',
       icon: Activity,
       desc: 'Live telemetry & requests',
+    },
+    {
+      id: 'usage' as NavTab,
+      label: 'Usage',
+      icon: BarChart3,
+      desc: 'Model usage by family & real-time stats',
+    },
+    {
+      id: 'proxy' as NavTab,
+      label: 'Proxy',
+      icon: ShieldAlert,
+      desc: 'Webshare proxy routing per account',
     },
     {
       id: 'settings' as NavTab,

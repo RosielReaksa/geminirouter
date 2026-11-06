@@ -22,6 +22,8 @@ export function mapCoreTrafficItems(
     const routedModel = item.mappedModel || item.physicalModel || item.model || 'unknown';
     const promptTokens = item.inputTokens ?? 0;
     const completionTokens = item.outputTokens ?? 0;
+    const cachedTokens = item.cachedTokens ?? item.cached_tokens ?? 0;
+    const reasoningTokens = item.reasoningTokens ?? item.reasoning_tokens ?? 0;
     const timestampMs =
       typeof item.timestamp === 'number' ? item.timestamp : Date.parse(item.timestamp);
     const stale =
@@ -43,6 +45,8 @@ export function mapCoreTrafficItems(
       latencyMs: item.durationMs ?? 0,
       promptTokens,
       completionTokens,
+      cachedTokens: cachedTokens > 0 ? cachedTokens : undefined,
+      reasoningTokens: reasoningTokens > 0 ? reasoningTokens : undefined,
       totalTokens: promptTokens + completionTokens,
     };
   });

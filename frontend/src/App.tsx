@@ -9,6 +9,8 @@ import { TrafficPage } from './components/TrafficPage';
 import { SettingsPage } from './components/SettingsPage';
 import { OAuthModal } from './components/OAuthModal';
 import { LoadingScreen } from './components/LoadingScreen';
+import { UsagePage } from './components/UsagePage';
+import { ProxyPage } from './components/ProxyPage';
 import { api } from './services/api';
 import { authApi } from './services/authApi';
 import { navigate, usePathname } from './router';
@@ -30,7 +32,7 @@ export const DashboardApp: React.FC = () => {
   const pathname = usePathname();
   const tabSegment = pathname.split('/')[2] as NavTab | undefined;
   const currentTab: NavTab = tabSegment && [
-    'overview', 'accounts', 'models', 'playground', 'gateway', 'traffic', 'settings',
+    'overview', 'accounts', 'models', 'playground', 'gateway', 'traffic', 'usage', 'proxy', 'settings',
   ].includes(tabSegment) ? tabSegment : 'overview';
   const previousTab = useRef(currentTab);
   const [isPageSwitchLoading, setIsPageSwitchLoading] = useState(false);
@@ -39,6 +41,8 @@ export const DashboardApp: React.FC = () => {
     : currentTab === 'playground' ? 'Playground'
     : currentTab === 'gateway' ? 'API Gateway & Routing'
     : currentTab === 'traffic' ? 'Traffic Monitor'
+    : currentTab === 'usage' ? 'Model Usage'
+    : currentTab === 'proxy' ? 'Proxy Configuration'
     : currentTab === 'settings' ? 'Settings'
     : 'Overview';
   const trafficQuery = new URLSearchParams(window.location.search);
@@ -185,7 +189,7 @@ export const DashboardApp: React.FC = () => {
     // These pages use data already loaded into the dashboard shell. The
     // overview and model tools fetch their own live catalog and clear the
     // overlay from their request's finally handler.
-    if (!['overview', 'models', 'playground'].includes(currentTab) && !hasSelectedTrafficRange) {
+    if (!['overview', 'models', 'playground', 'usage'].includes(currentTab) && !hasSelectedTrafficRange) {
       setIsPageSwitchLoading(false);
       return;
     }
@@ -199,7 +203,7 @@ export const DashboardApp: React.FC = () => {
   const handlePageReady = (tab: NavTab) => {
     const segment = window.location.pathname.split('/')[2] as NavTab | undefined;
     const activeTab: NavTab = segment && [
-      'overview', 'accounts', 'models', 'playground', 'gateway', 'traffic', 'settings',
+      'overview', 'accounts', 'models', 'playground', 'gateway', 'traffic', 'usage', 'proxy', 'settings',
     ].includes(segment) ? segment : 'overview';
     if (activeTab === tab) setIsPageSwitchLoading(false);
   };
@@ -294,6 +298,10 @@ export const DashboardApp: React.FC = () => {
                 ? 'API Gateway & Routing'
                 : currentTab === 'traffic'
                 ? 'Traffic Monitor'
+                : currentTab === 'usage'
+                ? 'Model Usage'
+                : currentTab === 'proxy'
+                ? 'Proxy Configuration'
                 : 'Settings'}
             </span>
             <span className="hidden text-stone-300 sm:inline">/</span>
@@ -380,6 +388,14 @@ export const DashboardApp: React.FC = () => {
 
           {currentTab === 'traffic' && (
             <TrafficPage traffic={traffic} onReady={() => handlePageReady('traffic')} />
+          )}
+
+          {currentTab === 'usage' && (
+            <UsagePage onReady={() => handlePageReady('usage')} />
+          )}
+
+          {currentTab === 'proxy' && (
+            <ProxyPage onReady={() => handlePageReady('proxy')} />
           )}
 
           {currentTab === 'settings' && (

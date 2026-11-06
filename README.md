@@ -26,6 +26,11 @@ Image generation is available at `POST /v1/images/generations` using
 `gemini-3.1-flash-image`; the Playground renders the generated image and offers
 a download button. See the [image API guide](docs/IMAGE_API.md).
 
+Per-account egress is available through Webshare: pin each pooled account to its
+own IP from the Proxy page. The bridge assigns the proxies and the core applies
+them per account, so quota accounting, cooldown and failover keep working. See
+the [proxy guide](docs/PROXY.md).
+
 For latency, streaming, model speed, and timeout guidance, see the
 [call performance guide](docs/PERFORMANCE.md).
 

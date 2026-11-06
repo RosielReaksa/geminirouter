@@ -28,6 +28,9 @@ import {
   isUnavailableWebsiteModel,
 } from './modelIds.js';
 import { mapCoreTrafficItems as mapCoreTrafficItemsFromCore } from './trafficMapping.js';
+import { getSharedCoreAuditDb } from './coreAuditDb.js';
+import { getSharedProxyManager } from './proxyManager.js';
+import { syncProxyAssignments as syncProxyRouting } from './proxySync.js';
 import { AccountTester, type AccountTestResult } from './accountTester.js';
 import {
   isModelFailureText,
@@ -125,6 +128,78 @@ export async function createServer(): Promise<{
   const oauthBaselines = new Map<string, { emails: Set<string>; expiresAt: number }>();
   const processManager = new CoreProcessManager();
   const store = new LocalStateStore();
+  // Webshare proxy routing. The bridge only decides which proxy each account
+  // should use; the core performs the proxying (accounts.proxy_url) so its
+  // quota accounting, cooldown and failover keep seeing the traffic. The key
+  // is persisted server-side and never returned to the browser.
+  const proxyManager = getSharedProxyManager();
+  const persistedProxyKey = store.getWebshareApiKey();
+  const envProxyKey = (process.env.WEBSHARE_API_KEY || '').trim();
+  if (envProxyKey && envProxyKey !== persistedProxyKey) {
+    // An explicit deployment key wins over whatever the dashboard last saved.
+    store.setWebshareApiKey(envProxyKey);
+  }
+  const effectiveProxyKey = envProxyKey || persistedProxyKey;
+  if (effectiveProxyKey) {
+    proxyManager.setApiKey(effectiveProxyKey);
+    // A key alone does not mean routing is wanted: honour the dashboard's last
+    // choice. With no saved choice yet (fresh install plus env key), enabling is
+    // the sensible default.
+    const wantRouting = store.getProxyRoutingEnabled() ?? Boolean(envProxyKey);
+    if (wantRouting) proxyManager.setEnabled(true);
+  }
+
+  /**
+   * Compute the desired per-account proxy state and push the changes to the
+   * core. Pushes `proxyUrl: null` for every account when routing is disabled,
+   * which is how a previously configured proxy gets cleared. Only changed
+   * accounts are written, and the core reloads its account cache afterwards.
+   */
+  const runProxySync = () =>
+    syncProxyRouting(
+      proxyManager,
+      store.getAccounts().map((account) => account.id),
+      (procedure, input) => coreClient.callRpc(procedure, input),
+    );
+
+  // Scheduled Webshare inventory refresh so proxy IPs stay current. The
+  // interval is configurable via WEBSHARE_REFRESH_INTERVAL_MS (min 60s).
+  const proxyRefreshIntervalMs = Math.max(
+    60_000,
+    Number.parseInt(process.env.WEBSHARE_REFRESH_INTERVAL_MS || String(proxyManager.getRefreshIntervalMs()), 10) ||
+      proxyManager.getRefreshIntervalMs(),
+  );
+  const proxyRefreshTimer = setInterval(() => {
+    if (!proxyManager.isEnabled()) return;
+    void (async () => {
+      const refresh = await proxyManager.refreshProxies();
+      if (!refresh.ok) {
+        console.warn('[ProxyManager] Scheduled refresh failed:', refresh.error);
+        return;
+      }
+      const sync = await runProxySync();
+      if (sync.failed > 0) {
+        console.warn('[ProxyManager] Could not apply some proxy assignments:', sync.errors.join('; '));
+      }
+    })();
+  }, proxyRefreshIntervalMs);
+  proxyRefreshTimer.unref();
+
+  // Initial inventory + assignment pass. Deferred so server startup is never
+  // blocked by the Webshare API; skipped entirely when routing is off.
+  if (proxyManager.isEnabled()) {
+    void (async () => {
+      const refresh = await proxyManager.refreshProxies();
+      if (!refresh.ok) {
+        console.warn('[ProxyManager] Initial refresh failed:', refresh.error);
+        return;
+      }
+      const sync = await runProxySync();
+      if (sync.failed > 0) {
+        console.warn('[ProxyManager] Could not apply some proxy assignments:', sync.errors.join('; '));
+      }
+    })();
+  }
   const initialCfg = store.getConfig();
   const leaseManager = new ConcurrencyLeaseManager({
     maxConcurrentRequestsPerAccount: initialCfg.maxConcurrentRequestsPerAccount,
@@ -1641,6 +1716,97 @@ export async function createServer(): Promise<{
     };
   });
 
+  // 10a. GET /api/proxy/config — proxy configuration (API key redacted).
+  app.get('/api/proxy/config', async () => proxyManager.getConfigSnapshot());
+
+  // 10b. POST /api/proxy/config — set the Webshare API key and/or enable routing.
+  // The key is write-only: an omitted/blank key leaves the stored one untouched.
+  // Every save re-fetches the inventory and pushes the resulting per-account
+  // proxy URLs to the core. Always answers 200; failures are reported in
+  // `error` / `sync.failed` so the dashboard can show them.
+  app.post<{ Body?: { enabled?: boolean; webshareApiKey?: string } }>(
+    '/api/proxy/config',
+    async (request) => {
+      const { enabled, webshareApiKey } = request.body || {};
+      let error: string | undefined;
+      let refreshed = false;
+
+      if (typeof webshareApiKey === 'string' && webshareApiKey.trim().length > 0) {
+        const key = webshareApiKey.trim();
+        store.setWebshareApiKey(key);
+        proxyManager.setApiKey(key);
+
+        const refresh = await proxyManager.refreshProxies();
+        refreshed = true;
+        if (!refresh.ok) {
+          error = refresh.error || 'Could not fetch the Webshare proxy list.';
+        }
+      }
+
+      if (typeof enabled === 'boolean' && (enabled === false || !error)) {
+        if (enabled && !proxyManager.hasApiKey()) {
+          error = 'A Webshare API key is required before proxy routing can be enabled.';
+        } else {
+          proxyManager.setEnabled(enabled);
+          store.setProxyRoutingEnabled(enabled);
+          // First enable (or a recovered key) with no inventory yet: fetch it
+          // now instead of waiting for the next scheduled refresh.
+          if (enabled && !refreshed && proxyManager.getConfigSnapshot().proxyCount === 0) {
+            const refresh = await proxyManager.refreshProxies();
+            if (!refresh.ok) {
+              error = refresh.error || 'Could not fetch the Webshare proxy list.';
+            }
+          }
+        }
+      }
+
+      const sync = await runProxySync();
+      return {
+        ...proxyManager.getConfigSnapshot(),
+        sync,
+        ...(error ? { error } : {}),
+      };
+    },
+  );
+
+  // 10b-i. POST /api/proxy/refresh — re-fetch the Webshare inventory,
+  // re-assign proxies and apply them to the core. HTTP 200 even on upstream
+  // failure; check `ok`.
+  app.post('/api/proxy/refresh', async () => {
+    if (!proxyManager.hasApiKey()) {
+      return {
+        ok: false,
+        proxyCount: proxyManager.getConfigSnapshot().proxyCount,
+        error: 'No Webshare API key configured.',
+      };
+    }
+
+    const refresh = await proxyManager.refreshProxies();
+    if (!refresh.ok) return { ...refresh, applied: 0, failed: 0, errors: [] as string[] };
+
+    const sync = await runProxySync();
+    return { ...refresh, ...sync };
+  });
+
+  // 10c. GET /api/proxy/list — inventory plus the accounts pinned to each proxy.
+  // Account ids are joined to emails so the dashboard never shows opaque ids.
+  app.get('/api/proxy/list', async () => {
+    const emailById = new Map(store.getAccounts().map((account) => [account.id, account.email]));
+    const proxies = proxyManager.getProxyListSummary().map((entry) => {
+      const emails = entry.assignedAccountIds
+        .map((id) => emailById.get(id) ?? id)
+        .sort((a, b) => a.localeCompare(b));
+      return {
+        address: entry.address,
+        port: entry.port,
+        country: entry.country,
+        assignedTo: emails.length > 0 ? emails.join(', ') : null,
+      };
+    });
+
+    return { enabled: proxyManager.isEnabled(), proxies };
+  });
+
   // 11. GET /api/traffic
   app.get<{ Querystring: { from?: string; to?: string } }>('/api/traffic', async (request) => {
     const from = request.query.from ? Number(request.query.from) : undefined;
@@ -1657,6 +1823,35 @@ export async function createServer(): Promise<{
       });
     }
     return records.slice(0, 50);
+  });
+
+  // 11b. GET /api/usage/cache — prompt-token cache savings from the core audit SQLite DB.
+  // Reads request_logs directly via node:sqlite (read-only) so cached-token data that the
+  // core RPC omits is still surfaced on the Usage page. Never throws; returns zeros when
+  // the DB is missing or unreadable.
+  app.get<{ Querystring: { from?: string; to?: string } }>('/api/usage/cache', async (request) => {
+    const from = request.query.from ? Number(request.query.from) : undefined;
+    const to = request.query.to ? Number(request.query.to) : undefined;
+    const auditDb = getSharedCoreAuditDb();
+    const stats = auditDb.getCacheStats(
+      Number.isFinite(from) ? from : undefined,
+      Number.isFinite(to) ? to : undefined,
+    );
+    if (!stats) {
+      return {
+        available: false,
+        totalRequests: 0,
+        totalInputTokens: 0,
+        totalCachedTokens: 0,
+        totalOutputTokens: 0,
+        totalReasoningTokens: 0,
+        requestsWithCache: 0,
+        overallHitRate: 0,
+        byModel: [],
+        byFamily: [],
+      };
+    }
+    return { available: true, ...stats };
   });
 
   // 11a. GET /api/traffic/volume — aggregated live request counts for the Overview graph.

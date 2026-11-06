@@ -3,6 +3,10 @@ import {
   GoogleAccount,
   GatewayConfig,
   TrafficRecord,
+  CacheStats,
+  ProxyConfig,
+  ProxyListSummary,
+  ProxyRefreshResult,
   OAuthStartResponse,
   OAuthCompleteResponse,
   ModelsResponse,
@@ -11,8 +15,7 @@ import {
   PlaygroundMedia,
   TrafficVolumeRange,
   TrafficVolumeResponse,
-} from '../types';
-import {
+} from '../types';import {
   INITIAL_MOCK_ACCOUNTS,
   INITIAL_MOCK_CONFIG,
   INITIAL_MOCK_STATUS,
@@ -329,6 +332,82 @@ export class ApiClient {
           INITIAL_MOCK_TRAFFIC
         );
       }
+    );
+  }
+
+  async getCacheStats(range?: { from: number; to: number }): Promise<{ data: CacheStats; isLiveApi: boolean }> {
+    const query = range
+      ? `?from=${encodeURIComponent(range.from)}&to=${encodeURIComponent(range.to)}`
+      : '';
+    return this.fetchWithFallback<CacheStats>(
+      `/api/usage/cache${query}`,
+      { method: 'GET' },
+      () => ({
+        available: false,
+        totalRequests: 0,
+        totalInputTokens: 0,
+        totalCachedTokens: 0,
+        totalOutputTokens: 0,
+        totalReasoningTokens: 0,
+        requestsWithCache: 0,
+        overallHitRate: 0,
+        byModel: [],
+        byFamily: [],
+      })
+    );
+  }
+
+  async getProxyConfig(): Promise<{ data: ProxyConfig; isLiveApi: boolean }> {
+    return this.fetchWithFallback<ProxyConfig>(
+      '/api/proxy/config',
+      { method: 'GET' },
+      () => ({
+        enabled: false,
+        hasApiKey: false,
+        proxyCount: 0,
+        accountCount: 0,
+        lastFetchedAt: 0,
+        fetchIntervalMs: 600000,
+        lastError: null,
+      })
+    );
+  }
+
+  async updateProxyConfig(
+    partial: { enabled?: boolean; webshareApiKey?: string },
+  ): Promise<{ data: ProxyConfig; isLiveApi: boolean }> {
+    return this.fetchWithFallback<ProxyConfig>(
+      '/api/proxy/config',
+      { method: 'POST', body: JSON.stringify(partial) },
+      () => ({
+        enabled: partial.enabled ?? false,
+        hasApiKey: Boolean(partial.webshareApiKey),
+        proxyCount: 0,
+        accountCount: 0,
+        lastFetchedAt: 0,
+        fetchIntervalMs: 600000,
+        lastError: 'Gateway is offline.',
+        error: 'Gateway is offline.',
+      })
+    );
+  }
+
+  async refreshProxyList(): Promise<{ data: ProxyRefreshResult; isLiveApi: boolean }> {
+    return this.fetchWithFallback<ProxyRefreshResult>(
+      '/api/proxy/refresh',
+      { method: 'POST' },
+      () => ({ ok: false, proxyCount: 0, error: 'Gateway is offline.' })
+    );
+  }
+
+  async getProxyList(): Promise<{ data: ProxyListSummary; isLiveApi: boolean }> {
+    return this.fetchWithFallback<ProxyListSummary>(
+      '/api/proxy/list',
+      { method: 'GET' },
+      () => ({
+        enabled: false,
+        proxies: [],
+      })
     );
   }
 
