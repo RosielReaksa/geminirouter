@@ -31,6 +31,11 @@ own IP from the Proxy page. The bridge assigns the proxies and the core applies
 them per account, so quota accounting, cooldown and failover keep working. See
 the [proxy guide](docs/PROXY.md).
 
+Google AI Studio keys can be pooled for `gemini-3.1-flash-lite` and
+`gemini-3.5-flash-lite` from the Gemini API page. The public website exposes only
+those two models; every other Gemini model stays on the account pool. See the
+[Gemini API guide](docs/GEMINI_API.md).
+
 For latency, streaming, model speed, and timeout guidance, see the
 [call performance guide](docs/PERFORMANCE.md).
 

@@ -21,10 +21,13 @@ import { derivePoolState, bridgeToCoreProxy, coreProxyToBridge } from './pool-st
 import { readCoreProxyConfig, applyCoreProxyConfig } from './coreConfig.js';
 import { ConcurrencyLeaseManager } from './leaseManager.js';
 import { handleV1ProxyRequest } from './v1Proxy.js';
+import { GeminiApiPool, GEMINI_API_MODELS, geminiApiBaseUrl } from './geminiApiPool.js';
+import { handleGeminiApiRequest } from './geminiApiProxy.js';
 import {
   canonicalModelId,
   canonicalizeModelEntries,
   includeVerifiedWebsiteModels,
+  isGeminiModelId,
   isUnavailableWebsiteModel,
 } from './modelIds.js';
 import { mapCoreTrafficItems as mapCoreTrafficItemsFromCore } from './trafficMapping.js';
@@ -130,6 +133,23 @@ export async function createServer(): Promise<{
   const oauthBaselines = new Map<string, { emails: Set<string>; expiresAt: number }>();
   const processManager = new CoreProcessManager();
   const store = new LocalStateStore();
+  // AI Studio keys serve the two flash-lite models; everything else keeps using
+  // the OAuth account pool through the core.
+  const geminiApiPool = new GeminiApiPool(store.getGeminiApiKeys());
+  const gatewayApiKeys = (): string[] =>
+    [
+      process.env.GEMINIROUTER_API_KEY || '',
+      store.getConfig().masterApiKey || '',
+      process.env.GEMINIROUTER_GATEWAY_API_KEY || '',
+      resolveGateway().apiKey,
+    ]
+      .map((key) => key.trim())
+      .filter(Boolean);
+  const geminiApiConfig = () => ({
+    models: [...GEMINI_API_MODELS],
+    limits: geminiApiPool.getLimits(),
+    keys: geminiApiPool.snapshot(),
+  });
   // Webshare proxy routing. The bridge only decides which proxy each account
   // should use; the core performs the proxying (accounts.proxy_url) so its
   // quota accounting, cooldown and failover keep seeing the traffic. The key
@@ -356,6 +376,13 @@ export async function createServer(): Promise<{
     request: FastifyRequest,
     reply: FastifyReply,
   ): Promise<void> => {
+    const handledByApiKeys = await handleGeminiApiRequest(request, reply, {
+      pool: geminiApiPool,
+      getApiKeys: gatewayApiKeys,
+      recordTraffic: (record) => store.addTrafficRecord(record),
+    });
+    if (handledByApiKeys) return;
+
     await handleV1ProxyRequest(request, reply, {
       leaseManager,
       store,
@@ -389,9 +416,23 @@ export async function createServer(): Promise<{
       });
       const data = upstream.data;
       if (data && Array.isArray(data.data)) {
+        const models: any[] = canonicalizeModelEntries(data.data);
+        // The two AI Studio models are served by the key pool, not the core.
+        if (geminiApiPool.hasEnabledKeys()) {
+          for (const id of GEMINI_API_MODELS) {
+            if (!models.some((model: any) => model?.id === id)) {
+              models.push({
+                id,
+                object: 'model',
+                created: Math.floor(Date.now() / 1000),
+                owned_by: 'google',
+              });
+            }
+          }
+        }
         return reply.code(upstream.status).send({
           ...data,
-          data: canonicalizeModelEntries(data.data),
+          data: models,
         });
       }
       // Non-standard upstream shape: pass it through unchanged.
@@ -498,49 +539,22 @@ export async function createServer(): Promise<{
   });
 
   app.get('/api/public/models', async () => {
-    const { port: gatewayPort, apiKey } = resolveGateway();
-    try {
-      const res = await axios.get(`http://127.0.0.1:${gatewayPort}/v1/models`, {
-        timeout: 4000,
-        headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
-      });
-      const ids: string[] = (res.data?.data || []).map((m: any) => m.id).filter(Boolean);
-      if (ids.length > 0) {
-        const websiteIds = includeVerifiedWebsiteModels(ids);
-        return {
-          source: 'gateway',
-          online: true,
-          models: websiteIds.map((id) => {
-            const meta = MODEL_CATALOG.find((c) => c.id === id);
-            const isClaude = id.includes('claude');
-            const isGpt = id.includes('gpt') || id.includes('oss');
-            return {
-              id,
-              name: meta?.name || id,
-              provider:
-                meta?.provider ||
-                (isClaude ? 'Anthropic Claude' : isGpt ? 'OpenAI-compatible' : 'Google Gemini'),
-              contextLength: meta?.contextLength || (isClaude ? 200000 : 1048576),
-              maxOutputTokens: meta?.maxOutputTokens || 65535,
-            };
-          }),
-        };
-      }
-    } catch {
-      // fall through to the static catalog
-    }
+    // The public site exposes only the two AI Studio models for now. The
+    // dashboard still lists the rest of the Gemini catalog for the account pool.
+    const models = GEMINI_API_MODELS.map((id) => {
+      const meta = MODEL_CATALOG.find((entry) => entry.id === id);
+      return {
+        id,
+        name: meta?.name || id,
+        provider: 'Google Gemini',
+        contextLength: meta?.contextLength || 1048576,
+        maxOutputTokens: meta?.maxOutputTokens || 65535,
+      };
+    });
     return {
-      source: 'catalog',
-      online: false,
-      models: MODEL_CATALOG
-        .filter((m) => !isUnavailableWebsiteModel(m.id))
-        .map((m) => ({
-          id: m.id,
-          name: m.name,
-          provider: m.provider,
-          contextLength: m.contextLength,
-          maxOutputTokens: m.maxOutputTokens,
-        })),
+      source: 'gemini-api',
+      online: geminiApiPool.hasEnabledKeys(),
+      models,
     };
   });
 
@@ -1867,6 +1881,134 @@ export async function createServer(): Promise<{
     return { enabled: proxyManager.isEnabled(), proxies };
   });
 
+  // 10d. Gemini API keys (AI Studio). These serve gemini-3.1-flash-lite and
+  // gemini-3.5-flash-lite while the rest of the catalog stays on the account pool.
+  app.get('/api/gemini/config', async () => geminiApiConfig());
+
+  app.post<{ Body?: { label?: string; key?: string; keys?: string[] } }>(
+    '/api/gemini/keys',
+    async (request, reply) => {
+      const body = request.body || {};
+      const raw = Array.isArray(body.keys)
+        ? body.keys
+        : typeof body.key === 'string'
+          ? [body.key]
+          : [];
+      const cleaned = Array.from(
+        new Set(raw.map((key) => String(key ?? '').trim()).filter((key) => key.length >= 20)),
+      );
+      if (cleaned.length === 0) {
+        return reply
+          .code(400)
+          .send({ error: 'Provide at least one API key (20+ characters).' });
+      }
+
+      const current = store.getGeminiApiKeys();
+      const existing = new Set(current.map((key) => key.key));
+      const baseLabel = typeof body.label === 'string' ? body.label.trim() : '';
+      let added = 0;
+      let skipped = 0;
+
+      for (const key of cleaned) {
+        if (existing.has(key)) {
+          skipped += 1;
+          continue;
+        }
+        const label = baseLabel
+          ? cleaned.length > 1
+            ? `${baseLabel} ${added + 1}`
+            : baseLabel
+          : `Key ${current.length + 1}`;
+        current.push({
+          id: `gk-${randomUUID()}`,
+          label,
+          key,
+          enabled: true,
+          createdAt: new Date().toISOString(),
+        });
+        existing.add(key);
+        added += 1;
+      }
+
+      store.setGeminiApiKeys(current);
+      geminiApiPool.setKeys(current);
+      return { added, skipped, ...geminiApiConfig() };
+    },
+  );
+
+  app.patch<{ Params: { id: string }; Body?: { enabled?: boolean; label?: string } }>(
+    '/api/gemini/keys/:id',
+    async (request, reply) => {
+      const keys = store.getGeminiApiKeys();
+      const key = keys.find((entry) => entry.id === request.params.id);
+      if (!key) return reply.code(404).send({ error: 'API key not found' });
+
+      if (typeof request.body?.enabled === 'boolean') {
+        key.enabled = request.body.enabled;
+      }
+      if (typeof request.body?.label === 'string' && request.body.label.trim()) {
+        key.label = request.body.label.trim();
+      }
+
+      store.setGeminiApiKeys(keys);
+      geminiApiPool.setKeys(keys);
+      return geminiApiConfig();
+    },
+  );
+
+  app.delete<{ Params: { id: string } }>('/api/gemini/keys/:id', async (request, reply) => {
+    const keys = store.getGeminiApiKeys();
+    const next = keys.filter((key) => key.id !== request.params.id);
+    if (next.length === keys.length) {
+      return reply.code(404).send({ error: 'API key not found' });
+    }
+    store.setGeminiApiKeys(next);
+    geminiApiPool.setKeys(next);
+    return geminiApiConfig();
+  });
+
+  app.post<{ Params: { id: string } }>('/api/gemini/keys/:id/test', async (request, reply) => {
+    const key = store.getGeminiApiKeys().find((entry) => entry.id === request.params.id);
+    if (!key) return reply.code(404).send({ ok: false, error: 'API key not found' });
+
+    const startedAt = Date.now();
+    try {
+      const response = await axios.post(
+        `${geminiApiBaseUrl()}/v1beta/openai/chat/completions`,
+        {
+          model: GEMINI_API_MODELS[0],
+          messages: [{ role: 'user', content: 'Reply: ok' }],
+          max_tokens: 16,
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${key.key}`,
+            'Content-Type': 'application/json',
+          },
+          timeout: 30_000,
+          validateStatus: () => true,
+        },
+      );
+      const ok = response.status === 200;
+      return {
+        ok,
+        status: response.status,
+        latencyMs: Date.now() - startedAt,
+        sample: response.data?.choices?.[0]?.message?.content ?? null,
+        error: ok
+          ? undefined
+          : response.data?.error?.message || `HTTP ${response.status}`,
+      };
+    } catch (error: any) {
+      return {
+        ok: false,
+        status: 0,
+        latencyMs: Date.now() - startedAt,
+        error: error?.message || String(error),
+      };
+    }
+  });
+
   // 11. GET /api/traffic
   app.get<{ Querystring: { from?: string; to?: string } }>('/api/traffic', async (request) => {
     const from = request.query.from ? Number(request.query.from) : undefined;
@@ -2044,7 +2186,7 @@ export async function createServer(): Promise<{
       });
       const liveIds: Array<string> = (res.data?.data || []).map((m: any) => m.id).filter(Boolean);
       if (liveIds.length > 0) {
-        const websiteIds = includeVerifiedWebsiteModels(liveIds);
+        const websiteIds = includeVerifiedWebsiteModels(liveIds).filter(isGeminiModelId);
         const models = websiteIds.map((id) => {
           const meta = MODEL_CATALOG.find((c) => c.id === id);
           const isClaude = id.includes('claude');
@@ -2072,7 +2214,7 @@ export async function createServer(): Promise<{
       gatewayOnline: false,
       gatewayPort,
       models: MODEL_CATALOG
-        .filter((m) => !isUnavailableWebsiteModel(m.id))
+        .filter((m) => isGeminiModelId(m.id) && !isUnavailableWebsiteModel(m.id))
         .map((m) => ({
           ...m,
           live: false,

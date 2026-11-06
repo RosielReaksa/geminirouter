@@ -7,6 +7,8 @@ import {
   ProxyConfig,
   ProxyListSummary,
   ProxyRefreshResult,
+  GeminiApiConfig,
+  GeminiApiTestResult,
   OAuthStartResponse,
   OAuthCompleteResponse,
   ModelsResponse,
@@ -119,6 +121,19 @@ export class ApiClient {
     this.isOnlineCache = false;
     const fallbackData = await mockFallbackFn();
     return { data: fallbackData, isLiveApi: false };
+  }
+
+  /** Mutation helper: surface the server's error message instead of mock data. */
+  private async mutateJson<T>(endpoint: string, options: RequestInit): Promise<T> {
+    const { response, data } = await this.fetchJson<T>(endpoint, options);
+    if (!response.ok) {
+      const message =
+        (data as any)?.error ||
+        (data as any)?.message ||
+        `Request failed (HTTP ${response.status}).`;
+      throw new Error(String(message));
+    }
+    return data as T;
   }
 
   // 1. GET /api/status
@@ -408,6 +423,52 @@ export class ApiClient {
         enabled: false,
         proxies: [],
       })
+    );
+  }
+
+  async getGeminiApiConfig(): Promise<{ data: GeminiApiConfig; isLiveApi: boolean }> {
+    return this.fetchWithFallback<GeminiApiConfig>(
+      '/api/gemini/config',
+      { method: 'GET' },
+      () => ({
+        models: ['gemini-3.1-flash-lite', 'gemini-3.5-flash-lite'],
+        limits: { rpm: 15, tpm: 250000, rpd: 500 },
+        keys: [],
+      })
+    );
+  }
+
+  async addGeminiApiKeys(payload: {
+    label?: string;
+    key?: string;
+    keys?: string[];
+  }): Promise<GeminiApiConfig> {
+    return this.mutateJson<GeminiApiConfig>('/api/gemini/keys', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async updateGeminiApiKey(
+    id: string,
+    patch: { enabled?: boolean; label?: string }
+  ): Promise<GeminiApiConfig> {
+    return this.mutateJson<GeminiApiConfig>(`/api/gemini/keys/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    });
+  }
+
+  async deleteGeminiApiKey(id: string): Promise<GeminiApiConfig> {
+    return this.mutateJson<GeminiApiConfig>(`/api/gemini/keys/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    });
+  }
+
+  async testGeminiApiKey(id: string): Promise<GeminiApiTestResult> {
+    return this.mutateJson<GeminiApiTestResult>(
+      `/api/gemini/keys/${encodeURIComponent(id)}/test`,
+      { method: 'POST' }
     );
   }
 

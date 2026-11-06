@@ -124,7 +124,7 @@ export const DocsPage: React.FC = () => {
   -H "Authorization: Bearer $GEMINIROUTER_KEY" \\
   -H "Content-Type: application/json" \\
   -d '{
-    "model": "claude-sonnet-4-6",
+    "model": "gemini-3.5-flash-lite",
     "messages": [{"role": "user", "content": "Hello"}]
   }'`}
               />
@@ -377,7 +377,7 @@ client = OpenAI(
 )
 
 resp = client.chat.completions.create(
-    model="claude-sonnet-4-6",
+    model="gemini-3.5-flash-lite",
     messages=[{"role": "user", "content": "Hello"}],
 )
 print(resp.choices[0].message.content)`}
@@ -392,7 +392,7 @@ const client = new OpenAI({
 });
 
 const resp = await client.chat.completions.create({
-  model: "claude-sonnet-4-6",
+  model: "gemini-3.5-flash-lite",
   messages: [{ role: "user", content: "Hello" }],
 });`}
               />
@@ -416,7 +416,7 @@ client = anthropic.Anthropic(
 )
 
 msg = client.messages.create(
-    model="claude-sonnet-4-6",
+    model="gemini-3.5-flash-lite",
     max_tokens=256,
     messages=[{"role": "user", "content": "Hello"}],
 )`}
@@ -455,7 +455,7 @@ msg = client.messages.create(
                   ['429 from upstream', 'Request retried on the next account; Retry-After honoured.'],
                   ['403 verification', 'Account quarantined; a fresh Google link is surfaced in the dashboard.'],
                   ['All accounts busy', 'Queued briefly, then 429 with Retry-After if nothing frees up.'],
-                  ['Per-model cooldown', 'A Claude limit does not remove the account from Gemini traffic.'],
+                  ['Per-model cooldown', 'A Gemini model limit does not remove the account from other Gemini traffic.'],
                 ].map(([k, v]) => (
                   <div key={k} className="flex items-start gap-3 text-[13px]">
                     <span className="font-mono-code text-[11.5px] text-[#A8462A] shrink-0 w-[150px]">

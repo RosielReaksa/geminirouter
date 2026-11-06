@@ -161,7 +161,7 @@ export const LandingPage: React.FC = () => {
   -H "Authorization: Bearer $GEMINIROUTER_KEY" \\
   -H "Content-Type: application/json" \\
   -d '{
-    "model": "claude-sonnet-4-6",
+    "model": "gemini-3.5-flash-lite",
     "messages": [{"role": "user", "content": "Hello"}]
   }'`;
 
@@ -173,7 +173,7 @@ client = OpenAI(
 )
 
 resp = client.chat.completions.create(
-    model="claude-sonnet-4-6",
+    model="gemini-3.5-flash-lite",
     messages=[{"role": "user", "content": "Hello"}],
 )
 print(resp.choices[0].message.content)`;

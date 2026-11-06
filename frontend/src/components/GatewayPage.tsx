@@ -223,7 +223,7 @@ Custom Models to add:
               Model Aliasing & Routing
             </h3>
             <p className="text-xs text-[#706B65] mt-0.5">
-              geminirouter automatically translates requested OpenAI or Anthropic model strings to their Google Gemini counterparts.
+              gemini models route directly; legacy Claude and GPT aliases are no longer exposed.
             </p>
           </div>
           <span className="text-xs bg-[#FAF2EF] text-[#C25938] px-2.5 py-1 rounded-full font-medium border border-[#EAE5DE]">
@@ -244,7 +244,7 @@ Custom Models to add:
             <tbody className="divide-y divide-[#EAE5DE] text-[#2A2723]">
               <tr className="hover:bg-[#FAF9F5]/70 transition-colors">
                 <td className="py-3 px-4 font-mono-code font-semibold text-[#C25938]">
-                  claude-3-5-sonnet-20241022, gpt-4o
+                  gemini-3.5-flash-lite
                 </td>
                 <td className="py-3 px-4 font-mono-code font-semibold">
                   gemini-2.5-pro
@@ -258,7 +258,7 @@ Custom Models to add:
               </tr>
               <tr className="hover:bg-[#FAF9F5]/70 transition-colors">
                 <td className="py-3 px-4 font-mono-code font-semibold text-[#C25938]">
-                  claude-3-5-haiku-20241022, gpt-4o-mini
+                  gemini-3.1-flash-lite
                 </td>
                 <td className="py-3 px-4 font-mono-code font-semibold">
                   gemini-2.5-flash

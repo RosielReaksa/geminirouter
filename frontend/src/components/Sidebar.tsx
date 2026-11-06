@@ -12,9 +12,10 @@ import {
   LogOut,
   BarChart3,
   ShieldAlert,
+  KeyRound,
 } from 'lucide-react';
 
-export type NavTab = 'overview' | 'accounts' | 'models' | 'playground' | 'gateway' | 'traffic' | 'usage' | 'settings' | 'proxy';
+export type NavTab = 'overview' | 'accounts' | 'models' | 'playground' | 'gateway' | 'traffic' | 'usage' | 'settings' | 'proxy' | 'gemini';
 
 interface SidebarProps {
   currentTab: NavTab;
@@ -82,6 +83,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
       label: 'Proxy',
       icon: ShieldAlert,
       desc: 'Webshare proxy routing per account',
+    },
+    {
+      id: 'gemini' as NavTab,
+      label: 'Gemini API',
+      icon: KeyRound,
+      desc: 'AI Studio keys, models & rate limits',
     },
     {
       id: 'settings' as NavTab,

@@ -19,6 +19,11 @@ export function canonicalModelId(model: string): string {
   return MODEL_ID_REPLACEMENTS[model] ?? model;
 }
 
+/** True for Gemini-family model ids only (no Claude, GPT, OSS or Gemma). */
+export function isGeminiModelId(id: string): boolean {
+  return /^gemini(?:[-.]|$)/i.test(id.trim());
+}
+
 /** Map and de-duplicate a list of model IDs, preserving the first occurrence. */
 export function canonicalizeModelIds(ids: string[]): string[] {
   const result: string[] = [];

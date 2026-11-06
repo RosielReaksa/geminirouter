@@ -183,6 +183,8 @@ export interface TrafficRecord {
   egressCountry?: string | null;
   /** proxy = account's Webshare IP, direct = gateway host. */
   egressVia?: 'proxy' | 'direct';
+  /** Which provider served the call. Undefined means the OAuth core pool. */
+  provider?: 'core' | 'gemini-api';
 }
 
 export interface CacheFamilyStats {
@@ -218,6 +220,47 @@ export interface CacheStats {
     hitRate: number;
   }>;
   byFamily: CacheFamilyStats[];
+}
+
+export interface GeminiApiLimits {
+  rpm: number;
+  tpm: number;
+  rpd: number;
+}
+
+export interface GeminiApiUsage {
+  requestsToday: number;
+  tokensToday: number;
+  rpm: number;
+  tpm: number;
+  cooldownUntil: number | null;
+  lastUsedAt?: string;
+}
+
+export interface GeminiApiKey {
+  id: string;
+  label: string;
+  maskedKey: string;
+  enabled: boolean;
+  createdAt: string;
+  lastUsedAt?: string;
+  usage: GeminiApiUsage;
+}
+
+export interface GeminiApiConfig {
+  models: string[];
+  limits: GeminiApiLimits;
+  keys: GeminiApiKey[];
+  added?: number;
+  skipped?: number;
+}
+
+export interface GeminiApiTestResult {
+  ok: boolean;
+  status?: number;
+  latencyMs: number;
+  sample?: string | null;
+  error?: string;
 }
 
 export interface ProxySyncResult {

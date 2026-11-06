@@ -40,6 +40,16 @@ export interface GoogleAccount {
   refreshBlocked?: boolean;
 }
 
+/** AI Studio (Gemini API) key managed from the Gemini API page. */
+export interface GeminiApiKeyRecord {
+  id: string;
+  label: string;
+  key: string;
+  enabled: boolean;
+  createdAt: string;
+  lastUsedAt?: string;
+}
+
 export interface GatewayConfig {
   port: number;
   host: string;
@@ -83,6 +93,8 @@ export interface TrafficRecord {
   egressCountry?: string | null;
   /** Whether the call left through the account's proxy or the gateway host. */
   egressVia?: 'proxy' | 'direct';
+  /** Which provider served the call. Undefined means the OAuth core pool. */
+  provider?: 'core' | 'gemini-api';
 }
 
 export interface ModelAvailabilityResult {
@@ -156,6 +168,9 @@ export class LocalStateStore {
   // accountId -> "address:port" of the assigned proxy, so a restart keeps the
   // account on the same IP. The credentials are not stored here.
   private proxyAssignments: Record<string, string> = {};
+  // AI Studio keys used by the Gemini API provider. Stored server-side only and
+  // never returned in full by the API.
+  private geminiApiKeys: GeminiApiKeyRecord[] = [];
   // Debounce timer: traffic writes are batched so disk I/O is not on the hot
   // request path. Config/account changes still flush immediately.
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -181,6 +196,20 @@ export class LocalStateStore {
       loaded.proxyAssignments && typeof loaded.proxyAssignments === 'object'
         ? { ...loaded.proxyAssignments }
         : {};
+    this.geminiApiKeys = Array.isArray(loaded.geminiApiKeys)
+      ? loaded.geminiApiKeys
+          .filter((key): key is GeminiApiKeyRecord =>
+            Boolean(key && typeof key.id === 'string' && typeof key.key === 'string' && key.key.trim()),
+          )
+          .map((key) => ({
+            id: key.id,
+            label: typeof key.label === 'string' ? key.label : 'API key',
+            key: key.key.trim(),
+            enabled: key.enabled !== false,
+            createdAt: typeof key.createdAt === 'string' ? key.createdAt : new Date().toISOString(),
+            lastUsedAt: typeof key.lastUsedAt === 'string' ? key.lastUsedAt : undefined,
+          }))
+      : [];
     this.gatewayPort = this.config.port || 8045;
   }
 
@@ -192,6 +221,7 @@ export class LocalStateStore {
     webshareApiKey?: string;
     proxyRoutingEnabled?: boolean;
     proxyAssignments?: Record<string, string>;
+    geminiApiKeys?: GeminiApiKeyRecord[];
   } {
     if (fs.existsSync(this.stateFile)) {
       try {
@@ -217,6 +247,7 @@ export class LocalStateStore {
             webshareApiKey: this.webshareApiKey,
             proxyRoutingEnabled: this.proxyRoutingEnabled,
             proxyAssignments: this.proxyAssignments,
+            geminiApiKeys: this.geminiApiKeys,
           },
           null,
           2
@@ -307,6 +338,16 @@ export class LocalStateStore {
       if (typeof key === 'string' && key) next[accountId] = key;
     }
     this.proxyAssignments = next;
+    this.saveState();
+  }
+
+  /** AI Studio keys, full values for the provider. Never expose this to clients. */
+  getGeminiApiKeys(): GeminiApiKeyRecord[] {
+    return this.geminiApiKeys.map((key) => ({ ...key }));
+  }
+
+  setGeminiApiKeys(keys: GeminiApiKeyRecord[]): void {
+    this.geminiApiKeys = keys.map((key) => ({ ...key }));
     this.saveState();
   }
 
