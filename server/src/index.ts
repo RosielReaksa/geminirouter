@@ -1764,6 +1764,14 @@ export async function createServer(): Promise<{
           error: 'The core still reports this account after the delete; nothing was changed.',
         });
       }
+
+      // The core caches account tokens in memory. Without this reload it keeps
+      // selecting the deleted account and answers 503 "All accounts failed".
+      try {
+        await coreClient.callRpc('accountLeaseReload');
+      } catch {
+        // Older core without the reload RPC; it will pick up the change on restart.
+      }
     }
 
     const removed = store.removeAccount(id) || knownInCore;
