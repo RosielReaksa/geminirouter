@@ -222,6 +222,42 @@ export class CoreAuditDb {
       return null;
     }
   }
+
+  /**
+   * Resolve the named gateway key used for core audit records. The bridge
+   * injects `x-geminirouter-key-id` before forwarding; the core stores all
+   * request headers as JSON, so the Traffic page can attribute account calls to
+   * the client key that made them.
+   */
+  getGatewayKeyIds(recordIds: string[]): Map<string, string> {
+    const result = new Map<string, string>();
+    const ids = [...new Set(recordIds.filter((id) => typeof id === 'string' && id))];
+    if (ids.length === 0) return result;
+
+    const db = this.open();
+    if (!db) return result;
+
+    try {
+      const placeholders = ids.map(() => '?').join(',');
+      const rows = db
+        .prepare(`SELECT id, request_headers FROM request_logs WHERE id IN (${placeholders})`)
+        .all(...ids) as Array<{ id: string; request_headers: string | null }>;
+
+      for (const row of rows) {
+        if (!row.request_headers) continue;
+        try {
+          const headers = JSON.parse(row.request_headers);
+          const keyId = headers?.['x-geminirouter-key-id'];
+          if (typeof keyId === 'string' && keyId) result.set(row.id, keyId);
+        } catch {
+          // Ignore malformed header JSON.
+        }
+      }
+    } catch {
+      // Missing table/columns on older cores: attribution simply stays blank.
+    }
+    return result;
+  }
 }
 
 // Singleton reused across requests (read-only handle is safe to keep open).

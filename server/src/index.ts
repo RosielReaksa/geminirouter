@@ -8,7 +8,7 @@ import fastifyCors from '@fastify/cors';
 import fastifyHttpProxy from '@fastify/http-proxy';
 import path from 'node:path';
 import fs from 'node:fs';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, randomBytes } from 'node:crypto';
 import axios from 'axios';
 import dotenv from 'dotenv';
 
@@ -150,15 +150,60 @@ export async function createServer(): Promise<{
     store.setGeminiApiUsageState(state);
   }, 5_000);
   geminiUsageSaveTimer.unref();
-  const gatewayApiKeys = (): string[] =>
-    [
-      process.env.GEMINIROUTER_API_KEY || '',
-      store.getConfig().masterApiKey || '',
-      process.env.GEMINIROUTER_GATEWAY_API_KEY || '',
-      resolveGateway().apiKey,
-    ]
-      .map((key) => key.trim())
-      .filter(Boolean);
+  const gatewayApiKeys = (): string[] => gatewayKeyCandidates().map((entry) => entry.key);
+
+  /** Every key accepted by the gateway, with the label shown on Traffic. */
+  const gatewayKeyCandidates = (): Array<{ id: string; name: string; key: string; stored: boolean }> => {
+    const candidates: Array<{ id: string; name: string; key: string; stored: boolean }> = [];
+    for (const record of store.getGatewayApiKeys()) {
+      candidates.push({ id: record.id, name: record.name, key: record.key, stored: true });
+    }
+    const add = (id: string, name: string, value: string | undefined) => {
+      const key = (value || '').trim();
+      if (key) candidates.push({ id, name, key, stored: false });
+    };
+    add('master', 'Master key', store.getConfig().masterApiKey);
+    add('env', 'Deployment key', process.env.GEMINIROUTER_API_KEY);
+    add('env-gateway', 'Gateway key', process.env.GEMINIROUTER_GATEWAY_API_KEY);
+    add('core', 'Core key', resolveGateway().apiKey);
+
+    const seen = new Set<string>();
+    return candidates.filter((entry) => {
+      if (seen.has(entry.key)) return false;
+      seen.add(entry.key);
+      return true;
+    });
+  };
+
+  const extractClientKey = (request: FastifyRequest): string | undefined => {
+    const authorization = request.headers.authorization;
+    if (typeof authorization === 'string') {
+      const match = /^Bearer\s+(.+)$/i.exec(authorization.trim());
+      if (match) return match[1].trim();
+    }
+    const apiKey = request.headers['x-api-key'];
+    if (typeof apiKey === 'string' && apiKey.trim()) return apiKey.trim();
+    return undefined;
+  };
+
+  /**
+   * Authenticate the client key at the bridge. The core only knows its own key,
+   * so named dashboard keys must be validated here and swapped for the core key
+   * before the account path forwards the request.
+   */
+  const authenticateGatewayKey = (
+    request: FastifyRequest,
+  ): { required: boolean; identity: { id: string; name: string } | null } => {
+    const candidates = gatewayKeyCandidates();
+    if (candidates.length === 0) return { required: false, identity: null };
+
+    const token = extractClientKey(request);
+    if (!token) return { required: true, identity: null };
+    const match = candidates.find((entry) => safeEqual(entry.key, token));
+    if (!match) return { required: true, identity: null };
+    if (match.stored) store.touchGatewayApiKey(match.id);
+    return { required: true, identity: { id: match.id, name: match.name } };
+  };
   const geminiApiConfig = () => ({
     models: [...GEMINI_API_MODELS],
     limits: geminiApiPool.getLimits(),
@@ -487,10 +532,24 @@ export async function createServer(): Promise<{
     return preferAccounts ? null : requestedModel;
   };
 
+  const gatewayKeyLabel = (id: string | undefined): string | undefined => {
+    if (!id) return undefined;
+    if (id === 'master') return 'Master key';
+    if (id === 'env') return 'Deployment key';
+    if (id === 'env-gateway') return 'Gateway key';
+    if (id === 'core') return 'Core key';
+    return store.getGatewayApiKeys().find((key) => key.id === id)?.name;
+  };
+
   const proxyApiRequest = async (
     request: FastifyRequest,
     reply: FastifyReply,
   ): Promise<void> => {
+    const auth = authenticateGatewayKey(request);
+    // Unknown/missing keys are left for the core (account path) or the key-pool
+    // auth check to reject. A matched key is swapped for the core key below so
+    // named dashboard keys work without teaching the core about them.
+
     const handledByApiKeys = await handleGeminiApiRequest(request, reply, {
       pool: geminiApiPool,
       getApiKeys: gatewayApiKeys,
@@ -502,6 +561,7 @@ export async function createServer(): Promise<{
         proxyManager.markApiKeyProxyRateLimited(keyId);
       },
       chooseKeyModel: (model) => sharedModelProvider(model),
+      gatewayKey: auth.identity,
     });
     if (handledByApiKeys) return;
 
@@ -509,6 +569,8 @@ export async function createServer(): Promise<{
       leaseManager,
       store,
       getGatewayPort: () => resolveGateway().port,
+      coreApiKey: auth.identity ? resolveGateway().apiKey : undefined,
+      gatewayKeyId: auth.identity?.id,
     });
   };
 
@@ -1059,9 +1121,21 @@ export async function createServer(): Promise<{
       }
 
       const accounts = options.accounts ?? (await loadCoreAccounts()) ?? store.getAccounts();
+      const records = mapCoreTrafficItems(items, accounts);
+      // The bridge tags forwarded account calls with x-geminirouter-key-id; the
+      // core stores request headers, so join them back for Traffic attribution.
+      const taggedKeys = getSharedCoreAuditDb().getGatewayKeyIds(records.map((record) => record.id));
+      if (taggedKeys.size > 0) {
+        for (const record of records) {
+          const keyId = taggedKeys.get(record.id);
+          if (!keyId) continue;
+          record.gatewayKeyId = keyId;
+          record.gatewayKeyName = gatewayKeyLabel(keyId);
+        }
+      }
       const value = {
         total: Number(firstPage.total) || items.length,
-        records: mapCoreTrafficItems(items, accounts),
+        records,
       };
       trafficCache = { key: cacheKey, expiresAt: Date.now() + 15_000, value };
       return value;
@@ -1380,6 +1454,50 @@ export async function createServer(): Promise<{
   app.delete<{ Params: { id: string } }>('/api/devices/:id', async (request, reply) => {
     const removed = deviceTokens.revoke(request.params.id);
     return reply.code(removed ? 200 : 404).send({ success: removed });
+  });
+
+  // 1c. Named gateway API keys. The master key stays available; these add
+  // per-client keys so Traffic can show which app made each call.
+  const maskGatewayKey = (key: string): string =>
+    key.length <= 10 ? '••••••' : `${key.slice(0, 7)}…${key.slice(-4)}`;
+  const publicGatewayKeys = () =>
+    store.getGatewayApiKeys().map((key) => ({
+      id: key.id,
+      name: key.name,
+      maskedKey: maskGatewayKey(key.key),
+      createdAt: key.createdAt,
+      lastUsedAt: key.lastUsedAt,
+    }));
+
+  app.get('/api/gateway/keys', async () => ({
+    masterKey: store.getConfig().masterApiKey,
+    keys: publicGatewayKeys(),
+  }));
+
+  app.post<{ Body?: { name?: string } }>('/api/gateway/keys', async (request, reply) => {
+    const name = typeof request.body?.name === 'string' ? request.body.name.trim() : '';
+    if (!name) return reply.code(400).send({ error: 'A key name is required.' });
+    if (name.length > 60) {
+      return reply.code(400).send({ error: 'Key name must be 60 characters or fewer.' });
+    }
+    if (store.getGatewayApiKeys().length >= 50) {
+      return reply.code(400).send({ error: 'At most 50 named gateway keys are allowed.' });
+    }
+
+    const record = {
+      id: `gwk-${randomUUID()}`,
+      name,
+      key: `sk-gw-${randomBytes(24).toString('base64url')}`,
+      createdAt: new Date().toISOString(),
+    };
+    store.addGatewayApiKey(record);
+    return { key: record.key, keys: publicGatewayKeys() };
+  });
+
+  app.delete<{ Params: { id: string } }>('/api/gateway/keys/:id', async (request, reply) => {
+    const removed = store.removeGatewayApiKey(request.params.id);
+    if (!removed) return reply.code(404).send({ error: 'Gateway key not found.' });
+    return { success: true, keys: publicGatewayKeys() };
   });
 
   // 2. GET /api/accounts

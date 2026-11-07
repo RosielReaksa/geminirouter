@@ -20,6 +20,8 @@ export interface GeminiApiProxyOptions {
   getProxyAgent?: (keyId: string) => HttpsProxyAgent<string> | null;
   /** Called when a key's proxy gets a 429/timeout; the key is retried direct. */
   onProxyRateLimited?: (keyId: string) => void;
+  /** Named gateway/client key that authenticated this request. */
+  gatewayKey?: { id: string; name: string } | null;
   /**
    * Choose the shared model the key pool should serve for this request. Return
    * null to send the request to the OAuth account pool instead.
@@ -49,9 +51,13 @@ function parseJsonBody(request: FastifyRequest): any | null {
 
 function extractBearer(request: FastifyRequest): string | undefined {
   const header = request.headers['authorization'];
-  if (typeof header !== 'string') return undefined;
-  const match = /^Bearer\s+(.+)$/i.exec(header.trim());
-  return match ? match[1].trim() : undefined;
+  if (typeof header === 'string') {
+    const match = /^Bearer\s+(.+)$/i.exec(header.trim());
+    if (match) return match[1].trim();
+  }
+  const apiKey = request.headers['x-api-key'];
+  if (typeof apiKey === 'string' && apiKey.trim()) return apiKey.trim();
+  return undefined;
 }
 
 function upstreamErrorBody(data: any): any {
@@ -180,6 +186,9 @@ export async function handleGeminiApiRequest(
       completionTokens,
       totalTokens,
       provider: 'gemini-api',
+      ...(options.gatewayKey
+        ? { gatewayKeyId: options.gatewayKey.id, gatewayKeyName: options.gatewayKey.name }
+        : {}),
     });
   };
 

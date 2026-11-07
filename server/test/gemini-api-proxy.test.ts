@@ -244,6 +244,22 @@ test('accounts routing bypasses the key pool for the shared models', async () =>
   });
 });
 
+test('key-pool traffic records the named gateway key', async () => {
+  calls.length = 0;
+  const res = await chat({
+    model: 'gemini-3.1-flash-lite',
+    messages: [{ role: 'user', content: 'ping' }],
+  });
+  assert.equal(res.status, 200);
+
+  const traffic = (await (
+    await fetch(`http://127.0.0.1:${bridgePort}/api/traffic`)
+  ).json()) as Array<{ provider?: string; gatewayKeyName?: string }>;
+  const record = traffic.find((row) => row.provider === 'gemini-api');
+  assert.ok(record, 'a key-pool traffic record exists');
+  assert.equal(record!.gatewayKeyName, 'Deployment key');
+});
+
 test('per-key usage is visible without exposing the key', async () => {
   const res = await fetch(`http://127.0.0.1:${bridgePort}/api/gemini/config`);
   const body = await res.json();

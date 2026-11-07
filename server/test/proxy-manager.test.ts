@@ -692,6 +692,12 @@ test('the Webshare key survives a store reload and never leaks into gateway conf
         },
       },
     });
+    first.addGatewayApiKey({
+      id: 'gwk-1',
+      name: 'Dubbing app',
+      key: 'sk-gw-test-key',
+      createdAt: new Date().toISOString(),
+    });
 
     const reloaded = new LocalStateStore(dataDir);
     assert.equal(reloaded.getWebshareApiKey(), 'ws-secret-key');
@@ -706,6 +712,9 @@ test('the Webshare key survives a store reload and never leaks into gateway conf
       42,
       'per-key usage survives restart',
     );
+    assert.deepEqual(reloaded.getGatewayApiKeys().map((key) => [key.id, key.name]), [
+      ['gwk-1', 'Dubbing app'],
+    ]);
     assert.equal(JSON.stringify(reloaded.getConfig()).includes('ws-secret-key'), false);
 
     reloaded.setWebshareApiKey('');

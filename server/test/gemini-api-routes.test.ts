@@ -63,6 +63,33 @@ test('enabling key proxies without a Webshare key is refused', async () => {
   assert.match(res.json().error, /Webshare/i);
 });
 
+test('named gateway keys can be created, masked and deleted', async () => {
+  const created = await app.inject({
+    method: 'POST',
+    url: '/api/gateway/keys',
+    payload: { name: 'My App' },
+  });
+  assert.equal(created.statusCode, 200);
+  const createdBody = created.json();
+  assert.match(createdBody.key, /^sk-gw-/);
+  assert.equal(createdBody.keys.length, 1);
+  assert.equal(createdBody.keys[0].name, 'My App');
+  assert.equal(createdBody.keys[0].maskedKey.includes(createdBody.key), false);
+  assert.equal(createdBody.keys[0].lastUsedAt, undefined);
+
+  const listed = await app.inject({ method: 'GET', url: '/api/gateway/keys' });
+  const listedBody = listed.json();
+  assert.equal(listedBody.keys.length, 1);
+  assert.equal(JSON.stringify(listedBody).includes(createdBody.key), false, 'full key is shown once');
+
+  const removed = await app.inject({
+    method: 'DELETE',
+    url: `/api/gateway/keys/${encodeURIComponent(createdBody.keys[0].id)}`,
+  });
+  assert.equal(removed.statusCode, 200);
+  assert.deepEqual(removed.json().keys, []);
+});
+
 test('shared-model routing defaults to balanced and can be pinned', async () => {
   const bad = await app.inject({
     method: 'POST',

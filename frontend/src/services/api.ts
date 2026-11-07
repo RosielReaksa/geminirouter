@@ -9,6 +9,8 @@ import {
   ProxyRefreshResult,
   GeminiApiConfig,
   GeminiApiTestResult,
+  GatewayApiKey,
+  GatewayApiKeysResponse,
   OAuthStartResponse,
   OAuthCompleteResponse,
   ModelsResponse,
@@ -161,6 +163,32 @@ export class ApiClient {
       throw new Error(String(message));
     }
     return data as T;
+  }
+
+  async getGatewayKeys(): Promise<GatewayApiKeysResponse> {
+    const { response, data } = await this.fetchJson<GatewayApiKeysResponse>(
+      '/api/gateway/keys',
+      { method: 'GET' }
+    );
+    if (!response.ok || !data) {
+      throw new Error((data as any)?.error || `Could not load gateway keys (HTTP ${response.status}).`);
+    }
+    return data;
+  }
+
+  async createGatewayKey(name: string): Promise<{ key: string; keys: GatewayApiKey[] }> {
+    return this.mutateJson<{ key: string; keys: GatewayApiKey[] }>('/api/gateway/keys', {
+      method: 'POST',
+      body: JSON.stringify({ name }),
+    });
+  }
+
+  async deleteGatewayKey(id: string): Promise<GatewayApiKey[]> {
+    const result = await this.mutateJson<{ keys: GatewayApiKey[] }>(
+      `/api/gateway/keys/${encodeURIComponent(id)}`,
+      { method: 'DELETE' }
+    );
+    return result.keys;
   }
 
   // 1. GET /api/status

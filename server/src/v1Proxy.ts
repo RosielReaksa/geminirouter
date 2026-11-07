@@ -8,6 +8,10 @@ export interface V1ProxyOptions {
   leaseManager: ConcurrencyLeaseManager;
   store: LocalStateStore;
   getGatewayPort: () => number;
+  /** Core gateway key used to authenticate the forwarded account call. */
+  coreApiKey?: string;
+  /** Named gateway key that authenticated the client request. */
+  gatewayKeyId?: string;
 }
 
 /**
@@ -222,6 +226,18 @@ export async function handleV1ProxyRequest(
         // Remove host header to avoid upstream misrouting
         delete forwardHeaders.host;
         delete forwardHeaders['content-length'];
+
+        // Authenticate to the core with its own key (the client may be using a
+        // named gateway key that the core does not know), and tag the call so
+        // the Traffic page can attribute it to that named key.
+        if (options.coreApiKey) {
+          forwardHeaders.authorization = `Bearer ${options.coreApiKey}`;
+        }
+        if (options.gatewayKeyId) {
+          forwardHeaders['x-geminirouter-key-id'] = options.gatewayKeyId;
+        } else {
+          delete forwardHeaders['x-geminirouter-key-id'];
+        }
 
         if (rawBodyBuffer) {
           forwardHeaders['content-length'] = rawBodyBuffer.length;

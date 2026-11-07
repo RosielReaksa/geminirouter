@@ -185,6 +185,9 @@ export interface TrafficRecord {
   egressVia?: 'proxy' | 'direct';
   /** Which provider served the call. Undefined means the OAuth core pool. */
   provider?: 'core' | 'gemini-api';
+  /** Named gateway client key that made the call. */
+  gatewayKeyId?: string;
+  gatewayKeyName?: string;
 }
 
 export interface CacheFamilyStats {
@@ -356,6 +359,19 @@ export interface ProxyListSummary {
     /** Epoch ms when a cooling proxy becomes assignable again. */
     quarantineUntil: number | null;
   }>;
+}
+
+export interface GatewayApiKey {
+  id: string;
+  name: string;
+  maskedKey: string;
+  createdAt: string;
+  lastUsedAt?: string;
+}
+
+export interface GatewayApiKeysResponse {
+  masterKey: string;
+  keys: GatewayApiKey[];
 }
 
 export interface GatewayConfig {

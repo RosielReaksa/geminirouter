@@ -72,6 +72,15 @@ export interface GatewayConfig {
 /** How the two shared flash-lite models pick a provider. */
 export type GeminiApiSharedRouting = 'balanced' | 'keys' | 'accounts';
 
+/** Named client keys issued by the gateway dashboard. */
+export interface GatewayApiKeyRecord {
+  id: string;
+  name: string;
+  key: string;
+  createdAt: string;
+  lastUsedAt?: string;
+}
+
 /** Persisted per-key/model usage so dashboard counters survive a restart. */
 export interface GeminiApiUsageState {
   savedAt: string;
@@ -120,6 +129,9 @@ export interface TrafficRecord {
   egressVia?: 'proxy' | 'direct';
   /** Which provider served the call. Undefined means the OAuth core pool. */
   provider?: 'core' | 'gemini-api';
+  /** Named gateway client key used by the caller, when known. */
+  gatewayKeyId?: string;
+  gatewayKeyName?: string;
 }
 
 export interface ModelAvailabilityResult {
@@ -204,6 +216,7 @@ export class LocalStateStore {
   // the AI Studio keys, or an even split serves a request.
   private geminiApiSharedRouting: GeminiApiSharedRouting = 'balanced';
   private geminiApiUsageState: GeminiApiUsageState | null = null;
+  private gatewayApiKeys: GatewayApiKeyRecord[] = [];
   // Whether key traffic should leave through the Webshare inventory, and the
   // stable keyId -> "address:port" pins.
   private geminiApiProxyEnabled = false;
@@ -263,6 +276,18 @@ export class LocalStateStore {
       loaded.geminiApiUsageState && typeof loaded.geminiApiUsageState === 'object'
         ? loaded.geminiApiUsageState
         : null;
+    this.gatewayApiKeys = Array.isArray(loaded.gatewayApiKeys)
+      ? loaded.gatewayApiKeys.filter(
+          (key): key is GatewayApiKeyRecord =>
+            Boolean(
+              key &&
+                typeof key.id === 'string' &&
+                typeof key.name === 'string' &&
+                typeof key.key === 'string' &&
+                key.key.trim(),
+            ),
+        )
+      : [];
     this.geminiApiProxyAssignments =
       loaded.geminiApiProxyAssignments && typeof loaded.geminiApiProxyAssignments === 'object'
         ? { ...loaded.geminiApiProxyAssignments }
@@ -284,6 +309,7 @@ export class LocalStateStore {
     geminiApiProxyEnabled?: boolean;
     geminiApiSharedRouting?: GeminiApiSharedRouting;
     geminiApiUsageState?: GeminiApiUsageState | null;
+    gatewayApiKeys?: GatewayApiKeyRecord[];
     geminiApiProxyAssignments?: Record<string, string>;
   } {
     if (fs.existsSync(this.stateFile)) {
@@ -316,6 +342,7 @@ export class LocalStateStore {
             geminiApiProxyEnabled: this.geminiApiProxyEnabled,
             geminiApiSharedRouting: this.geminiApiSharedRouting,
             geminiApiUsageState: this.geminiApiUsageState,
+            gatewayApiKeys: this.gatewayApiKeys,
             geminiApiProxyAssignments: this.geminiApiProxyAssignments,
           },
           null,
@@ -471,6 +498,30 @@ export class LocalStateStore {
   setGeminiApiUsageState(state: GeminiApiUsageState): void {
     this.geminiApiUsageState = state;
     this.saveState();
+  }
+
+  getGatewayApiKeys(): GatewayApiKeyRecord[] {
+    return this.gatewayApiKeys.map((key) => ({ ...key }));
+  }
+
+  addGatewayApiKey(record: GatewayApiKeyRecord): void {
+    this.gatewayApiKeys.push({ ...record });
+    this.saveState();
+  }
+
+  removeGatewayApiKey(id: string): boolean {
+    const before = this.gatewayApiKeys.length;
+    this.gatewayApiKeys = this.gatewayApiKeys.filter((key) => key.id !== id);
+    if (this.gatewayApiKeys.length === before) return false;
+    this.saveState();
+    return true;
+  }
+
+  touchGatewayApiKey(id: string): void {
+    const key = this.gatewayApiKeys.find((entry) => entry.id === id);
+    if (!key) return;
+    key.lastUsedAt = new Date().toISOString();
+    this.scheduleSave();
   }
 
   getGeminiApiProxyAssignments(): Record<string, string> {

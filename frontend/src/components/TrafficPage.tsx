@@ -184,7 +184,8 @@ export const TrafficPage: React.FC<TrafficPageProps> = ({ traffic, onReady }) =>
       t.clientName.toLowerCase().includes(searchTerm.toLowerCase()) ||
       t.modelRequested.toLowerCase().includes(searchTerm.toLowerCase()) ||
       t.modelRouted.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      t.backingAccountEmail.toLowerCase().includes(searchTerm.toLowerCase());
+      t.backingAccountEmail.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      (t.gatewayKeyName || '').toLowerCase().includes(searchTerm.toLowerCase());
 
     const matchesStatus =
       statusFilter === 'all'
@@ -300,11 +301,12 @@ export const TrafficPage: React.FC<TrafficPageProps> = ({ traffic, onReady }) =>
       {/* Table Container */}
       <div className="bg-[#FFFFFF] border border-[#EAE5DE] rounded-2xl shadow-soft overflow-hidden">
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[1040px] text-left text-xs">
+          <table className="w-full min-w-[1120px] text-left text-xs">
             <thead className="bg-[#FAF7F2] text-[#706B65] font-semibold border-b border-[#EAE5DE]">
               <tr>
                 <th className="py-3.5 px-3 whitespace-nowrap">Time</th>
                 <th className="py-3.5 px-3 whitespace-nowrap">Client</th>
+                <th className="py-3.5 px-3 whitespace-nowrap">Client Key</th>
                 <th className="py-3.5 px-3 whitespace-nowrap">Model & Route</th>
                 <th className="py-3.5 px-3 whitespace-nowrap">Status</th>
                 <th className="py-3.5 px-3 whitespace-nowrap">Latency</th>
@@ -317,13 +319,13 @@ export const TrafficPage: React.FC<TrafficPageProps> = ({ traffic, onReady }) =>
             <tbody className="divide-y divide-[#EAE5DE] text-[#2A2723]">
               {rangeLoading ? (
                 <tr>
-                  <td colSpan={9} className="py-10 text-center text-[#706B65]">
+                  <td colSpan={10} className="py-10 text-center text-[#706B65]">
                     <span className="inline-flex items-center gap-2"><Loader2 className="h-4 w-4 animate-spin text-[#C25938]" />Loading matching requests…</span>
                   </td>
                 </tr>
               ) : filteredTraffic.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="text-center py-10 text-[#706B65]">
+                  <td colSpan={10} className="text-center py-10 text-[#706B65]">
                     {timeRange ? 'No requests were recorded during this hour.' : 'No traffic records matched your filter.'}
                   </td>
                 </tr>
@@ -354,6 +356,16 @@ export const TrafficPage: React.FC<TrafficPageProps> = ({ traffic, onReady }) =>
                         <span className="bg-[#FAF7F2] border border-[#EAE5DE] px-2 py-0.5 rounded text-[11px] text-[#2A2723]">
                           {t.clientName}
                         </span>
+                      </td>
+                      <td className="py-3.5 px-3 whitespace-nowrap">
+                        {t.gatewayKeyName ? (
+                          <span className="inline-flex items-center gap-1 rounded-full border border-[#EAE5DE] bg-[#FFFFFF] px-2 py-0.5 text-[10px] font-medium text-[#504C46]">
+                            <KeyRound className="h-2.5 w-2.5 text-[#C25938]" />
+                            {t.gatewayKeyName}
+                          </span>
+                        ) : (
+                          <span className="text-[#9E988F]">—</span>
+                        )}
                       </td>
                       <td className="py-3.5 px-3 whitespace-nowrap">
                         <div className="flex flex-col">
