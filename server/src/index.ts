@@ -44,6 +44,7 @@ import {
   registerMediaRoutes,
   takeMediaUpload,
 } from './mediaTranscription.js';
+import { getSharedMediaGate, readMediaGateOptions } from './mediaGate.js';
 
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
@@ -986,18 +987,8 @@ export async function createServer(): Promise<{
   // /v1/audio/* to the bridge (port 3000) rather than the core (port 8045).
   registerMediaRoutes(app, {
     config: mediaConfig,
-    getApiKeys: () => [
-      process.env.GEMINIROUTER_API_KEY || '',
-      store.getConfig().masterApiKey || '',
-      process.env.GEMINIROUTER_GATEWAY_API_KEY || '',
-      resolveGateway().apiKey,
-    ],
-    getGatewayApiKeys: () => [
-      process.env.GEMINIROUTER_GATEWAY_API_KEY || '',
-      process.env.GEMINIROUTER_API_KEY || '',
-      store.getConfig().masterApiKey || '',
-      resolveGateway().apiKey,
-    ],
+    getApiKeys: gatewayApiKeys,
+    getGatewayApiKeys: gatewayApiKeys,
     getInternalBaseUrl: () => {
       const address = app.server.address();
       if (address && typeof address === 'object' && 'port' in address && address.port) {
@@ -1276,6 +1267,11 @@ export async function createServer(): Promise<{
   // traffic records; nothing here is fabricated. Per-request failover and
   // cooldowns are owned by the core (docs/ACCOUNT-FAILOVER.md); the bridge
   // reports what it can observe.
+  app.get('/api/media/queue', async () => ({
+    ...getSharedMediaGate().stats(),
+    queueTimeoutMs: readMediaGateOptions().timeoutMs,
+  }));
+
   app.get('/api/status', async () => {
     if (!quotaRefreshedAt || Date.now() - Date.parse(quotaRefreshedAt) > quotaRefreshMs) {
       void refreshAllQuotas();

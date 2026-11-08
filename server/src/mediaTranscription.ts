@@ -8,6 +8,7 @@ import Busboy from 'busboy';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { safeEqual } from './auth.js';
 import { canonicalModelId } from './modelIds.js';
+import { getSharedMediaGate } from './mediaGate.js';
 
 /**
  * Long-audio transcription, translation and timed dubbing.
@@ -454,6 +455,39 @@ export function registerMediaBodyParsers(
 
 export function registerMediaRoutes(app: FastifyInstance, deps: MediaRouteDeps): void {
   const config = deps.config ?? readMediaConfig();
+  const gate = getSharedMediaGate();
+  /**
+   * Bound how many media jobs run at once. Excess jobs wait in FIFO order;
+   * if the queue is full or the wait times out, the caller gets a 503 with
+   * Retry-After instead of a burst of 429s from the model pool.
+   */
+  const withMediaGate = async (
+    request: FastifyRequest,
+    reply: FastifyReply,
+    handler: () => Promise<unknown>,
+  ) => {
+    const gateResult = await gate.acquire();
+    if (!gateResult.ok) {
+      reply.header('Retry-After', '30');
+      return reply.code(503).send({
+        error: {
+          message:
+            gateResult.reason === 'timeout'
+              ? 'Media queue wait timed out. Retry with the same upload.'
+              : 'Media queue is full. Try again shortly.',
+          type: 'rate_limit_error',
+          code: 'media_queue_full',
+        },
+      });
+    }
+    reply.header('x-media-queue-wait-ms', String(gateResult.waitMs));
+    try {
+      return await handler();
+    } finally {
+      gate.release();
+    }
+  };
+
   // JSON/base64 bodies are buffered, so keep a lower ceiling for them.
   // Multipart and raw uploads use the streaming parsers below, which enforce
   // MEDIA_MAX_UPLOAD_BYTES without buffering the file in memory.
@@ -475,9 +509,11 @@ export function registerMediaRoutes(app: FastifyInstance, deps: MediaRouteDeps):
       route,
       { bodyLimit, onRequest: authHook },
       async (request, reply) =>
-        handleAudioTranscription(request, reply, deps, {
-          forceTranslate: translationRoute,
-        }),
+        withMediaGate(request, reply, () =>
+          handleAudioTranscription(request, reply, deps, {
+            forceTranslate: translationRoute,
+          }),
+        ),
     );
   }
 
@@ -485,7 +521,8 @@ export function registerMediaRoutes(app: FastifyInstance, deps: MediaRouteDeps):
     app.post(
       route,
       { bodyLimit, onRequest: authHook },
-      async (request, reply) => handleAudioDubbing(request, reply, deps),
+      async (request, reply) =>
+        withMediaGate(request, reply, () => handleAudioDubbing(request, reply, deps)),
     );
   }
 }
