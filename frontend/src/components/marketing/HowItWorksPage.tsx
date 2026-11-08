@@ -18,7 +18,7 @@ import {
   Terminal,
   Timer,
 } from 'lucide-react';
-import { Link } from '../../router';
+import { Link } from '../../RouterLink';
 import { Reveal } from '../marketing/Chrome';
 import { publicApi, type PublicStats } from '../../services/publicApi';
 

@@ -57,18 +57,23 @@ export const OAuthModal: React.FC<OAuthModalProps> = ({
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [noticeMsg, setNoticeMsg] = useState<{ tone: 'success' | 'warning'; text: string } | null>(null);
   const [baselineAccountIds, setBaselineAccountIds] = useState<string[] | null>(null);
+  // Session id of the open modal whose state has been reset. The reset runs
+  // during render when the modal opens, which avoids a setState effect.
+  const [resetForOpen, setResetForOpen] = useState(false);
 
-  // Reset state when modal opens
-  useEffect(() => {
-    if (isOpen) {
-      setAuthCode('');
-      setErrorMsg(null);
-      setSuccessMsg(null);
-      setNoticeMsg(null);
-      setCurrentSession(null);
-      setBaselineAccountIds(null);
-    }
-  }, [isOpen]);
+  // Reset state when modal opens. Only reset on the closed -> open transition;
+  // while it stays open the caller's input must survive re-renders.
+  if (isOpen && !resetForOpen) {
+    setResetForOpen(true);
+    setAuthCode('');
+    setErrorMsg(null);
+    setSuccessMsg(null);
+    setNoticeMsg(null);
+    setCurrentSession(null);
+    setBaselineAccountIds(null);
+  } else if (!isOpen && resetForOpen) {
+    setResetForOpen(false);
+  }
 
   // Polling to detect when Google sign-in completes automatically in browser.
   // Only a genuinely NEW account counts as success: pre-existing accounts must

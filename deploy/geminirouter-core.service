@@ -9,6 +9,8 @@ User=geminirouter
 Group=geminirouter
 WorkingDirectory=/opt/geminirouter/core
 Environment=NODE_ENV=production
+# The core owns 8045. Kept in the unit (not .env) so the bridge's EnvironmentFile
+# cannot override it.
 Environment=PORT=8045
 Environment=CORE_HOME=/opt/geminirouter/core
 Environment=CORE_MAIN_PATH=/opt/geminirouter/core/dist/core/main.cjs

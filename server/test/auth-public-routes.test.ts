@@ -15,3 +15,11 @@ test('dashboard APIs are not public', () => {
   assert.equal(isPublicRoute('/api/status'), false);
   assert.equal(isPublicRoute('/api/accounts'), false);
 });
+
+test('the liveness probe is public and has a matching route', () => {
+  // auth.ts whitelists /api/health, so a missing handler would send 404 to
+  // every uptime monitor instead of a 401 it could interpret.
+  assert.equal(isPublicRoute('/api/health'), true);
+  assert.equal(isPublicRoute('/api/health?probe=1'), true);
+  assert.equal(isPublicRoute('/api/healthz'), false);
+});

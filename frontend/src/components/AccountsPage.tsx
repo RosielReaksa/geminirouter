@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Users,
   Plus,
@@ -6,7 +6,6 @@ import {
   Power,
   MoreVertical,
   ChevronDown,
-  Terminal,
   Laptop,
   Trash2,
   LayoutList,
@@ -61,6 +60,14 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
   const [pairCode, setPairCode] = useState<{ code: string; expiresAt: number } | null>(null);
   const [isDownloadingHelper, setIsDownloadingHelper] = useState(false);
   const importInputRef = useRef<HTMLInputElement | null>(null);
+
+  // One clock tick for "reset in …" labels and the quota-held check. Reading
+  // Date.now() during render is impure; a state value keeps renders repeatable.
+  const [clockNow, setClockNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setClockNow(Date.now()), 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   const handleDownloadHelper = async () => {
     setIsDownloadingHelper(true);
@@ -229,34 +236,10 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
     }
   };
 
-  const handleSwitchClient = async (accountId: string, appTarget: 'ide' | 'agy' | 'classic') => {
-    try {
-      const res = await fetch(`/api/accounts/${encodeURIComponent(accountId)}/switch`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...authApi.headers(),
-        },
-        body: JSON.stringify({ appTarget }),
-      });
-      const data = await res.json();
-      if (res.status === 401) {
-        window.dispatchEvent(new CustomEvent('geminirouter:unauthorized'));
-      }
-      if (data.success) {
-        onRefreshQuotas();
-      } else {
-        alert(data.error || 'Failed to switch client target');
-      }
-    } catch (err: any) {
-      alert('Error switching client: ' + err.message);
-    }
-  };
-
   const formatResetTime = (dateStr?: string) => {
     if (!dateStr) return '';
     try {
-      const diffMs = new Date(dateStr).getTime() - Date.now();
+      const diffMs = new Date(dateStr).getTime() - clockNow;
       if (diffMs <= 0) return 'reset soon';
       const hours = Math.floor(diffMs / (1000 * 60 * 60));
       const mins = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
@@ -282,7 +265,7 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
     if (pct > 0) return false;
     if (!resetTime) return true;
     const resetMs = Date.parse(resetTime);
-    return !Number.isFinite(resetMs) || resetMs > Date.now();
+    return !Number.isFinite(resetMs) || resetMs > clockNow;
   };
 
   const getQuotaBarBg = (pct: number) => {
@@ -469,7 +452,7 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
               return a.email.localeCompare(b.email);
             });
 
-            return stableList.map((acc, accIndex) => {
+            return stableList.map((acc) => {
               const isDropdownOpen = openDropdownId === acc.id;
 
             const models5h =

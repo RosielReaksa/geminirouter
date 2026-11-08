@@ -15,7 +15,7 @@ import {
   Sparkles,
   ChevronDown,
 } from 'lucide-react';
-import { Link } from '../../router';
+import { Link } from '../../RouterLink';
 import { Reveal } from '../marketing/Chrome';
 import { publicApi, type PublicStats, type PublicModel } from '../../services/publicApi';
 

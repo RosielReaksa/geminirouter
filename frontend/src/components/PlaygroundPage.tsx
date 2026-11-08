@@ -265,6 +265,12 @@ export const PlaygroundPage: React.FC<{ onReady: () => void; isActive?: boolean 
   isActive = true,
 }) => {
   const saved = useMemo(() => loadSavedPlaygroundState(), []);
+  // Latest-ref for onReady so the one-shot model load does not need it as a dep
+  // (the parent passes a new arrow function every render).
+  const onReadyRef = useRef(onReady);
+  useEffect(() => {
+    onReadyRef.current = onReady;
+  }, [onReady]);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [modelsLoading, setModelsLoading] = useState(true);
   const [model, setModel] = useState(saved?.model || '');
@@ -279,6 +285,8 @@ export const PlaygroundPage: React.FC<{ onReady: () => void; isActive?: boolean 
   const [running, setRunning] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  // Reset the visible timer when a run ends without a state write in an effect.
+  const shownElapsedSeconds = running ? elapsedSeconds : 0;
   const [mediaFile, setMediaFile] = useState<File | null>(cachedPlaygroundFile);
   const [mediaPreviewUrl, setMediaPreviewUrl] = useState<string | null>(() =>
     cachedPlaygroundFile ? URL.createObjectURL(cachedPlaygroundFile) : null,
@@ -327,11 +335,11 @@ export const PlaygroundPage: React.FC<{ onReady: () => void; isActive?: boolean 
     }).finally(() => {
       if (active) {
         setModelsLoading(false);
-        onReady();
+        onReadyRef.current();
       }
     });
     return () => { active = false; };
-  }, []);
+  }, [saved]);
 
   useEffect(() => {
     if (isActive) onReady();
@@ -361,10 +369,7 @@ export const PlaygroundPage: React.FC<{ onReady: () => void; isActive?: boolean 
   }, [prompt, systemPrompt, showSystemPrompt, model, compareEnabled, compareModel, temperature, maxTokens, results]);
 
   useEffect(() => {
-    if (!running) {
-      setElapsedSeconds(0);
-      return;
-    }
+    if (!running) return;
     const startedAt = Date.now();
     const timer = window.setInterval(() => {
       setElapsedSeconds(Math.floor((Date.now() - startedAt) / 1000));
@@ -691,7 +696,7 @@ export const PlaygroundPage: React.FC<{ onReady: () => void; isActive?: boolean 
                 {running
                   ? uploadProgress !== null && uploadProgress < 100
                     ? `Uploading… ${uploadProgress}%`
-                    : `Running… ${elapsedSeconds}s`
+                    : `Running… ${shownElapsedSeconds}s`
                   : compareEnabled ? 'Run comparison' : 'Run prompt'}
               </button>
               <button type="button" onClick={clearPrompt} title="Clear prompt and results" className="rounded-xl border border-[#EAE5DE] bg-white px-3 text-[#706B65] hover:text-[#C25938] hover:bg-[#F8F5F0]" aria-label="Clear prompt and results"><RotateCcw className="w-4 h-4" /></button>

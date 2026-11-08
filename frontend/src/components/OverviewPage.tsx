@@ -1,8 +1,7 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Activity,
   Users,
-  Clock,
   ArrowUpRight,
   ChevronRight,
   ShieldCheck,
@@ -55,7 +54,7 @@ const formatTokens = (n: number): string => {
   return String(n);
 };
 
-const timeAgo = (value?: string | number): string => {
+const timeAgo = (value?: string | number, nowMs = Date.now()): string => {
   if (value === undefined || value === null || value === '') return 'never';
   let ts: number;
   if (typeof value === 'number') {
@@ -70,7 +69,7 @@ const timeAgo = (value?: string | number): string => {
     }
   }
   if (!Number.isFinite(ts)) return 'never';
-  const diff = Date.now() - ts;
+  const diff = nowMs - ts;
   if (diff < 0) return 'just now';
   if (diff < 60_000) return 'just now';
   if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
@@ -141,6 +140,21 @@ export const OverviewPage: React.FC<OverviewPageProps> = ({
   const [graphRange, setGraphRange] = useState<TrafficVolumeRange>('12h');
   const [rangeVolume, setRangeVolume] = useState<TrafficVolumeResponse | null>(null);
   const [rangeLoading, setRangeLoading] = useState(false);
+  // A single clock tick for everything that reports an age or a window edge.
+  // Reading Date.now() during render is impure and makes the graph unstable
+  // between re-renders, so the value comes from state refreshed once a minute.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  // Latest-ref so the one-shot catalog load does not re-run when the parent
+  // passes a new onReady arrow function on every render.
+  const onReadyRef = useRef(onReady);
+  useEffect(() => {
+    onReadyRef.current = onReady;
+  }, [onReady]);
 
   // Load the live model catalog so the overview shows what the gateway serves.
   useEffect(() => {
@@ -154,7 +168,7 @@ export const OverviewPage: React.FC<OverviewPageProps> = ({
         if (!cancelled) setModelError(true);
       })
       .finally(() => {
-        if (!cancelled) onReady?.();
+        if (!cancelled) onReadyRef.current?.();
       });
     return () => {
       cancelled = true;
@@ -162,13 +176,17 @@ export const OverviewPage: React.FC<OverviewPageProps> = ({
   }, []);
 
   useEffect(() => {
+    // Deferred one microtask: a synchronous setState inside an effect cascades
+    // an extra render, and nothing here needs to paint before this promise runs.
     if (graphRange === '12h') {
-      setRangeLoading(false);
+      void Promise.resolve().then(() => setRangeLoading(false));
       return;
     }
 
     let active = true;
-    setRangeLoading(true);
+    void Promise.resolve().then(() => {
+      if (active) setRangeLoading(true);
+    });
     api.getTrafficVolume(graphRange).then(({ data, isLiveApi }) => {
       if (!active) return;
       setRangeVolume(isLiveApi ? data : { ...data, available: false });
@@ -206,8 +224,9 @@ export const OverviewPage: React.FC<OverviewPageProps> = ({
   const recent = traffic.slice(0, 6);
   // Use the server's complete 12-hour audit summary; the traffic table only
   // loads its latest 50 rows and is not a complete source for this chart.
+  // Bucketing is relative to the `now` state, so each minute re-buckets the
+  // rows instead of reading the clock mid-render.
   const fallbackHourly = React.useMemo(() => {
-    const now = Date.now();
     const buckets = Array.from({ length: 12 }, () => 0);
     for (const t of traffic) {
       const ts = Date.parse(t.timestamp);
@@ -216,11 +235,11 @@ export const OverviewPage: React.FC<OverviewPageProps> = ({
       if (hoursAgo >= 0 && hoursAgo < 12) buckets[11 - hoursAgo] += 1;
     }
     return buckets;
-  }, [traffic]);
+  }, [traffic, now]);
   const hourly = status.requestVolume12h ?? fallbackHourly;
   const requestsLast12h = status.requestsLast12h ?? traffic.length;
   const statusWindowEnd = Date.parse(status.requestVolume12hWindowEnd || '');
-  const chartWindowEnd = Number.isFinite(statusWindowEnd) ? statusWindowEnd : Date.now();
+  const chartWindowEnd = Number.isFinite(statusWindowEnd) ? statusWindowEnd : now;
   const fallbackBuckets = hourly.map((requests, index) => ({
     from: new Date(chartWindowEnd - (hourly.length - index) * 60 * 60 * 1000).toISOString(),
     to: new Date(chartWindowEnd - (hourly.length - index - 1) * 60 * 60 * 1000).toISOString(),
@@ -238,7 +257,7 @@ export const OverviewPage: React.FC<OverviewPageProps> = ({
     ? requestsLast12h
     : currentRangeVolume?.totalRequests ?? 0;
   const fallbackErrors12h = traffic.filter((record) => {
-    const age = Date.now() - Date.parse(record.timestamp);
+    const age = now - Date.parse(record.timestamp);
     return record.status >= 400 && age >= 0 && age < 12 * 60 * 60 * 1000;
   }).length;
   const graphErrorTotal = graphRange === '12h'
@@ -614,7 +633,7 @@ export const OverviewPage: React.FC<OverviewPageProps> = ({
                         {a.email}
                       </div>
                       <div className="text-[10px] text-[#B0AAA1] mt-0.5">
-                        {a.tier} · used {timeAgo(a.lastUsedAt)}
+                        {a.tier} · used {timeAgo(a.lastUsedAt, now)}
                       </div>
                     </div>
                   </div>
@@ -764,7 +783,7 @@ export const OverviewPage: React.FC<OverviewPageProps> = ({
             )}
             {status.lastSwitch && (
               <div className="mt-1.5 text-[10px]">
-                Last switch → {status.lastSwitch.toEmail} ({timeAgo(status.lastSwitch.at)})
+                Last switch → {status.lastSwitch.toEmail} ({timeAgo(status.lastSwitch.at, now)})
               </div>
             )}
           </div>
@@ -873,7 +892,7 @@ export const OverviewPage: React.FC<OverviewPageProps> = ({
                       </span>
                     </div>
                     <p className="text-[11px] text-[#9E988F] truncate font-mono-code">
-                      via {t.backingAccountEmail} · {timeAgo(t.timestamp)}
+                      via {t.backingAccountEmail} · {timeAgo(t.timestamp, now)}
                     </p>
                   </div>
                 </div>

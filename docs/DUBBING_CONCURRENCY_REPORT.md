@@ -1,5 +1,9 @@
 # Dubbing Concurrency Fix — Post-Verification Report
 
+> **Historical record.** This is a point-in-time verification report from
+> 2026-11-03. The current, authoritative contract lives in
+> [MEDIA_API.md](./MEDIA_API.md).
+
 **Date:** 2026-11-03
 **Endpoint:** `POST /v1/audio/dubbing` (production `https://framecall.site`)
 **Starting build:** `20261103-124415` (thought exclusion, coverage guard, short windows, graceful drain)

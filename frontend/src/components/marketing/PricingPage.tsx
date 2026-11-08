@@ -1,6 +1,6 @@
 import React from 'react';
 import { Check, ArrowRight, Server, Users, ShieldCheck, Minus } from 'lucide-react';
-import { Link } from '../../router';
+import { Link } from '../../RouterLink';
 import { Reveal } from '../marketing/Chrome';
 
 /**

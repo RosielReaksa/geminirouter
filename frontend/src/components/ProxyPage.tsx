@@ -70,8 +70,10 @@ export const ProxyPage: React.FC<ProxyPageProps> = ({ onReady }) => {
   }, []);
 
   useEffect(() => {
-    void fetchConfig();
-    void fetchProxyList();
+    // Deferred one microtask: both loaders set state after their await, and the
+    // deferral keeps the effect free of synchronous state writes.
+    void Promise.resolve().then(fetchConfig);
+    void Promise.resolve().then(fetchProxyList);
   }, [fetchConfig, fetchProxyList]);
 
   const handleSave = async (e: React.FormEvent) => {

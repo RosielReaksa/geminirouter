@@ -14,8 +14,8 @@ dubbing website can send media to `/v1/chat/completions` and receive model text
 such as a transcript or translation. For 10–20 minute windows, use
 `POST /v1/audio/transcriptions`: the caller sends the user's own prompt with the
 audio, and the model returns that answer. The website does not need to set a
-task or target language. The endpoint also accepts up to 2 hours per request for
-large files; the website can split into 10–20 minute windows for faster
+task or target language. The endpoint accepts up to 1 hour per request; for
+longer recordings the website should send 10-20 minute windows for faster
 responses. For Chinese→Khmer timed dubbing, `POST /v1/audio/dubbing` chunks the
 recording, enforces the JSON segment contract, and returns absolute-time
 segments with gender, timbre and speaker role.
@@ -172,6 +172,12 @@ Copy the template and adjust your settings:
 cp deploy/.env.example /opt/geminirouter/.env
 nano /opt/geminirouter/.env
 ```
+
+The `.env` file is read by **both** systemd units through `EnvironmentFile=`,
+which overrides `Environment=` in the unit file. That is why it must not set
+`PORT`: the bridge binds `WEB_PORT=3000` and the core binds `PORT=8045`, each
+declared in its own unit. Setting `PORT` in the shared file would move the
+bridge onto the core's port.
 
 ### Step 4: Run via systemd Services
 Install the provided systemd service units:
@@ -409,6 +415,8 @@ To ensure your private router remains exclusively yours:
 | Restart All Services | `systemctl restart geminirouter-core geminirouter-bridge caddy` |
 | Stop All Services | `systemctl stop geminirouter-core geminirouter-bridge` |
 | Check Memory & PID | `systemctl status geminirouter-core geminirouter-bridge` |
+| Liveness probe | `curl -fsS https://$DOMAIN/api/health` (public, 200 = serving) |
+| Check media config | `journalctl -u geminirouter-bridge -n 30 \| grep MEDIA_` |
 | (Optional) PM2 Status | `pm2 status` |
 | Check core OAuth credential drift | `systemctl start geminirouter-core-creds && journalctl -u geminirouter-core-creds -n 20` |
 | Update the external core | `sudo ./deploy/update-core.sh --bundle <main.cjs>` (auto-rollback) |

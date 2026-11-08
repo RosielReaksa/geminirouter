@@ -60,13 +60,16 @@ export const DashboardApp: React.FC = () => {
   const [isOAuthModalOpen, setIsOAuthModalOpen] = useState(false);
   const [isLiveApi, setIsLiveApi] = useState(false);
   const [isInitialLoading, setIsInitialLoading] = useState(true);
-  const [playgroundEverOpened, setPlaygroundEverOpened] = useState(currentTab === 'playground');
-
   // Keep the Playground mounted after its first visit so uploads, progress and
-  // results survive switching to another dashboard page.
-  useEffect(() => {
-    if (currentTab === 'playground') setPlaygroundEverOpened(true);
-  }, [currentTab]);
+  // results survive switching to another dashboard page. Deriving this from the
+  // current tab plus a latch avoids a setState effect on every tab change.
+  const [playgroundVisited, setPlaygroundVisited] = useState(currentTab === 'playground');
+  const [visitedTab, setVisitedTab] = useState(currentTab);
+  if (visitedTab !== currentTab) {
+    setVisitedTab(currentTab);
+    if (currentTab === 'playground') setPlaygroundVisited(true);
+  }
+  const playgroundEverOpened = playgroundVisited || currentTab === 'playground';
 
   // Core Data States
   const [status, setStatus] = useState<GatewayStatus>(INITIAL_MOCK_STATUS);
@@ -184,23 +187,25 @@ export const DashboardApp: React.FC = () => {
     }
   }, []);
 
+  // Show the mascot when a tab that needs fresh data is entered. The state
+  // writes are deferred to a microtask: a synchronous setState inside an effect
+  // cascades an extra render, and the mask only needs to appear before paint.
+  const selfLoadingTab = ['overview', 'models', 'playground', 'usage'].includes(currentTab) || hasSelectedTrafficRange;
   useEffect(() => {
     if (previousTab.current === currentTab) return;
     previousTab.current = currentTab;
-    setIsPageSwitchLoading(true);
-    // These pages use data already loaded into the dashboard shell. The
-    // overview and model tools fetch their own live catalog and clear the
-    // overlay from their request's finally handler.
-    if (!['overview', 'models', 'playground', 'usage'].includes(currentTab) && !hasSelectedTrafficRange) {
-      setIsPageSwitchLoading(false);
+
+    if (!selfLoadingTab) {
+      void Promise.resolve().then(() => setIsPageSwitchLoading(false));
       return;
     }
 
-    // Show the mascot while the page warms up, then reveal its local skeleton
-    // if a slow API call is still running. The whole app should never stay blocked.
+    void Promise.resolve().then(() => setIsPageSwitchLoading(true));
+    // Reveal the page's own skeleton if a slow API call is still running.
+    // The whole app should never stay blocked behind the mascot.
     const failsafe = window.setTimeout(() => setIsPageSwitchLoading(false), 8000);
     return () => window.clearTimeout(failsafe);
-  }, [currentTab, hasSelectedTrafficRange]);
+  }, [currentTab, selfLoadingTab]);
 
   const handlePageReady = (tab: NavTab) => {
     const segment = window.location.pathname.split('/')[2] as NavTab | undefined;

@@ -36,6 +36,7 @@ import {
   normalizeDubbingSegment,
   parseDubbingPayload,
   parseDubbingTimestamp,
+  describeMediaTimeoutRisk,
   readMediaConfig,
   splitStructuredOutput,
   usesShortDubbingWindow,
@@ -329,20 +330,64 @@ after(async () => {
   }
 });
 
-test('media chunks default to 15 minutes with a 2-hour maximum', () => {
+test('media chunks default to 15 minutes with a 1-hour maximum', () => {
   const oldChunk = process.env.MEDIA_CHUNK_SECONDS;
   const oldMax = process.env.MEDIA_MAX_DURATION_SECONDS;
+  const oldTotal = process.env.MEDIA_TOTAL_TIMEOUT_MS;
   delete process.env.MEDIA_CHUNK_SECONDS;
   delete process.env.MEDIA_MAX_DURATION_SECONDS;
+  delete process.env.MEDIA_TOTAL_TIMEOUT_MS;
   try {
     const config = readMediaConfig();
-    assert.equal(config.maxDurationSeconds, 18000);
+    assert.equal(config.maxDurationSeconds, 3600);
     assert.equal(config.chunkSeconds, 900);
+    // The whole-request deadline must outlive the media it accepts, otherwise a
+    // valid 1-hour upload is aborted by the timer before it can finish.
+    assert.ok(
+      config.totalTimeoutMs > config.maxDurationSeconds * 1000,
+      `total timeout ${config.totalTimeoutMs}ms must exceed ${config.maxDurationSeconds}s of media`,
+    );
+    assert.equal(describeMediaTimeoutRisk(config), null);
   } finally {
     if (oldChunk === undefined) delete process.env.MEDIA_CHUNK_SECONDS;
     else process.env.MEDIA_CHUNK_SECONDS = oldChunk;
     if (oldMax === undefined) delete process.env.MEDIA_MAX_DURATION_SECONDS;
     else process.env.MEDIA_MAX_DURATION_SECONDS = oldMax;
+    if (oldTotal === undefined) delete process.env.MEDIA_TOTAL_TIMEOUT_MS;
+    else process.env.MEDIA_TOTAL_TIMEOUT_MS = oldTotal;
+  }
+});
+
+test('a total deadline shorter than the accepted duration is reported', () => {
+  const oldMax = process.env.MEDIA_MAX_DURATION_SECONDS;
+  const oldTotal = process.env.MEDIA_TOTAL_TIMEOUT_MS;
+  process.env.MEDIA_MAX_DURATION_SECONDS = '3600';
+  process.env.MEDIA_TOTAL_TIMEOUT_MS = String(30 * 60 * 1000);
+  try {
+    const config = readMediaConfig();
+    assert.equal(config.maxDurationSeconds, 3600);
+    const risk = describeMediaTimeoutRisk(config);
+    assert.ok(risk, 'a 30-minute deadline for 1-hour media must be reported');
+    assert.match(risk, /MEDIA_TOTAL_TIMEOUT_MS/);
+    assert.match(risk, /MEDIA_MAX_DURATION_SECONDS/);
+  } finally {
+    if (oldMax === undefined) delete process.env.MEDIA_MAX_DURATION_SECONDS;
+    else process.env.MEDIA_MAX_DURATION_SECONDS = oldMax;
+    if (oldTotal === undefined) delete process.env.MEDIA_TOTAL_TIMEOUT_MS;
+    else process.env.MEDIA_TOTAL_TIMEOUT_MS = oldTotal;
+  }
+});
+
+test('a disabled total deadline is never reported as a risk', () => {
+  const oldTotal = process.env.MEDIA_TOTAL_TIMEOUT_MS;
+  process.env.MEDIA_TOTAL_TIMEOUT_MS = '0';
+  try {
+    const config = readMediaConfig();
+    assert.equal(config.totalTimeoutMs, 0);
+    assert.equal(describeMediaTimeoutRisk(config), null);
+  } finally {
+    if (oldTotal === undefined) delete process.env.MEDIA_TOTAL_TIMEOUT_MS;
+    else process.env.MEDIA_TOTAL_TIMEOUT_MS = oldTotal;
   }
 });
 

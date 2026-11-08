@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Search, ArrowUpRight, Boxes, AlertCircle } from 'lucide-react';
-import { Link } from '../../router';
+import { Link } from '../../RouterLink';
 import { Reveal } from '../marketing/Chrome';
 import { publicApi, type PublicModel, type PublicModelsResponse } from '../../services/publicApi';
 
@@ -39,7 +39,9 @@ export const ModelsPage: React.FC = () => {
     };
   }, []);
 
-  const models = data?.models ?? [];
+  // `data.models` is a fresh array on every render only when `data` changes, so
+  // memoise the fallback list once instead of recreating it for each useMemo.
+  const models = useMemo(() => data?.models ?? [], [data]);
 
   const providers = useMemo(() => {
     const set = new Set(models.map((m) => shortProvider(m.provider)));

@@ -12,9 +12,7 @@ import {
   ChevronDown,
   ChevronRight,
   Activity,
-  Zap,
   CheckCircle2,
-  AlertCircle,
   Database,
   Users,
   Info,
@@ -168,9 +166,9 @@ const formatLatency = (ms: number): string => {
   return `${Math.round(ms)}ms`;
 };
 
-const timeAgo = (ts: number | null): string => {
+const timeAgo = (ts: number | null, now = Date.now()): string => {
   if (!ts) return 'never';
-  const delta = Math.floor((Date.now() - ts) / 1000);
+  const delta = Math.floor((now - ts) / 1000);
   if (delta < 5) return 'just now';
   if (delta < 60) return `${delta}s ago`;
   if (delta < 3600) return `${Math.floor(delta / 60)}m ago`;
@@ -713,11 +711,21 @@ const SummaryPanel: React.FC<{
   const totalErr = groups.reduce((s, g) => s + g.totalErrors, 0);
   const overallSR = totalReq > 0 ? Math.round(((totalReq - totalErr) / totalReq) * 100) : 100;
 
-  const [tick, setTick] = useState(0);
+  // Re-render every 15 s so the "refreshed 2m ago" label stays current without
+  // reading the clock during render.
+  const [tickAt, setTickAt] = useState(() => Date.now());
   useEffect(() => {
-    const t = setInterval(() => setTick((n) => n + 1), 15_000);
+    const t = setInterval(() => setTickAt(Date.now()), 15_000);
     return () => clearInterval(t);
   }, []);
+
+  // Prefer the audit DB's true prompt-cache hit rate; fall back to the cached
+  // share of the traffic rows when the audit DB is unavailable.
+  const hitRate = cacheStats?.available && cacheStats.overallHitRate > 0
+    ? Math.round(cacheStats.overallHitRate)
+    : totalTok + totalCached > 0
+    ? Math.round((totalCached / (totalTok + totalCached)) * 100)
+    : 0;
 
   return (
     <div className="rounded-2xl border border-[#EAE5DE] bg-white shadow-sm overflow-hidden">
@@ -731,7 +739,7 @@ const SummaryPanel: React.FC<{
             totalCached > 0
               ? {
                   label: 'Cache Savings',
-                  value: `${formatTokens(totalCached)} (${Math.round((totalCached / (totalTok + totalCached)) * 100)}%)`,
+                  value: `${formatTokens(totalCached)} (${hitRate}%)`,
                   color: '#1d4ed8',
                 }
               : { label: 'Cache Savings', value: '—', color: '#706B65' },
@@ -769,7 +777,7 @@ const SummaryPanel: React.FC<{
             <div className="text-[11px] text-stone-400 mt-1 flex items-center justify-end gap-1">
               <Clock style={{ width: 11, height: 11 }} />
               <span>Last {windowLabel}</span>
-              {refreshedAt && <span>· {timeAgo(refreshedAt.getTime())}</span>}
+              {refreshedAt && <span>· {timeAgo(refreshedAt.getTime(), tickAt)}</span>}
             </div>
           </div>
 
@@ -877,7 +885,8 @@ export const UsagePage: React.FC<UsagePageProps> = ({ onReady }) => {
   }, []);
 
   useEffect(() => {
-    void fetchAccounts();
+    // Deferred one microtask so the effect does not write state synchronously.
+    void Promise.resolve().then(fetchAccounts);
     const t = setInterval(() => void fetchAccounts(), 60_000);
     return () => clearInterval(t);
   }, [fetchAccounts]);
@@ -925,7 +934,8 @@ export const UsagePage: React.FC<UsagePageProps> = ({ onReady }) => {
   // Initial load + re-load when window changes
   useEffect(() => {
     activeRef.current = true;
-    void fetchData(false);
+    // Deferred one microtask so the effect does not write state synchronously.
+    void Promise.resolve().then(() => fetchData(false));
     return () => { activeRef.current = false; };
   }, [fetchData]);
 

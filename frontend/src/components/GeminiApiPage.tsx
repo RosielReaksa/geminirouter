@@ -158,7 +158,8 @@ export const GeminiApiPage: React.FC<GeminiApiPageProps> = ({ onReady }) => {
   }, [onReady]);
 
   useEffect(() => {
-    void loadConfig();
+    // Deferred one microtask so the effect does not write state synchronously.
+    void Promise.resolve().then(loadConfig);
   }, [loadConfig]);
 
   useEffect(() => {

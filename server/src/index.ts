@@ -38,6 +38,7 @@ import { applyEgress } from './egress.js';
 import { getDirectEgressInfo } from './egressInfo.js';
 import { AccountTester, type AccountTestResult } from './accountTester.js';
 import {
+  describeMediaTimeoutRisk,
   isModelFailureText,
   readMediaConfig,
   registerMediaBodyParsers,
@@ -45,6 +46,7 @@ import {
   takeMediaUpload,
 } from './mediaTranscription.js';
 import { getSharedMediaGate, readMediaGateOptions } from './mediaGate.js';
+import { resolveHelperBinaryCandidates, resolveWebPort } from './listen.js';
 
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
@@ -59,7 +61,7 @@ dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const PORT = parseInt(process.env.PORT || '3000', 10);
+const PORT = resolveWebPort();
 const HOST = process.env.HOST || '0.0.0.0';
 const ADMIN_PASSWORD = process.env.GEMINIROUTER_ADMIN_PASSWORD || '';
 const INTERNAL_GATEWAY_PORT = parseInt(process.env.INTERNAL_GATEWAY_PORT || '8045', 10);
@@ -439,8 +441,10 @@ export async function createServer(): Promise<{
 
   // Multipart API bodies are preserved byte-for-byte for /v1 passthrough.
   // The media transcription routes are the only exception: they stream the
-  // upload to a temp file so a 1-2 hour recording never sits in memory.
+  // upload to a temp file so a multi-hour recording never sits in memory.
   const mediaConfig = readMediaConfig();
+  const mediaTimeoutRisk = describeMediaTimeoutRisk(mediaConfig);
+  if (mediaTimeoutRisk) app.log.warn(mediaTimeoutRisk);
   registerMediaBodyParsers(app, {
     fallbackBodyLimitBytes: V1_REQUEST_BODY_LIMIT_BYTES,
     config: mediaConfig,
@@ -1274,6 +1278,17 @@ export async function createServer(): Promise<{
     queueTimeoutMs: readMediaGateOptions().timeoutMs,
   }));
 
+  // Shallow liveness probe for reverse proxies and uptime monitors. It is in
+  // auth.ts PUBLIC_EXACT, so it must stay free of account, quota and traffic
+  // detail: only proof that this process is serving requests.
+  app.get('/api/health', async () => ({
+    ok: true,
+    service: 'geminirouter-bridge',
+    version: BRIDGE_VERSION,
+    uptimeSeconds: store.getUptimeSeconds(),
+    timestamp: new Date().toISOString(),
+  }));
+
   app.get('/api/status', async () => {
     if (!quotaRefreshedAt || Date.now() - Date.parse(quotaRefreshedAt) > quotaRefreshMs) {
       void refreshAllQuotas();
@@ -1402,16 +1417,22 @@ export async function createServer(): Promise<{
   // 1f. Desktop helper binary. Served only to an authenticated admin session:
   // it is an operator tool, not a public download, so it is never exposed by
   // the static frontend and needs no code-signing certificate.
+  // helper/build.ps1 writes into helper/dist/, so that is checked first; the
+  // repository root of helper/ is kept for hand-placed builds.
+  const HELPER_BINARY_CANDIDATES = resolveHelperBinaryCandidates(
+    process.cwd(),
+    process.env.HELPER_BINARY_PATH,
+  );
   const HELPER_BINARY_PATH =
-    process.env.HELPER_BINARY_PATH ||
-    path.resolve(process.cwd(), '../helper/framecall-helper-windows-amd64.exe');
+    HELPER_BINARY_CANDIDATES.find((candidate) => fs.existsSync(candidate)) ??
+    HELPER_BINARY_CANDIDATES[0];
 
   app.get('/api/helper/download', async (_request, reply) => {
     try {
-      if (!fs.existsSync(HELPER_BINARY_PATH)) {
+      if (!HELPER_BINARY_PATH || !fs.existsSync(HELPER_BINARY_PATH)) {
         return reply.code(404).send({
           error: 'Helper binary is not installed on this server',
-          message: `Build it with helper/build.ps1 and set HELPER_BINARY_PATH (looked at ${HELPER_BINARY_PATH}).`,
+          message: `Build it with helper/build.ps1 and set HELPER_BINARY_PATH. Looked at: ${HELPER_BINARY_CANDIDATES.join(', ')}.`,
         });
       }
       const stat = fs.statSync(HELPER_BINARY_PATH);

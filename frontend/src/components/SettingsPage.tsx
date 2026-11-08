@@ -22,10 +22,19 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
   const [formData, setFormData] = useState<GatewayConfig>({ ...config });
   const [savedSuccess, setSavedSuccess] = useState(false);
 
-  // Sync state if config prop changes
-  React.useEffect(() => {
+  // Re-sync the form when the parent sends a different config (e.g. after a
+  // refresh). Adjusting state during render is React's documented alternative
+  // to a setState effect: no extra pass, no cascade.
+  //
+  // Comparing by identity alone would loop forever if a future parent passed a
+  // fresh object each render, so compare the serialised value instead. Config is
+  // a small flat object, so this is cheap and re-syncs on real changes only.
+  const configKey = JSON.stringify(config);
+  const [syncedKey, setSyncedKey] = useState(configKey);
+  if (syncedKey !== configKey) {
+    setSyncedKey(configKey);
     setFormData({ ...config });
-  }, [config]);
+  }
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();

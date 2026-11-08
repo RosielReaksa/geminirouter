@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Copy, Check, ArrowUpRight, Terminal } from 'lucide-react';
-import { Link } from '../../router';
+import { Link } from '../../RouterLink';
 import { Reveal } from '../marketing/Chrome';
 
 const CopyLine: React.FC<{ text: string }> = ({ text }) => {
@@ -200,7 +200,7 @@ export const DocsPage: React.FC = () => {
                 </code>
                 . It streams the upload and returns the model's answer for the user's own
                 prompt. The website does not need to set a task or target language. Files up
-                to 2 hours are accepted; split very long files for faster responses.
+                to 1 hour are accepted; split longer files into 10–20 minute windows.
               </p>
               <Code
                 title="audio · server-side JavaScript"

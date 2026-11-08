@@ -386,26 +386,52 @@ export function readMediaConfig(): MediaConfig {
   // leaves room for container overhead regardless of the requested bitrate.
   const maxSecondsBySize = Math.floor((14 * 1024 * 1024 * 8) / (audioBitrateKbps * 1000));
   // 10-20 minute windows are the recommended unit for the website. The
-  // endpoint also accepts up to 2 hours for the playground's large-media path;
+  // playground's large-media path accepts up to the 1-hour media ceiling;
   // chunks default to 15 minutes so they fit the 65,535-token output budget.
   const requestedChunkSeconds = envInt('MEDIA_CHUNK_SECONDS', 15 * 60, 60, 3600);
   const chunkSeconds = Math.max(60, Math.min(requestedChunkSeconds, maxSecondsBySize));
 
+  // The whole-request deadline must outlive the longest media the endpoint
+  // accepts, otherwise a valid 1-hour upload is killed mid-way by the timer.
+  // Default to 30 minutes of processing headroom on top of the media duration.
+  const maxDurationSeconds = envInt('MEDIA_MAX_DURATION_SECONDS', 60 * 60, 60, 60 * 60);
+  const totalTimeoutMs = envInt(
+    'MEDIA_TOTAL_TIMEOUT_MS',
+    maxDurationSeconds * 1000 + 30 * 60 * 1000,
+    0,
+    4 * 60 * 60 * 1000,
+  );
+
   return {
     maxUploadBytes: envInt('MEDIA_MAX_UPLOAD_BYTES', 2 * 1024 * 1024 * 1024, 1024 * 1024, 8 * 1024 * 1024 * 1024),
-    maxDurationSeconds: envInt('MEDIA_MAX_DURATION_SECONDS', 5 * 60 * 60, 60, 5 * 60 * 60),
+    maxDurationSeconds,
+    totalTimeoutMs,
     chunkSeconds,
     audioBitrate: `${audioBitrateKbps}k`,
     audioBitrateKbps,
     jsonBodyLimitBytes: envInt('MEDIA_JSON_BODY_LIMIT_BYTES', 96 * 1024 * 1024, 1024 * 1024, 512 * 1024 * 1024),
     chunkTimeoutMs: envInt('MEDIA_CHUNK_TIMEOUT_MS', 15 * 60 * 1000, 30_000, 60 * 60 * 1000),
     transcodeTimeoutMs: envInt('MEDIA_TRANSCODE_TIMEOUT_MS', 30 * 60 * 1000, 30_000, 2 * 60 * 60 * 1000),
-    totalTimeoutMs: envInt('MEDIA_TOTAL_TIMEOUT_MS', 2 * 60 * 60 * 1000, 0, 4 * 60 * 60 * 1000),
     maxRetries: envInt('MEDIA_MAX_RETRIES', 2, 0, 5),
     ffmpegPath: process.env.FFMPEG_PATH || 'ffmpeg',
     ffprobePath: process.env.FFPROBE_PATH || 'ffprobe',
     keepArtifacts: process.env.MEDIA_KEEP_ARTIFACTS === '1',
   };
+}
+
+/**
+ * A total deadline shorter than the accepted media duration makes the endpoint
+ * advertise a limit it can never honour. Report it once at startup instead of
+ * failing a long upload halfway through.
+ */
+export function describeMediaTimeoutRisk(config: MediaConfig): string | null {
+  if (config.totalTimeoutMs === 0) return null;
+  if (config.totalTimeoutMs >= config.maxDurationSeconds * 1000) return null;
+  return (
+    `MEDIA_TOTAL_TIMEOUT_MS (${Math.round(config.totalTimeoutMs / 1000)}s) is shorter than ` +
+    `MEDIA_MAX_DURATION_SECONDS (${config.maxDurationSeconds}s); uploads near the limit will be ` +
+    `aborted before they finish. Raise MEDIA_TOTAL_TIMEOUT_MS or lower MEDIA_MAX_DURATION_SECONDS.`
+  );
 }
 
 export function isMediaUploadPath(url: string | undefined): boolean {

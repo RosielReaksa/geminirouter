@@ -498,3 +498,19 @@ test('30 concurrent non-streaming requests across 10 accounts: all 200, spread m
   assert.equal(Math.max(...counts) - Math.min(...counts) <= 1, true, `spread must be <= 1, got ${counts.join(',')}`);
   assert.equal(leaseManager.getTotalInFlight(), 0, 'all leases released');
 });
+
+test('GET /api/health answers 200 with no session and no pool detail', async () => {
+  // auth.ts lists /api/health as public for uptime monitors; the route must
+  // exist and must not leak accounts, quota or traffic.
+  const res = await fetch(`http://127.0.0.1:${bridgePort}/api/health`);
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as Record<string, unknown>;
+  assert.equal(body.ok, true);
+  assert.equal(body.service, 'geminirouter-bridge');
+  assert.equal(typeof body.version, 'string');
+  assert.equal(typeof body.uptimeSeconds, 'number');
+  assert.equal(typeof body.timestamp, 'string');
+  for (const forbidden of ['accounts', 'config', 'traffic', 'apiKey', 'gatewayKeys']) {
+    assert.equal(forbidden in body, false, `/api/health must not expose ${forbidden}`);
+  }
+});

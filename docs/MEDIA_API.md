@@ -62,7 +62,7 @@ Set `format` to the actual file format (`mp3`, `wav`, `ogg`, `flac`, `aac`,
 `m4a`, or `aiff`). The core validates audio bytes and rejects unsupported or
 mislabeled input.
 
-## 10–20 minute windows (up to 5 hours for large files)
+## 10–20 minute windows (up to 1 hour for large files)
 
 10–20 minute windows are the recommended unit for the website. The core's
 audio validator caps decoded audio at 15 MiB (roughly 40 minutes at 48 kbps),
@@ -71,11 +71,11 @@ the upload to disk, transcodes it to mono 16 kHz MP3, and sends each 15-minute
 chunk through the same lease/quota/failover path as `/v1/chat/completions`. One
 call returns the transcript and translation for that window.
 
-The playground's large-media path and the API accept up to **5 hours** per
+The playground's large-media path and the API accept up to **1 hour** per
 request; the server splits it into 15-minute chunks automatically. Each chunk
 has a 65,535-token output budget, so 15–20 minute windows fit without
-truncating dialogue. The website can still split at 10–20 minutes for faster
-responses. A request over the 5-hour maximum is rejected with
+truncating dialogue. Longer recordings should be split into 10–20 minute
+windows by the client. A request over the 1-hour maximum is rejected with
 `duration_too_long`.
 
 ### Concurrent jobs and burst handling
@@ -580,7 +580,7 @@ hosted publicly.
   model-request limit. Base64 expands files by about one third. Keep inline
   audio at or below 15 MiB decoded and inline video around 20 MiB or smaller.
 - `/v1/audio/transcriptions` recommends 10–20 minute windows and accepts up
-  to 5 hours (`MEDIA_MAX_DURATION_SECONDS=18000`). Uploads are streamed to disk,
+  to 1 hour (`MEDIA_MAX_DURATION_SECONDS=3600`). Uploads are streamed to disk,
   so the JSON body limit is not the constraint. Chunks stay below the core's
   15 MiB audio limit automatically.
 - Each transcription chunk gets a 65,535-token output budget by default. If a
@@ -589,8 +589,13 @@ hosted publicly.
   silently shortened transcript. Lower `chunk_seconds` or send a smaller
   `max_tokens` only when you also accept shorter output.
 - Large requests can take many minutes. Set the client and reverse-proxy
-  timeouts to at least 30 minutes for short windows and up to 5 hours for the
-  largest files. The shipped configs allow 2 hours for `/v1/audio/*`.
+  timeouts to at least 30 minutes for short windows and up to 2 hours for the
+  largest files. The shipped Caddy and Nginx configs allow 2 hours for
+  `/v1/audio/*` and `/v1/media/*`.
+- The whole-request deadline is `MEDIA_TOTAL_TIMEOUT_MS` (default 1.5 hours:
+  the 1-hour media limit plus 30 minutes of processing headroom). Set it below
+  `MEDIA_MAX_DURATION_SECONDS` and the bridge logs a startup warning, because
+  uploads near the limit would be aborted before they finish.
 - Media routes accept the master gateway key and any named gateway key created
   on the API Gateway page; the key name is shown on Traffic.
 - Bursts are controlled by the media concurrency gate (50 concurrent jobs,

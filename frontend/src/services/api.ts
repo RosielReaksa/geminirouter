@@ -675,7 +675,10 @@ export class ApiClient {
       for (const [name, value] of Object.entries(headers)) {
         xhr.setRequestHeader(name, value);
       }
-      xhr.timeout = 2 * 60 * 60 * 1000;
+      // Match the server's MEDIA_TOTAL_TIMEOUT_MS (1.5 h by default: 1 h of
+      // media plus processing headroom). A shorter browser deadline would abort
+      // an upload the server still considers valid.
+      xhr.timeout = 90 * 60 * 1000;
       xhr.upload.onprogress = (event) => {
         if (!event.lengthComputable) return;
         input.onUploadProgress?.(Math.min(100, Math.round((event.loaded / event.total) * 100)));
@@ -697,7 +700,7 @@ export class ApiClient {
         resolve({ ...data, latencyMs: Date.now() - startedAt });
       };
       xhr.onerror = () => reject(new Error('Could not upload the media.'));
-      xhr.ontimeout = () => reject(new Error('The large media request timed out after 2 hours.'));
+      xhr.ontimeout = () => reject(new Error('The large media request timed out after 90 minutes.'));
       xhr.onabort = () => reject(new Error('The large media request was cancelled.'));
       xhr.send(form);
     });

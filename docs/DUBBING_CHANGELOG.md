@@ -1,5 +1,11 @@
 # Timed Dubbing — Change Record
 
+> **Historical record.** This document describes work completed on 2026-11-03.
+> The current, authoritative contract lives in [MEDIA_API.md](./MEDIA_API.md):
+> `POST /v1/audio/dubbing` returns timed text segments only — TTS, mixing and
+> muxing belong to the dubbing product, not to this gateway. Do not treat the
+> per-round sections below as current behaviour.
+
 **Date:** 2026-11-03
 **Scope:** `geminirouter` gateway (`server/`), public website (`frontend/`), VPS deployment
 **Commits:** `fba3d22` (feature), `d21e3d4` (pitch removal), `3432d1d` (tiered retirement); the completeness/shutdown fix round is recorded in §14
@@ -293,7 +299,10 @@ Backups created under `/opt/geminirouter/.deploy-backups/`:
 
 ### Production media settings
 
-From `/etc/geminirouter/geminirouter.env`:
+Recorded from the 2026-11-03 deploy, and **superseded**: the current media
+ceiling is `MEDIA_MAX_DURATION_SECONDS=3600` (1 h) with
+`MEDIA_TOTAL_TIMEOUT_MS=5400000`. See
+[deploy/.env.example](../deploy/.env.example).
 
 ```
 MEDIA_MAX_UPLOAD_BYTES=2147483648

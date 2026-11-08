@@ -1,6 +1,14 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Link, usePathname } from '../../router';
+import { usePathname } from '../../router';
+import { Link } from '../../RouterLink';
 import { ArrowRight, Menu, X } from 'lucide-react';
+
+/**
+ * Copyright year, resolved once per bundle rather than on every render. Reading
+ * the clock during render is impure and makes the footer's output unstable
+ * between renders; a deploy refreshes the value once a year.
+ */
+const BUILD_YEAR = new Date().getFullYear();
 
 /** Fade/slide an element in when it first scrolls into view. */
 export const Reveal: React.FC<{
@@ -17,16 +25,19 @@ export const Reveal: React.FC<{
     if (!el) return;
 
     // No IntersectionObserver (or a non-browser render): show immediately
-    // rather than leaving content permanently invisible.
+    // rather than leaving content permanently invisible. Deferred to a
+    // microtask so the effect does not set state synchronously, which would
+    // cascade an extra render; a microtask still runs before paint, so no
+    // invisible flash is introduced.
     if (typeof IntersectionObserver === 'undefined') {
-      setShown(true);
+      void Promise.resolve().then(() => setShown(true));
       return;
     }
 
     // Anything already within the viewport (or above it) shows at once.
     const rect = el.getBoundingClientRect();
     if (rect.top < window.innerHeight * 0.92) {
-      setShown(true);
+      void Promise.resolve().then(() => setShown(true));
       return;
     }
 
@@ -97,6 +108,13 @@ export const Wordmark: React.FC<{ dark?: boolean; small?: boolean }> = ({ dark, 
 export const PublicNav: React.FC = () => {
   const pathname = usePathname();
   const [open, setOpen] = useState(false);
+  const [menuPath, setMenuPath] = useState(pathname);
+  // Close the mobile menu whenever navigation changes the path. Adjusting
+  // during render is the documented alternative to a setState effect.
+  if (menuPath !== pathname) {
+    setMenuPath(pathname);
+    setOpen(false);
+  }
   const [scrolled, setScrolled] = useState(false);
 
   useEffect(() => {
@@ -105,10 +123,6 @@ export const PublicNav: React.FC = () => {
     window.addEventListener('scroll', onScroll, { passive: true });
     return () => window.removeEventListener('scroll', onScroll);
   }, []);
-
-  useEffect(() => {
-    setOpen(false);
-  }, [pathname]);
 
   return (
     <header
@@ -289,7 +303,7 @@ export const PublicFooter: React.FC = () => (
           Self-hosted. Your tokens never leave your server.
         </p>
         <p className="text-[12px] text-[#A39C92] font-mono-code">
-          © {new Date().getFullYear()} geminirouter
+          © {BUILD_YEAR} geminirouter
         </p>
       </div>
     </div>
