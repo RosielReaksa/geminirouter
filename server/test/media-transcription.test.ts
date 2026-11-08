@@ -335,7 +335,7 @@ test('media chunks default to 15 minutes with a 2-hour maximum', () => {
   delete process.env.MEDIA_MAX_DURATION_SECONDS;
   try {
     const config = readMediaConfig();
-    assert.equal(config.maxDurationSeconds, 7200);
+    assert.equal(config.maxDurationSeconds, 18000);
     assert.equal(config.chunkSeconds, 900);
   } finally {
     if (oldChunk === undefined) delete process.env.MEDIA_CHUNK_SECONDS;

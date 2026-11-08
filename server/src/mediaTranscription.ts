@@ -125,13 +125,13 @@ interface MediaOptions {
   concurrency: number;
 }
 
-interface AudioProbe {
+export interface AudioProbe {
   durationSeconds: number;
   formatName?: string;
   codec?: string;
 }
 
-interface AudioChunk {
+export interface AudioChunk {
   index: number;
   filePath: string;
   startSeconds: number;
@@ -164,13 +164,13 @@ export interface DubbingSegment {
   khmer_dubbing: string;
 }
 
-interface DubbingSegmentInternal extends DubbingSegment {
+export interface DubbingSegmentInternal extends DubbingSegment {
   /** Absolute seconds on the whole recording, used for sorting and merging. */
   startSeconds: number;
   endSeconds: number;
 }
 
-interface DubbingChunkResult {
+export interface DubbingChunkResult {
   index: number;
   startSeconds: number;
   endSeconds: number;
@@ -188,7 +188,7 @@ interface DubbingChunkResult {
   thoughtCharacters: number;
 }
 
-interface DubbingOptions {
+export interface DubbingOptions {
   model: string;
   prompt?: string;
   sourceLanguage: string;
@@ -391,7 +391,7 @@ export function readMediaConfig(): MediaConfig {
 
   return {
     maxUploadBytes: envInt('MEDIA_MAX_UPLOAD_BYTES', 2 * 1024 * 1024 * 1024, 1024 * 1024, 8 * 1024 * 1024 * 1024),
-    maxDurationSeconds: envInt('MEDIA_MAX_DURATION_SECONDS', 2 * 60 * 60, 60, 4 * 60 * 60),
+    maxDurationSeconds: envInt('MEDIA_MAX_DURATION_SECONDS', 5 * 60 * 60, 60, 5 * 60 * 60),
     chunkSeconds,
     audioBitrate: `${audioBitrateKbps}k`,
     audioBitrateKbps,
@@ -1220,7 +1220,7 @@ export function splitStructuredOutput(text: string): { transcript?: string; tran
   return {};
 }
 
-async function probeAudio(filePath: string, config: MediaConfig, signal: AbortSignal): Promise<AudioProbe> {
+export async function probeAudio(filePath: string, config: MediaConfig, signal: AbortSignal): Promise<AudioProbe> {
   const output = await runCapture(
     config.ffprobePath,
     [
@@ -1265,7 +1265,7 @@ async function probeAudio(filePath: string, config: MediaConfig, signal: AbortSi
   };
 }
 
-async function splitAudio(
+export async function splitAudio(
   sourcePath: string,
   tempDir: string,
   durationSeconds: number,
@@ -2626,7 +2626,7 @@ async function handleAudioDubbing(
   }
 }
 
-async function dubChunks(
+export async function dubChunks(
   chunks: AudioChunk[],
   options: DubbingOptions,
   config: MediaConfig,
@@ -3066,7 +3066,7 @@ async function dubChunkWithRetry(
   throw lastError ?? new MediaError(502, 'chunk_failed', 'The model request failed.');
 }
 
-function buildDubbingResponse(input: {
+export function buildDubbingResponse(input: {
   options: DubbingOptions;
   chunks: AudioChunk[];
   results: DubbingChunkResult[];

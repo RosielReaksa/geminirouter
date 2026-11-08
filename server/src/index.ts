@@ -45,6 +45,14 @@ import {
   takeMediaUpload,
 } from './mediaTranscription.js';
 import { getSharedMediaGate, readMediaGateOptions } from './mediaGate.js';
+import {
+  createDubbingJob,
+  deleteDubbingJob,
+  dubbingWorkerCount,
+  getDubbingJob,
+  listDubbingJobs,
+  startDubbingWorkers,
+} from './dubbingJob.js';
 
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
@@ -985,7 +993,7 @@ export async function createServer(): Promise<{
   // chunks. Each chunk is sent back through the normal /v1 proxy so leases,
   // quota checks and account failover still apply. Deployments must route
   // /v1/audio/* to the bridge (port 3000) rather than the core (port 8045).
-  registerMediaRoutes(app, {
+  const mediaRouteDeps = {
     config: mediaConfig,
     getApiKeys: gatewayApiKeys,
     getGatewayApiKeys: gatewayApiKeys,
@@ -1001,7 +1009,9 @@ export async function createServer(): Promise<{
         await loadCoreAccounts();
       }
     },
-  });
+  };
+  registerMediaRoutes(app, mediaRouteDeps);
+  startDubbingWorkers(mediaRouteDeps, dubbingWorkerCount());
 
   // The core leaves request_logs at outcome=in_progress when the calling
   // client disconnects mid-request. Those rows never receive a finish event,
@@ -1271,6 +1281,112 @@ export async function createServer(): Promise<{
     ...getSharedMediaGate().stats(),
     queueTimeoutMs: readMediaGateOptions().timeoutMs,
   }));
+
+  // Async finished-video dubbing jobs. The dubbing website sends a media URL;
+  // the bridge queues the job, synthesizes per-speaker TTS, mixes stems, muxes
+  // the video and writes SRT/VTT.
+  app.post<{
+    Body?: {
+      media_url?: string;
+      music_url?: string;
+      sfx_url?: string;
+      glossary?: string;
+      speakers?: string | Record<string, string>;
+      webhook?: string;
+      target_language?: string;
+      source_language?: string;
+      model?: string;
+      chunk_seconds?: number;
+      concurrency?: number;
+      response_format?: 'json' | 'array';
+    };
+  }>('/v1/audio/dubbing-job', async (request, reply) => {
+    const body = request.body || {};
+    const allowed = gatewayKeyCandidates().map((entry) => entry.key);
+    const token = extractClientKey(request);
+    if (allowed.length > 0 && (!token || !allowed.some((key) => safeEqual(key, token)))) {
+      return reply.code(401).send({
+        error: { message: 'Invalid API key.', type: 'auth_error', code: 401 },
+      });
+    }
+
+    const mediaUrl = typeof body.media_url === 'string' ? body.media_url.trim() : '';
+    if (!mediaUrl || !/^https?:\/\//i.test(mediaUrl)) {
+      return reply.code(400).send({ error: 'media_url must be a valid http(s) URL.' });
+    }
+    for (const [name, value] of Object.entries({ music_url: body.music_url, sfx_url: body.sfx_url, webhook: body.webhook })) {
+      if (typeof value === 'string' && value.trim() && !/^https?:\/\//i.test(value.trim())) {
+        return reply.code(400).send({ error: `${name} must be a valid http(s) URL.` });
+      }
+    }
+
+    let speakers: string | undefined;
+    if (body.speakers) {
+      try {
+        speakers = typeof body.speakers === 'string' ? JSON.stringify(JSON.parse(body.speakers)) : JSON.stringify(body.speakers);
+      } catch {
+        return reply.code(400).send({ error: 'speakers must be a JSON object mapping role to voice.' });
+      }
+    }
+
+    const job = createDubbingJob({
+      mediaUrl,
+      musicUrl: body.music_url?.trim() || undefined,
+      sfxUrl: body.sfx_url?.trim() || undefined,
+      glossary: typeof body.glossary === 'string' ? body.glossary.trim() || undefined : undefined,
+      speakers,
+      webhookUrl: body.webhook?.trim() || undefined,
+      targetLanguage: body.target_language || 'km',
+      sourceLanguage: body.source_language || 'zh',
+      model: body.model || process.env.MEDIA_DEFAULT_MODEL || 'gemini-3.5-flash-lite',
+      chunkSeconds: Math.min(1800, Math.max(60, Number(body.chunk_seconds) || 300)),
+      concurrency: Math.min(4, Math.max(1, Number(body.concurrency) || 4)),
+      responseFormat: body.response_format === 'array' ? 'array' : 'json',
+      mediaType: /\.(mp4|mov|mkv|webm|m4v)(\?|$)/i.test(mediaUrl) ? 'video' : 'audio',
+    });
+
+    return reply.code(202).send({
+      job_id: job.id,
+      status: job.status,
+      status_url: `/api/media/jobs/${job.id}`,
+    });
+  });
+
+  app.get('/api/media/jobs', async () => listDubbingJobs(50));
+
+  app.get<{ Params: { id: string } }>('/api/media/jobs/:id', async (request, reply) => {
+    const job = getDubbingJob(request.params.id);
+    if (!job) return reply.code(404).send({ error: 'Job not found.' });
+    return job;
+  });
+
+  app.get<{ Params: { id: string }; Querystring: { type?: string } }>(
+    '/api/media/jobs/:id/output',
+    async (request, reply) => {
+      const job = getDubbingJob(request.params.id);
+      if (!job) return reply.code(404).send({ error: 'Job not found.' });
+      const type = request.query.type || 'video';
+      const path = type === 'srt' ? job.srtPath : type === 'vtt' ? job.vttPath : type === 'audio' ? job.outputPath : job.outputPath;
+      if (!path || !fs.existsSync(path)) {
+        return reply.code(404).send({ error: 'Output is not ready.' });
+      }
+      const typeMap: Record<string, string> = {
+        video: 'video/mp4',
+        audio: 'audio/mpeg',
+        srt: 'application/x-subrip',
+        vtt: 'text/vtt',
+      };
+      reply.type(typeMap[type] || 'application/octet-stream');
+      return reply.send(fs.createReadStream(path));
+    },
+  );
+
+  app.delete<{ Params: { id: string } }>('/api/media/jobs/:id', async (request, reply) => {
+    if (!deleteDubbingJob(request.params.id)) {
+      return reply.code(404).send({ error: 'Job not found.' });
+    }
+    return { success: true };
+  });
 
   app.get('/api/status', async () => {
     if (!quotaRefreshedAt || Date.now() - Date.parse(quotaRefreshedAt) > quotaRefreshMs) {
