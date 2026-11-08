@@ -157,6 +157,7 @@ export type DubbingSpeakerGender = 'male' | 'female';
 export interface DubbingSegment {
   start: string;
   end: string;
+  speaker_id: string;
   speaker_gender: DubbingSpeakerGender;
   vocal_timbre: string;
   character_role: string;
@@ -191,6 +192,7 @@ export interface DubbingChunkResult {
 export interface DubbingOptions {
   model: string;
   prompt?: string;
+  glossary?: string;
   sourceLanguage: string;
   targetLanguage: string;
   chunkSeconds: number;
@@ -2121,6 +2123,13 @@ function normalizeSpeakerGender(value: string, khmer: string): DubbingSpeakerGen
   return 'male';
 }
 
+/** Stable speaker id derived from the role so the same character keeps one id across chunks. */
+export function speakerIdFromRole(role: string, gender: DubbingSpeakerGender): string {
+  const normalized = (role || '').trim().toLowerCase().replace(/\s+/g, '_');
+  if (normalized) return normalized;
+  return gender === 'male' ? 'male_speaker' : 'female_speaker';
+}
+
 /**
  * Validate one model segment, clamp its timing to the chunk, and shift it onto
  * the absolute recording timeline. Segments without a Khmer line are dropped.
@@ -2174,6 +2183,7 @@ export function normalizeDubbingSegment(
   return {
     start: formatDubbingTimestamp(startSeconds),
     end: formatDubbingTimestamp(endSeconds),
+    speaker_id: speakerIdFromRole(role, gender),
     speaker_gender: gender,
     vocal_timbre: timbre || (gender === 'female' ? 'female voice' : 'male voice'),
     character_role: role,
@@ -2343,6 +2353,7 @@ async function measureSpeechSeconds(
 
 /** `prompt` overrides the built-in instructions; the output contract is always appended. */
 export function buildDubbingPrompt(options: {  prompt?: string;
+  glossary?: string;
   index: number;
   count: number;
   previousSegments?: Array<{
@@ -2378,6 +2389,10 @@ export function buildDubbingPrompt(options: {  prompt?: string;
     );
   }
 
+  if (options.glossary?.trim()) {
+    parts.push(`Glossary — use these translations/names exactly:\n${options.glossary.trim()}`);
+  }
+
   return parts.join('\n\n');
 }
 
@@ -2391,6 +2406,11 @@ function parseDubbingOptions(fields: Record<string, string>, config: MediaConfig
   const prompt = (fields.prompt || fields.instructions || '').trim();
   if (prompt.length > 50_000) {
     throw new MediaError(400, 'prompt_too_long', 'The prompt must be 50,000 characters or fewer.');
+  }
+
+  const glossary = (fields.glossary || fields.terms || '').trim();
+  if (glossary.length > 20_000) {
+    throw new MediaError(400, 'glossary_too_long', 'The glossary must be 20,000 characters or fewer.');
   }
 
   const sourceLanguage =
@@ -2435,6 +2455,7 @@ function parseDubbingOptions(fields: Record<string, string>, config: MediaConfig
   return {
     model,
     prompt: prompt || undefined,
+    glossary: glossary || undefined,
     sourceLanguage,
     targetLanguage,
     chunkSeconds,
@@ -2647,6 +2668,7 @@ export async function dubChunks(
         options.concurrency === 1 && index > 0 ? results[index - 1]?.segments ?? [] : [];
       const prompt = buildDubbingPrompt({
         prompt: options.prompt,
+        glossary: options.glossary,
         index,
         count: chunks.length,
         previousSegments,
@@ -3078,9 +3100,11 @@ export function buildDubbingResponse(input: {
   const merged = ordered
     .flatMap((result) => result.segments)
     .sort((a, b) => a.startSeconds - b.startSeconds || a.endSeconds - b.endSeconds);
-  const segments: DubbingSegment[] = merged.map(
-    ({ startSeconds, endSeconds, ...segment }) => segment,
-  );
+  const segments = merged.map(({ startSeconds, endSeconds, ...segment }) => ({
+    ...segment,
+    start_seconds: Number(startSeconds.toFixed(3)),
+    end_seconds: Number(endSeconds.toFixed(3)),
+  }));
 
   const usage = ordered.reduce<UsageTotals>(
     (sum, result) => ({

@@ -19,6 +19,7 @@ import {
   DUBBING_COMPLETENESS_RETRY_PROMPT,
   buildChunkPrompt,
   buildDubbingPrompt,
+  buildDubbingResponse,
   defaultDubbingConcurrency,
   dubbingChunkSecondsForModel,
   dubbingCoverageVerdict,
@@ -939,6 +940,60 @@ test('dubbing segments are clamped, defaulted and shifted to absolute time', () 
   );
 });
 
+test('dubbing response exposes stable speaker_id and numeric timings', () => {
+  const segment = normalizeDubbingSegment(
+    {
+      start: '00:01.0',
+      end: '00:04.0',
+      speaker_gender: 'female',
+      vocal_timbre: 'bright',
+      character_role: 'Sister',
+      original_transcript: 'hello',
+      khmer_dubbing: 'sister_line',
+    },
+    { startSeconds: 0, endSeconds: 60 },
+  );
+  assert.ok(segment);
+  assert.equal(segment.speaker_id, 'sister');
+
+  const response = buildDubbingResponse({
+    options: {
+      model: 'gemini-3.5-flash-lite',
+      sourceLanguage: 'zh',
+      targetLanguage: 'km',
+      chunkSeconds: 60,
+      temperature: 0,
+      concurrency: 1,
+      concurrencyExplicit: true,
+      responseFormat: 'json',
+    } as any,
+    chunks: [
+      { index: 0, filePath: 'x', startSeconds: 0, endSeconds: 60, durationSeconds: 60, sizeBytes: 1 },
+    ] as any,
+    results: [
+      {
+        index: 0,
+        startSeconds: 0,
+        endSeconds: 60,
+        segments: [segment],
+        droppedSegments: 0,
+        content: '',
+        model: 'gemini-3.5-flash-lite',
+        maxOutputTokens: 1,
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        coveredSeconds: 3,
+      },
+    ] as any,
+    durationSeconds: 60,
+    timings: { transcodeMs: 0, modelMs: 0, totalMs: 0 },
+  });
+
+  const output = response.segments[0];
+  assert.equal(output.speaker_id, 'sister');
+  assert.equal(output.start_seconds, 1);
+  assert.equal(output.end_seconds, 4);
+});
+
 test('dubbing prompt keeps the caller prompt, contract and chunk context', () => {
   const prompt = buildDubbingPrompt({
     prompt: 'Custom dubbing rules.',
@@ -1015,10 +1070,13 @@ test(
       [
         'character_role',
         'end',
+        'end_seconds',
         'khmer_dubbing',
         'original_transcript',
         'speaker_gender',
+        'speaker_id',
         'start',
+        'start_seconds',
         'vocal_timbre',
       ].sort(),
     );
