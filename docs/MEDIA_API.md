@@ -78,6 +78,39 @@ truncating dialogue. The website can still split at 10–20 minutes for faster
 responses. A request over the 2-hour maximum is rejected with
 `duration_too_long`.
 
+### Concurrent jobs and burst handling
+
+Media requests are admitted through a concurrency gate so a burst of uploads
+cannot flood the model pool:
+
+- **50 jobs** run at the same time.
+- Up to **500 jobs** wait in FIFO order.
+- A queued job waits up to **10 minutes**.
+- If the queue is full, the API returns `503` with `Retry-After` and
+  `error.code = "media_queue_full"` instead of a burst of 429s.
+- Every response includes `x-media-queue-wait-ms` so the client can see how
+  long the job waited.
+
+Tune it with:
+
+```bash
+MEDIA_MAX_CONCURRENT_JOBS=50   # simultaneous media jobs
+MEDIA_QUEUE_LIMIT=500          # maximum queued jobs
+MEDIA_QUEUE_TIMEOUT_MS=600000  # 10 minutes
+```
+
+Check the live gate from the dashboard host:
+
+```sh
+curl -H "Authorization: Bearer $GEMINIROUTER_API_KEY" \
+  "$GEMINIROUTER_URL/api/media/queue"
+# { "active": 0, "queued": 0, "limit": 50, "queueLimit": 500, "queueTimeoutMs": 600000 }
+```
+
+The gate is in-memory. If the bridge restarts, queued (not yet started) jobs are
+lost; completed results are unaffected. Clients should retry a `503` after the
+`Retry-After` delay.
+
 ### Prompt-first requests
 
 Put the user's own instruction in `prompt`. The endpoint sends that prompt with
@@ -544,6 +577,10 @@ hosted publicly.
 - Large requests can take many minutes. Set the client and reverse-proxy
   timeouts to at least 30 minutes for short windows and up to 2 hours for the
   largest files. The shipped configs allow 2 hours for `/v1/audio/*`.
+- Media routes accept the master gateway key and any named gateway key created
+  on the API Gateway page; the key name is shown on Traffic.
+- Bursts are controlled by the media concurrency gate (50 concurrent jobs,
+  500 queued, 10-minute wait). See **Concurrent jobs and burst handling**.
 - Model availability does not guarantee audio/video capability. Choose a model
   from `GET /v1/models` and test it with the actual media type before making it
   selectable in the dubbing app. The current model list does not advertise
