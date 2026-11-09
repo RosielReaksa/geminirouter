@@ -154,6 +154,31 @@ test('a rate-limited key fails over to the next key', async () => {
   assert.equal(calls[0].model, 'gemini-3.1-flash-lite');
 });
 
+test('inline video is never sent to the OpenAI-compatible key pool', async () => {
+  // The key pool speaks /v1beta/openai/chat/completions, which rejects a
+  // video_url part with "Invalid content part type". Balanced routing used to
+  // send video there on every other turn, so identical video requests failed
+  // about half the time. Video must go to the account pool instead.
+  calls.length = 0;
+  const res = await chat({
+    model: 'gemini-3.5-flash-lite',
+    messages: [
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'Describe this clip.' },
+          { type: 'video_url', video_url: { url: 'data:video/mp4;base64,AAAA' } },
+        ],
+      },
+    ],
+  });
+
+  // No keys are reachable in the account pool here, so the exact status is not
+  // the point: the point is that Google's key pool was never called.
+  assert.equal(calls.length, 0, 'inline video must bypass the key pool entirely');
+  assert.notEqual(res.status, 400);
+});
+
 test('an invalid gateway key is rejected before touching Google', async () => {
   calls.length = 0;
   const res = await chat(

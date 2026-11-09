@@ -64,6 +64,35 @@ function upstreamErrorBody(data: any): any {
   return Array.isArray(data) ? data[0] : data;
 }
 
+/**
+ * True when the chat body carries inline video.
+ *
+ * The Gemini API key pool calls Google's OpenAI-compatible endpoint
+ * (`/v1beta/openai/chat/completions`), which does not accept a `video_url`
+ * content part and answers
+ *   400 INVALID_ARGUMENT: Invalid content part type: video_url
+ * The OAuth account pool accepts the same body through the native API.
+ *
+ * Balanced routing alternated between the two backends, so an identical video
+ * request returned 200 on account turns and 400 on key turns - roughly half of
+ * all video calls failed at random. Detecting video here and declining the
+ * request sends it to the account pool, which can serve it.
+ */
+function hasInlineVideo(body: any): boolean {
+  const messages = body?.messages;
+  if (!Array.isArray(messages)) return false;
+  for (const message of messages) {
+    const content = message?.content;
+    if (!Array.isArray(content)) continue;
+    for (const part of content) {
+      const type = typeof part?.type === 'string' ? part.type : '';
+      if (type === 'video_url' || type === 'input_video' || type === 'video') return true;
+      if (part?.video_url || part?.inline_data?.mime_type?.startsWith?.('video/')) return true;
+    }
+  }
+  return false;
+}
+
 function retryAfterMs(headers: Record<string, any>, data: any): number {
   const headerValue = headers?.['retry-after'];
   const parsedHeader = Number.parseInt(String(headerValue ?? ''), 10);
@@ -118,6 +147,11 @@ export async function handleGeminiApiRequest(
 
   const requestedModel = canonicalModelId(body.model);
   if (!(GEMINI_API_MODELS as readonly string[]).includes(requestedModel)) return false;
+
+  // The key pool speaks Google's OpenAI-compatible protocol, which rejects
+  // inline video. Hand video to the account pool instead of failing half the
+  // calls on a coin flip of routing.
+  if (hasInlineVideo(body)) return false;
 
   // The two shared models can also be served by the OAuth account pool. Balanced
   // routing returns null here for account turns; the requested model is always
@@ -328,6 +362,25 @@ export async function handleGeminiApiRequest(
       }
 
       // A request-shaped error (400/404/…) will not be fixed by another key.
+      // The exception is a media capability rejection: Google's OpenAI-compatible
+      // endpoint says the content type is invalid, which tells us about this
+      // egress path, not about the request. Try the remaining keys before
+      // giving up, then let the caller see the real reason.
+      const capabilityRejected =
+        status === 400 &&
+        /invalid content part type|invalid content type|unsupported content type|not supported/i.test(
+          String(
+            upstreamErrorBody(response.data)?.error?.message ||
+              upstreamErrorBody(response.data)?.message ||
+              '',
+          ),
+        );
+      if (capabilityRejected) {
+        options.pool.settle(lease, { cooldownMs: 60_000, reason: 'error' });
+        lastError = upstreamErrorBody(response.data);
+        continue;
+      }
+
       options.pool.settle(lease, { actualTokens: 0 });
       record(lease, status, startedAt, 0, 0, 0);
       releaseAbort();
