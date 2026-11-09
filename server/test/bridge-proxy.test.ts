@@ -1,8 +1,8 @@
-/**
+﻿/**
  * Integration tests for the bridge's /v1 proxy contract with the core's
  * account-failover behavior. A fake HTTP upstream stands in for the core
  * gateway (account rotation itself is core-owned and not testable from the
- * bridge — see docs/ACCOUNT-FAILOVER.md). What IS testable here:
+ * bridge â€” see docs/ACCOUNT-FAILOVER.md). What IS testable here:
  *
  *  1. A 429 (all accounts exhausted) passes through unchanged with its
  *     Retry-After header, is never converted into a fake success, and the
@@ -27,7 +27,7 @@ const UPSTREAM_PORT = 3891;
 const BRIDGE_PORT = 3892;
 
 let upstreamHits = 0;
-let upstreamMode = 'exhausted'; // 'exhausted' | 'ok' | 'stream-break'
+let upstreamMode = 'exhausted'; // 'exhausted' | 'ok' | 'stream-break' | 'capability-reject' | 'bad-request'
 let upstreamRequestBody = Buffer.alloc(0);
 let upstreamClosed = false;
 
@@ -53,6 +53,33 @@ const upstream = http.createServer((req, res) => {
         JSON.stringify({
           id: 'cmpl-1',
           choices: [{ message: { role: 'assistant', content: 'pong from account B' } }],
+        }),
+      );
+      return;
+    }
+    // capability-reject: what an upstream account that cannot handle inline
+    // video returns. The request is valid; only this account is unsuitable.
+    if (upstreamMode === 'capability-reject') {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify([
+          {
+            error: {
+              code: 400,
+              message: 'Invalid content part type: video_url',
+              status: 'INVALID_ARGUMENT',
+            },
+          },
+        ]),
+      );
+      return;
+    }
+    // bad-request: a genuine client error that must NOT be retried.
+    if (upstreamMode === 'bad-request') {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          error: { code: 400, message: 'model is required', status: 'INVALID_ARGUMENT' },
         }),
       );
       return;
@@ -95,7 +122,22 @@ before(async () => {
           email: 'test1@example.com',
           name: 'Test 1',
           status: 'active',
-          quotas: [{ modelId: 'gemini-2.5-pro', limitIn5h: 50, requestsIn5h: 0, resetTime5h: 'in 4h' }],
+          quotas: [
+            { modelId: 'gemini-2.5-pro', limitIn5h: 50, requestsIn5h: 0, resetTime5h: 'in 4h' },
+            { modelId: 'gemini-3.5-flash-lite', limitIn5h: 50, requestsIn5h: 0, resetTime5h: 'in 4h' },
+          ],
+        },
+        // A second account is required to exercise failover: a pool of one
+        // cannot prove that a rejected account is retried elsewhere.
+        {
+          id: 'test-acc-2',
+          email: 'test2@example.com',
+          name: 'Test 2',
+          status: 'active',
+          quotas: [
+            { modelId: 'gemini-2.5-pro', limitIn5h: 50, requestsIn5h: 0, resetTime5h: 'in 4h' },
+            { modelId: 'gemini-3.5-flash-lite', limitIn5h: 50, requestsIn5h: 0, resetTime5h: 'in 4h' },
+          ],
         },
       ],
     })
@@ -177,6 +219,57 @@ test('successful (failed-over) response passes through', async () => {
   const body = await res.json();
   assert.equal(body.choices[0].message.content, 'pong from account B');
   assert.equal(upstreamHits, 1);
+});
+
+test('a video capability rejection fails over instead of reaching the client', async () => {
+  // The core answered "Invalid content part type: video_url" for the identical
+  // body about half the time, because only some upstream accounts accept inline
+  // video. Survivors must be retried on another account, not surfaced as 400.
+  upstreamMode = 'capability-reject';
+  upstreamHits = 0;
+
+  const res = await request(BRIDGE_PORT, '/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: 'gemini-3.5-flash-lite',
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'Review this video.' },
+            { type: 'video_url', video_url: { url: 'data:video/mp4;base64,AAAA' } },
+          ],
+        },
+      ],
+    }),
+  });
+
+  // The fake upstream always rejects, so the client still sees a 400 once the
+  // pool is spent. The point is that the bridge RETRIED instead of passing the
+  // first rejection straight through.
+  assert.ok(upstreamHits > 1, `must retry on other accounts, got ${upstreamHits} hit(s)`);
+  const body = await res.json();
+  assert.match(JSON.stringify(body), /Invalid content part type|video_url/);
+  assert.equal(res.status, 400, 'a capability rejection must not be reported as a rate limit');
+});
+
+test('a genuine 400 is returned immediately and never retried', async () => {
+  // A malformed request must not be retried across the pool: that would waste
+  // every account and turn one clear error into a slow failure.
+  upstreamMode = 'bad-request';
+  upstreamHits = 0;
+
+  const res = await request(BRIDGE_PORT, '/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }] }),
+  });
+
+  assert.equal(res.status, 400);
+  assert.equal(upstreamHits, 1, 'a real client error must be answered, not retried');
+  const body = await res.json();
+  assert.match(JSON.stringify(body), /model is required/);
 });
 
 test('multimodal JSON larger than 10 MiB reaches the core unchanged', async () => {
@@ -337,3 +430,4 @@ test('core unreachable: /v1 returns 502, never an empty 200', async () => {
   assert.equal(body.error.type, 'gateway_error');
   assert.ok(body.error.message.length > 0);
 });
+
