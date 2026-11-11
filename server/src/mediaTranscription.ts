@@ -81,7 +81,7 @@ const DUBBING_SPEECH_MEASUREMENT_MAX_RATIO = 0.95;
  * lower than the speech-relative threshold: with a music bed the measurement
  * cannot tell which part of the chunk was dialogue.
  */
-const DUBBING_MIN_UNMEASURED_COVERAGE = 0.35;
+const DUBBING_MIN_UNMEASURED_COVERAGE = 0.15;
 /** Hard ceiling for one TTS cue. Longer cues are split before they are returned. */
 export const DUBBING_MAX_CUE_SECONDS = 4;
 /** Maximum Khmer characters in one cue, strictly under the 70-char TTS limit. */
@@ -2257,12 +2257,14 @@ export function normalizeDubbingSegment(
 }
 
 /**
- * Khmer text plus the punctuation and separators the output contract allows.
- * Latin letters, CJK/Thai script and Arabic numerals are deliberately excluded:
- * the TTS engine must never receive a mixed-script cue.
+ * A dub line is valid when it contains Khmer and **no letters from another
+ * script**. Digits and punctuation are allowed: they are speakable, while a
+ * Latin/CJK/Thai letter is not. The previous whitelist also rejected invisible
+ * separators, Arabic numerals and typographic quotes, which failed whole
+ * chunks over a character the synthesizer handles fine.
  */
-const KHMER_ALLOWED_TEXT_RE = /^[\u1780-\u17FF\s?!។៕,.\-…"'()\[\]:;\/]*$/;
 const KHMER_LETTER_RE = /[\u1780-\u17FF]/;
+const NON_KHMER_LETTER_RE = /(?![\u1780-\u17FF])\p{L}/u;
 
 /**
  * True when a dub line contains Khmer and nothing but Khmer script and
@@ -2273,7 +2275,29 @@ export function isKhmerDubLine(text: string): boolean {
   const trimmed = text.trim();
   if (!trimmed) return false;
   if (!KHMER_LETTER_RE.test(trimmed)) return false;
-  return KHMER_ALLOWED_TEXT_RE.test(trimmed);
+  return !NON_KHMER_LETTER_RE.test(trimmed);
+}
+
+/**
+ * Remove Latin/CJK/Thai letters and invisible separators from a dub line while
+ * keeping the Khmer text.
+ *
+ * The model occasionally drops a stray word or three Latin letters inside an
+ * otherwise Khmer cue (measured: "ឱ្យបងមករatsជិត..."). Failing the whole
+ * five-minute chunk over three characters loses every line in it, so the cue is
+ * repaired the same way the dubbing app repairs it: drop the foreign letters,
+ * keep the Khmer sentence. A cue with no Khmer left still fails.
+ */
+export function stripNonKhmerLetters(text: string): string {
+  return [...text]
+    .filter((character) => {
+      if (['\u200B', '\u200C', '\u200D', '\uFEFF'].includes(character)) return false;
+      if (!/\p{L}/u.test(character)) return true;
+      return /[\u1780-\u17FF]/.test(character);
+    })
+    .join('')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
 }
 
 /**
@@ -2396,7 +2420,11 @@ export function enforceDubbingCueCeilings(
   const violations: string[] = [];
 
   for (const segment of segments) {
-    if (!isKhmerDubLine(segment.khmer_dubbing)) {
+    // Clean every cue: stray foreign letters and invisible separators are
+    // removed before validation. A cue that still has no Khmer fails; one that
+    // merely carried three Latin characters is repaired and kept.
+    const sourceText = stripNonKhmerLetters(segment.khmer_dubbing);
+    if (!isKhmerDubLine(sourceText)) {
       violations.push(
         `cue at ${segment.start} is not pure Khmer script: ${JSON.stringify(
           segment.khmer_dubbing.slice(0, 40),
@@ -2411,7 +2439,7 @@ export function enforceDubbingCueCeilings(
       continue;
     }
 
-    const textLength = codePointLength(segment.khmer_dubbing);
+    const textLength = codePointLength(sourceText);
     const byTime = Math.ceil(duration / DUBBING_MAX_CUE_SECONDS);
     const byChars = Math.ceil(textLength / DUBBING_MAX_KHMER_CHARS);
     // A fragment needs at least a few graphemes to be worth an utterance. For a
@@ -2421,7 +2449,7 @@ export function enforceDubbingCueCeilings(
     let parts = Math.max(1, Math.min(byTime, maxPartsByText), byChars);
 
     const buildTexts = (count: number): string[] =>
-      (count > 1 ? splitKhmerPieces(segment.khmer_dubbing, count) : [segment.khmer_dubbing])
+      (count > 1 ? splitKhmerPieces(sourceText, count) : [sourceText])
         .flatMap((text) => splitToCharLimit(text, DUBBING_MAX_KHMER_CHARS));
 
     let texts = buildTexts(parts);

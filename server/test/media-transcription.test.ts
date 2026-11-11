@@ -985,7 +985,7 @@ test('a dub line is rejected unless it is pure Khmer script', () => {
     false,
     'untranslated Chinese source text must not be dubbed',
   );
-  assert.equal(isKhmerDubLine('បីថ្ងៃ 3'), false, 'numbers must be spelled out in Khmer');
+  assert.equal(isKhmerDubLine('បីថ្ងៃ 3'), true, 'digits are speakable; only foreign letters are rejected');
 });
 
 test('cues over the TTS ceiling are split without moving the timeline', () => {
@@ -1067,6 +1067,45 @@ test('a cue over the character ceiling is split instead of rejected', () => {
   const durationResult = enforceDubbingCueCeilings([unsplittable]);
   assert.equal(durationResult.violations.length, 1);
   assert.match(durationResult.violations[0], /long/);
+});
+
+test('a cue with a stray Latin word is repaired, not failed', () => {
+  const mixed = normalizeDubbingSegment(
+    {
+      start: '00:00.0',
+      end: '00:02.0',
+      khmer_dubbing: 'បងសាស៊ូអើយ ឱ្យបងមករatsជិតម៉េចបាន?',
+    },
+    { startSeconds: 0, endSeconds: 2 },
+  );
+  assert.ok(mixed);
+  const { segments, violations } = enforceDubbingCueCeilings([mixed]);
+  assert.deepEqual(violations, [], 'three Latin letters must not fail the chunk');
+  assert.equal(segments.length, 1);
+  assert.equal(/[A-Za-z]/.test(segments[0].khmer_dubbing), false);
+  assert.match(segments[0].khmer_dubbing, /បងសាស៊ូអើយ/);
+});
+
+test('a Khmer cue may contain digits and typographic punctuation', () => {
+  const segment = normalizeDubbingSegment(
+    { start: '00:00.0', end: '00:02.0', khmer_dubbing: 'រង់ចាំ 3 ឆ្នាំ “បង”។' },
+    { startSeconds: 0, endSeconds: 2 },
+  );
+  assert.ok(segment);
+  const { segments, violations } = enforceDubbingCueCeilings([segment]);
+  assert.deepEqual(violations, [], 'digits and quotes are speakable');
+  assert.equal(segments.length, 1);
+});
+
+test('invisible separators are removed from a Khmer cue', () => {
+  const segment = normalizeDubbingSegment(
+    { start: '00:00.0', end: '00:01.0', khmer_dubbing: 'ចាស​ ស៊ីវយ៉ាន។' },
+    { startSeconds: 0, endSeconds: 1 },
+  );
+  assert.ok(segment);
+  const { segments, violations } = enforceDubbingCueCeilings([segment]);
+  assert.deepEqual(violations, []);
+  assert.equal(segments[0].khmer_dubbing.includes('​'), false);
 });
 
 test('split timing follows text length, not equal steps', () => {
