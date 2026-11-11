@@ -57,6 +57,11 @@ function extractBearer(request: FastifyRequest): string | undefined {
   }
   const apiKey = request.headers['x-api-key'];
   if (typeof apiKey === 'string' && apiKey.trim()) return apiKey.trim();
+  // Gemini-native clients (the dubbing pipeline) authenticate with
+  // x-goog-api-key, not Bearer. Without this the key pool would reject every
+  // native request as unauthenticated.
+  const googKey = request.headers['x-goog-api-key'];
+  if (typeof googKey === 'string' && googKey.trim()) return googKey.trim();
   return undefined;
 }
 
@@ -398,6 +403,274 @@ export async function handleGeminiApiRequest(
             'All Gemini API keys are at their rate limit or unavailable. Try again shortly.',
           429,
           'rate_limit_error',
+        ),
+      );
+    return true;
+  } finally {
+    releaseAbort();
+  }
+}
+
+/** `/v1beta/models/<model>:generateContent` — the Gemini-native path the
+ *  dubbing pipeline uses. */
+const NATIVE_GENERATE_RE = /^\/v1beta\/models\/([^/:?]+):generateContent$/;
+
+function googleErrorBody(message: string, code: number, status: string) {
+  return { error: { code, message, status } };
+}
+
+/**
+ * Rough prompt-token estimate for a native Gemini body, used only for key
+ * admission control. Audio is charged at ~32 tokens per second (16 kHz mono PCM
+ * is ~32 kB/s, i.e. one token per kilobyte of decoded media).
+ */
+export function estimateNativeGeminiTokens(body: any): number {
+  let characters = 0;
+  let mediaBytes = 0;
+  for (const content of Array.isArray(body?.contents) ? body.contents : []) {
+    for (const part of Array.isArray(content?.parts) ? content.parts : []) {
+      if (typeof part?.text === 'string') characters += part.text.length;
+      const inline = part?.inline_data || part?.inlineData;
+      const data = inline?.data;
+      if (typeof data === 'string') mediaBytes += Math.floor((data.length * 3) / 4);
+      if (part?.file_data || part?.fileData) mediaBytes += 2 * 1024 * 1024;
+    }
+  }
+  const maxOut = Number(body?.generationConfig?.maxOutputTokens) || 8192;
+  return Math.max(
+    1,
+    Math.ceil(characters / 4 + mediaBytes / 1000) +
+      Math.min(Math.max(maxOut, 1), 65_536),
+  );
+}
+
+function nativeUsage(body: any) {
+  const usage = body?.usageMetadata || {};
+  const promptTokens = Number(usage.promptTokenCount) || 0;
+  const completionTokens = Number(usage.candidatesTokenCount) || 0;
+  const totalTokens = Number(usage.totalTokenCount) || promptTokens + completionTokens;
+  return { promptTokens, completionTokens, totalTokens };
+}
+
+/**
+ * Serve `/v1beta/models/<flash-lite>:generateContent` from the AI Studio key
+ * pool when routing selects keys.
+ *
+ * Before this, only `/v1/chat/completions` could reach the key pool: the native
+ * path always fell through to the OAuth account pool. The dubbing pipeline uses
+ * the native path, so the keys bought for it were never used and every
+ * transcription consumed account quota instead.
+ *
+ * The body is forwarded unchanged (contents, generationConfig, responseSchema,
+ * inline audio), so the response is equivalent to a direct AI Studio call.
+ */
+export async function handleGeminiApiNativeRequest(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  options: GeminiApiProxyOptions,
+): Promise<boolean> {
+  if (request.method !== 'POST') return false;
+  const path = (request.raw.url || request.url || '').split('?')[0];
+  const match = NATIVE_GENERATE_RE.exec(path);
+  if (!match) return false;
+  if (!options.pool.hasEnabledKeys()) return false;
+
+  let requestedModel = match[1];
+  try {
+    requestedModel = decodeURIComponent(match[1]);
+  } catch {
+    /* keep the raw id */
+  }
+  requestedModel = canonicalModelId(requestedModel);
+  if (!(GEMINI_API_MODELS as readonly string[]).includes(requestedModel)) return false;
+
+  // Balanced routing: null means this turn belongs to the account pool.
+  const servedModel = options.chooseKeyModel
+    ? options.chooseKeyModel(requestedModel)
+    : requestedModel;
+  if (!servedModel) return false;
+
+  const configuredKeys = options.getApiKeys().map((key) => key.trim()).filter(Boolean);
+  if (configuredKeys.length > 0) {
+    const clientKey = extractBearer(request);
+    if (!clientKey || !configuredKeys.some((key) => safeEqual(key, clientKey))) {
+      reply
+        .code(401)
+        .send(googleErrorBody('API key validation failed', 401, 'UNAUTHENTICATED'));
+      return true;
+    }
+  }
+
+  const body = parseJsonBody(request);
+  if (!body) return false;
+  const estimatedTokens = estimateNativeGeminiTokens(body);
+  const timeoutMs = Math.max(
+    5_000,
+    Number.parseInt(process.env.GEMINI_API_TIMEOUT_MS || '300000', 10) || 300000,
+  );
+  const url = `${geminiApiBaseUrl()}/v1beta/models/${encodeURIComponent(
+    servedModel,
+  )}:generateContent`;
+  const clientId = clientIdentity(request);
+  const maxAttempts = Math.max(
+    1,
+    options.pool.snapshot().filter((key) => key.enabled).length,
+  );
+
+  const abort = new AbortController();
+  const onAborted = () => abort.abort();
+  request.raw.on('aborted', onAborted);
+  const releaseAbort = () => {
+    try {
+      request.raw.off('aborted', onAborted);
+    } catch {
+      /* best effort */
+    }
+  };
+
+  const record = (
+    lease: GeminiApiLease,
+    status: number,
+    startedAt: number,
+    promptTokens: number,
+    completionTokens: number,
+    totalTokens: number,
+  ) => {
+    options.recordTraffic({
+      id: `tr-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+      timestamp: new Date().toISOString(),
+      clientName: String(request.headers['user-agent'] || 'API Client'),
+      clientIp: request.ip || '127.0.0.1',
+      modelRequested: requestedModel,
+      modelRouted: servedModel,
+      backingAccountEmail: `Gemini API · ${lease.record.label}`,
+      accountId: `gemini-api:${lease.record.id}`,
+      status,
+      latencyMs: Date.now() - startedAt,
+      promptTokens,
+      completionTokens,
+      totalTokens,
+      provider: 'gemini-api',
+      ...(options.gatewayKey
+        ? { gatewayKeyId: options.gatewayKey.id, gatewayKeyName: options.gatewayKey.name }
+        : {}),
+    });
+  };
+
+  let lastError: any = null;
+  try {
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      const lease = await options.pool.acquire(
+        servedModel,
+        estimatedTokens,
+        clientId,
+        abort.signal,
+      );
+      if (!lease) break;
+
+      const startedAt = Date.now();
+      const proxyAgent = options.getProxyAgent?.(lease.record.id) ?? null;
+      const post = (agent: HttpsProxyAgent<string> | null) =>
+        axios.post(url, body, {
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+            'x-goog-api-key': lease.record.key,
+          },
+          validateStatus: () => true,
+          timeout: timeoutMs,
+          ...(agent ? { httpAgent: agent, httpsAgent: agent } : {}),
+          proxy: false,
+        });
+
+      let response: any;
+      try {
+        response = await post(proxyAgent);
+        if (proxyAgent && response.status === 429) {
+          options.onProxyRateLimited?.(lease.record.id);
+          response = await post(null);
+        }
+      } catch (error: any) {
+        if (proxyAgent) {
+          options.onProxyRateLimited?.(lease.record.id);
+          try {
+            response = await post(null);
+          } catch (directError: any) {
+            options.pool.settle(lease, { cooldownMs: 15_000, reason: 'error' });
+            lastError = { message: directError?.message || String(directError) };
+            continue;
+          }
+        } else {
+          options.pool.settle(lease, { cooldownMs: 15_000, reason: 'error' });
+          lastError = { message: error?.message || String(error) };
+          continue;
+        }
+      }
+
+      const status = response.status || 500;
+      if (status === 200) {
+        const usage = nativeUsage(response.data);
+        options.pool.settle(lease, {
+          actualTokens: usage.totalTokens || lease.estimatedTokens,
+        });
+        record(
+          lease,
+          status,
+          startedAt,
+          usage.promptTokens,
+          usage.completionTokens,
+          usage.totalTokens,
+        );
+        releaseAbort();
+        reply.header('x-egress-provider', 'gemini-api');
+        return reply.code(status).send(response.data), true;
+      }
+
+      if (status === 429) {
+        const cooldown = retryAfterMs(response.headers as Record<string, any>, response.data);
+        options.pool.settle(lease, {
+          cooldownMs: cooldown,
+          reason: cooldown >= 5 * 60 * 1000 ? 'daily' : 'rate',
+        });
+        lastError = upstreamErrorBody(response.data);
+        continue;
+      }
+      if (status === 401 || status === 403) {
+        options.pool.settle(lease, {
+          cooldownMs: 5 * 60 * 1000,
+          keyWide: true,
+          reason: 'error',
+        });
+        lastError = upstreamErrorBody(response.data);
+        continue;
+      }
+      if (status >= 500) {
+        options.pool.settle(lease, { cooldownMs: 30_000, reason: 'error' });
+        lastError = upstreamErrorBody(response.data);
+        continue;
+      }
+
+      // Any other 4xx is about the request itself; another key will not fix it.
+      options.pool.settle(lease, { actualTokens: 0 });
+      record(lease, status, startedAt, 0, 0, 0);
+      releaseAbort();
+      return reply.code(status).send(response.data), true;
+    }
+
+    const retryAfterSec = Math.max(
+      1,
+      Math.ceil(options.pool.nextAvailabilityMs(servedModel) / 1000),
+    );
+    reply.header('Retry-After', String(retryAfterSec));
+    reply
+      .code(429)
+      .send(
+        googleErrorBody(
+          lastError?.error?.message ||
+            lastError?.message ||
+            'All Gemini API keys are at their rate limit or unavailable. Try again shortly.',
+          429,
+          'RESOURCE_EXHAUSTED',
         ),
       );
     return true;

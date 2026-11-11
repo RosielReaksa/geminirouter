@@ -472,7 +472,7 @@ script.
 For every chunk the server also runs FFmpeg `silencedetect` to measure audible
 speech, then compares it with the time covered by the returned segments. When
 the answer is empty, a single line for a long conversation, or covers less than
-35% of the audible speech, the chunk is retried once with an explicit
+75% of the audible speech, the chunk is retried once with an explicit
 completeness prompt. If the retry is still incomplete, the request fails instead
 of silently dropping dialogue:
 
@@ -485,6 +485,8 @@ of silently dropping dialogue:
     "details": {
       "chunkIndex": 0,
       "segmentCount": 1,
+      "droppedSegments": 0,
+      "cueViolations": [],
       "coveredSeconds": 0.2,
       "speechSeconds": 3.1,
       "durationSeconds": 3.1,
@@ -495,10 +497,43 @@ of silently dropping dialogue:
 }
 ```
 
+A failed speech measurement is retried before it is given up, because coverage
+validation is skipped entirely for a chunk that has no measurement. If both
+attempts fail, the chunk is logged and accepted without coverage validation.
+
 `empty_model_response` is used when the model returned no answer at all.
 Silent or unmeasurable chunks are accepted with an empty segment list; the
 `coverage` block reports `speech_seconds: null` when FFmpeg could not measure
 the chunk.
+
+### Per-cue limits for TTS
+
+Every cue is repaired or rejected before the response is built, so the
+synthesizer never receives an unusable line:
+
+| Limit | Value | Behaviour |
+|---|---|---|
+| Cue duration | 4.0 s | Longer cues are split into equal pieces along the original window. |
+| Khmer text length | 70 characters | A fragment over the limit fails the chunk. |
+| Script | Khmer only | Latin, CJK, Thai and Arabic numerals fail the chunk. |
+
+Cue length is measured on `khmer_dubbing` only; `original_transcript` keeps the
+verbatim source line. Splitting preserves the parent window: the fragments of a
+10-second cue start and end on the same absolute timestamps as the cue they came
+from, and the speaker stays the same across all fragments.
+
+Two further conditions fail the chunk instead of returning a partial script:
+
+- **`dropped_segments`** — the model returned a cue with no `khmer_dubbing` line,
+  or with timing that could not be repaired. That line would be missing from the
+  finished dub, so the request fails rather than returning a script with holes.
+- **`cue_violations`** — a cue breaks a limit in the table above and cannot be
+  split automatically.
+
+Both use one strict retry first. The retry appends
+`DUBBING_CUE_RETRY_PROMPT`, which restates the cue rules, instead of the
+completeness prompt. Either error is reported with `code: "partial_script"`,
+plus `details.droppedSegments` and `details.cueViolations`.
 
 Completeness is checked per chunk. `gemini-3.5-flash-lite` used to stop early on
 a 300 s window (20 segments covering 43 s of 170 s of dialogue), and on a 120 s

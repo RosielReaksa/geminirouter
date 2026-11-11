@@ -22,7 +22,7 @@ import { readCoreProxyConfig, applyCoreProxyConfig } from './coreConfig.js';
 import { ConcurrencyLeaseManager } from './leaseManager.js';
 import { handleV1ProxyRequest } from './v1Proxy.js';
 import { GeminiApiPool, GEMINI_API_MODELS, geminiApiBaseUrl } from './geminiApiPool.js';
-import { handleGeminiApiRequest } from './geminiApiProxy.js';
+import { handleGeminiApiNativeRequest, handleGeminiApiRequest } from './geminiApiProxy.js';
 import {
   canonicalModelId,
   canonicalizeModelEntries,
@@ -186,6 +186,11 @@ export async function createServer(): Promise<{
     }
     const apiKey = request.headers['x-api-key'];
     if (typeof apiKey === 'string' && apiKey.trim()) return apiKey.trim();
+    // Gemini-native clients authenticate with x-goog-api-key. Reading it here
+    // lets the bridge recognise a named gateway key on /v1beta and attribute
+    // traffic, instead of treating every native call as anonymous.
+    const googApiKey = request.headers['x-goog-api-key'];
+    if (typeof googApiKey === 'string' && googApiKey.trim()) return googApiKey.trim();
     return undefined;
   };
 
@@ -555,20 +560,32 @@ export async function createServer(): Promise<{
     // auth check to reject. A matched key is swapped for the core key below so
     // named dashboard keys work without teaching the core about them.
 
-    const handledByApiKeys = await handleGeminiApiRequest(request, reply, {
+    const apiKeyOptions = {
       pool: geminiApiPool,
       getApiKeys: gatewayApiKeys,
-      recordTraffic: (record) => store.addTrafficRecord(record),
-      getProxyAgent: (keyId) => proxyManager.getApiKeyProxyAgent(keyId),
-      onProxyRateLimited: (keyId) => {
+      recordTraffic: (record: TrafficRecord) => store.addTrafficRecord(record),
+      getProxyAgent: (keyId: string) => proxyManager.getApiKeyProxyAgent(keyId),
+      onProxyRateLimited: (keyId: string) => {
         // Proxy IPs occasionally get throttled by Google; keep the key working
         // direct for 24 hours instead of failing every call.
         proxyManager.markApiKeyProxyRateLimited(keyId);
       },
-      chooseKeyModel: (model) => sharedModelProvider(model),
+      chooseKeyModel: (model: string) => sharedModelProvider(model),
       gatewayKey: auth.identity,
-    });
+    };
+
+    const handledByApiKeys = await handleGeminiApiRequest(request, reply, apiKeyOptions);
     if (handledByApiKeys) return;
+
+    // The dubbing pipeline calls the Gemini-native route, not the
+    // OpenAI-compatible one. Without this branch that traffic could never use
+    // the AI Studio key pool.
+    const handledByNativeKeys = await handleGeminiApiNativeRequest(
+      request,
+      reply,
+      apiKeyOptions,
+    );
+    if (handledByNativeKeys) return;
 
     await handleV1ProxyRequest(request, reply, {
       leaseManager,

@@ -84,6 +84,14 @@ Key calls are forwarded to
 the selected key. Both JSON and SSE streaming are supported, and the response
 carries `x-egress-provider: gemini-api`.
 
+The Gemini-native route `/v1beta/models/<flash-lite>:generateContent` follows the
+same routing decision. For key turns the body is forwarded unchanged to
+`https://generativelanguage.googleapis.com/v1beta/models/<model>:generateContent`
+with the selected key in `x-goog-api-key`, so `contents`, `generationConfig`,
+`responseSchema` and inline audio behave exactly like a direct AI Studio call.
+The dubbing pipeline uses this route; before it was supported, every dubber
+request fell through to the account pool and the API keys were never used.
+
 Account calls take the normal core path, so they appear on the Traffic page with
 the account email and that account's egress proxy. Every other Gemini model always
 uses the connected accounts.

@@ -12,13 +12,18 @@ const KEY_2 = 'AIzaSyTESTKEY0000000000000000000002';
 const GATEWAY_KEY = 'sk-test-gemini-gateway';
 
 let fake: http.Server;
-const calls: Array<{ key: string; model: string; stream: boolean }> = [];
+const calls: Array<{ key: string; model: string; stream: boolean; native?: boolean }> = [];
 // Models the fake Google reports as daily-quota exhausted.
 const exhaustedModels = new Set<string>();
 
 // The fake Gemini API: key 1 is rate limited, key 2 answers (JSON or SSE).
 fake = http.createServer((req, res) => {
-  if (req.method !== 'POST' || req.url !== '/v1beta/openai/chat/completions') {
+  const requestUrl = req.url || '';
+  const native = /^\/v1beta\/models\/([^/:?]+):generateContent$/.exec(requestUrl);
+  if (
+    req.method !== 'POST' ||
+    (requestUrl !== '/v1beta/openai/chat/completions' && !native)
+  ) {
     res.writeHead(404).end();
     return;
   }
@@ -32,6 +37,39 @@ fake = http.createServer((req, res) => {
     } catch {
       /* ignore */
     }
+
+    // Gemini-native generateContent: the key travels in x-goog-api-key and the
+    // response is a native candidate object, not OpenAI choices.
+    if (native) {
+      const nativeKey = String(req.headers['x-goog-api-key'] || '').trim();
+      calls.push({ key: nativeKey, model: native[1], stream: false, native: true });
+      if (nativeKey.endsWith('0001')) {
+        res.writeHead(429, { 'content-type': 'application/json', 'retry-after': '1' });
+        res.end(
+          JSON.stringify({
+            error: {
+              code: 429,
+              status: 'RESOURCE_EXHAUSTED',
+              message: 'quota exceeded',
+            },
+          }),
+        );
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          candidates: [{ content: { parts: [{ text: 'native-from-key2' }] } }],
+          usageMetadata: {
+            promptTokenCount: 11,
+            candidatesTokenCount: 3,
+            totalTokenCount: 14,
+          },
+        }),
+      );
+      return;
+    }
+
     const key = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
     calls.push({ key, model: body.model, stream: body.stream === true });
 
@@ -292,4 +330,69 @@ test('per-key usage is visible without exposing the key', async () => {
   assert.ok(used.usage.requestsToday >= 1);
   assert.equal(JSON.stringify(body).includes(KEY_1), false);
   assert.equal(JSON.stringify(body).includes(KEY_2), false);
+});
+
+function nativeGenerate(token = GATEWAY_KEY, model = 'gemini-3.5-flash-lite') {
+  return fetch(
+    `http://127.0.0.1:${bridgePort}/v1beta/models/${model}:generateContent`,
+    {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-goog-api-key': token,
+      },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: 'transcribe this audio' }] }],
+        generationConfig: { maxOutputTokens: 64, temperature: 0.1 },
+      }),
+    },
+  );
+}
+
+test('native generateContent is served by the API key pool', async () => {
+  // The dubbing pipeline calls this route, not /v1/chat/completions. Before the
+  // native handler existed it could never reach the AI Studio keys at all.
+  calls.length = 0;
+  const res = await nativeGenerate();
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.candidates[0].content.parts[0].text, 'native-from-key2');
+
+  assert.ok(calls.length >= 1, 'the key pool served the native call');
+  assert.ok(calls.every((call) => call.native === true));
+  assert.ok(
+    calls[0].key.startsWith('AIzaSy'),
+    'the native request must carry an AI Studio key',
+  );
+  assert.equal(calls[0].model, 'gemini-3.5-flash-lite');
+  assert.equal(res.headers.get('x-egress-provider'), 'gemini-api');
+});
+
+test('native requests are authenticated with x-goog-api-key', async () => {
+  calls.length = 0;
+  const res = await nativeGenerate('sk-wrong');
+  assert.equal(res.status, 401);
+  assert.equal(calls.length, 0, 'an invalid key must never reach Google');
+});
+
+test('native key traffic records token usage', async () => {
+  calls.length = 0;
+  const res = await nativeGenerate();
+  assert.equal(res.status, 200);
+
+  const traffic = (await (
+    await fetch(`http://127.0.0.1:${bridgePort}/api/traffic`)
+  ).json()) as Array<{
+    provider?: string;
+    promptTokens?: number;
+    completionTokens?: number;
+    totalTokens?: number;
+  }>;
+  const record = traffic.find(
+    (row) => row.provider === 'gemini-api' && (row.totalTokens ?? 0) > 0,
+  );
+  assert.ok(record, 'the native call produced a traffic record with usage');
+  assert.equal(record!.totalTokens, 14);
+  assert.equal(record!.promptTokens, 11);
+  assert.equal(record!.completionTokens, 3);
 });

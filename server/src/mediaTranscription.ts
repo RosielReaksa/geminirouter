@@ -62,10 +62,32 @@ const DUBBING_REASONING_TOKEN_FLOOR = 40960;
 
 /** A chunk with less audible speech than this is allowed to return no lines. */
 const DUBBING_MIN_SPEECH_SECONDS = 2;
-/** Fraction of the measured speech time that the dubbing script must cover. */
-const DUBBING_MIN_SPEECH_COVERAGE = 0.35;
+/**
+ * Fraction of the measured speech time that the dubbing script must cover.
+ * Micro-segmented TTS prompts need near-total coverage: at 0.35 the endpoint
+ * happily returned scripts that dropped two thirds of the dialogue.
+ */
+const DUBBING_MIN_SPEECH_COVERAGE = 0.75;
 /** A single line cannot plausibly cover this much audible speech. */
 const DUBBING_SINGLE_SEGMENT_SPEECH_SECONDS = 8;
+/**
+ * When measured speech fills this much of the chunk, silence detection found no
+ * silence and the number cannot separate dialogue from a music bed, so the
+ * coverage ratio is not used to reject the answer.
+ */
+const DUBBING_SPEECH_MEASUREMENT_MAX_RATIO = 0.95;
+/**
+ * Duration-based floor used when no silence was detected. It is deliberately
+ * lower than the speech-relative threshold: with a music bed the measurement
+ * cannot tell which part of the chunk was dialogue.
+ */
+const DUBBING_MIN_UNMEASURED_COVERAGE = 0.35;
+/** Hard ceiling for one TTS cue. Longer cues are split before they are returned. */
+export const DUBBING_MAX_CUE_SECONDS = 4;
+/** Maximum Khmer characters in one cue, strictly under the 70-char TTS limit. */
+export const DUBBING_MAX_KHMER_CHARS = 70;
+/** The audible-speech measurement is retried this many times before giving up. */
+const DUBBING_SPEECH_MEASURE_ATTEMPTS = 2;
 
 // Extra upload paths that need the streaming body parser but are not public
 // API model routes. The playground uses this for large files.
@@ -183,6 +205,8 @@ export interface DubbingChunkResult {
   usage: { promptTokens: number; completionTokens: number; totalTokens: number };
   /** Audible speech measured in the chunk, when FFmpeg could measure it. */
   speechSeconds?: number;
+  /** False when silence detection found no silence, so the ratio is unreliable. */
+  speechReliable?: boolean;
   /** Seconds of speech covered by the returned segments. */
   coveredSeconds: number;
   /** Portion of the model answer that was thinking, for diagnostics. */
@@ -1883,6 +1907,18 @@ Your previous answer for this audio was missing almost all of the dialogue.
 The audio contains a conversation. You must return every utterance in chronological order, from the first line to the end of the audio.
 An empty array or a single segment is not an acceptable answer here. Do not summarize and do not stop early.`;
 
+/**
+ * Appended for the single retry when the answer had cues the synthesizer cannot
+ * speak: a line with no Khmer, a cue longer than the ceiling, or a cue with too
+ * much text. The rules are restated because the model otherwise repeats them.
+ */
+export const DUBBING_CUE_RETRY_PROMPT = `RETRY - UNUSABLE CUES
+Your previous answer contained cues that a speech synthesizer cannot perform.
+- Every cue must carry a non-empty "khmer_dubbing" line written ONLY in Khmer script. Never leave it empty and never copy the source text into it.
+- Every cue must be at most ${DUBBING_MAX_CUE_SECONDS.toFixed(1)} seconds long. Split a long line into several short cues instead of one long one.
+- Every "khmer_dubbing" line must be at most ${DUBBING_MAX_KHMER_CHARS} Khmer characters. Use Khmer words for numbers, not digits.
+Return the whole script again with every utterance present and no empty or oversized cues.`;
+
 
 const DUBBING_SEGMENT_PROPERTIES = {
   start: { type: 'STRING', description: 'Utterance start as MM:SS.S from the start of this audio part.' },
@@ -2220,12 +2256,237 @@ export function normalizeDubbingSegment(
   };
 }
 
+/**
+ * Khmer text plus the punctuation and separators the output contract allows.
+ * Latin letters, CJK/Thai script and Arabic numerals are deliberately excluded:
+ * the TTS engine must never receive a mixed-script cue.
+ */
+const KHMER_ALLOWED_TEXT_RE = /^[\u1780-\u17FF\s?!។៕,.\-…"'()\[\]:;\/]*$/;
+const KHMER_LETTER_RE = /[\u1780-\u17FF]/;
+
+/**
+ * True when a dub line contains Khmer and nothing but Khmer script and
+ * punctuation. An empty line, a Latin line, or a line holding Chinese source
+ * text left untranslated all fail.
+ */
+export function isKhmerDubLine(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  if (!KHMER_LETTER_RE.test(trimmed)) return false;
+  return KHMER_ALLOWED_TEXT_RE.test(trimmed);
+}
+
+/**
+ * Split one dub line into `parts` fragments. Khmer separates phrases with
+ * spaces, so words are used when there are enough of them; otherwise the line
+ * is cut by character count, which is the only option for unspaced Khmer.
+ */
+/**
+ * Split text into grapheme clusters.
+ *
+ * A naive `[...text]` slice can cut a base consonant from its subscript or its
+ * vowel: "ស្ត្រី" cut after two code points leaves "ស្", which the synthesizer
+ * cannot pronounce. Intl.Segmenter keeps the clusters intact; Khmer is a
+ * grapheme-cluster script, not a code-point script.
+ */
+function splitGraphemes(text: string): string[] {
+  const Segmenter = (Intl as unknown as { Segmenter?: new (locale: string, options: { granularity: string }) => { segment: (input: string) => Iterable<{ segment: string }> } }).Segmenter;
+  if (typeof Segmenter === 'function') {
+    return [...new Segmenter('km', { granularity: 'grapheme' }).segment(text)].map(
+      (part) => part.segment,
+    );
+  }
+  return [...text];
+}
+
+function codePointLength(text: string): number {
+  return [...text].length;
+}
+
+/**
+ * Split one dub line into `parts` fragments without breaking a grapheme.
+ * Space boundaries are preferred near the balance point, because Khmer separates
+ * phrases with spaces.
+ */
+function splitKhmerPieces(text: string, parts: number): string[] {
+  const trimmed = text.trim();
+  if (parts <= 1 || !trimmed) return [trimmed];
+  const units = splitGraphemes(trimmed);
+  if (units.length <= parts) return [trimmed];
+
+  const pieces: string[] = [];
+  // Boundaries are chosen in code-point space, not grapheme-count space: Khmer
+  // words differ widely in width (ប្រាំ is five code points, បី is two), and
+  // equal grapheme counts produced a 1 s piece next to a 5 s piece.
+  const widths = units.map((unit) => codePointLength(unit));
+  const cumulative: number[] = [];
+  let total = 0;
+  for (const width of widths) {
+    total += width;
+    cumulative.push(total);
+  }
+
+  const boundaries: number[] = [0];
+  for (let index = 1; index < parts; index++) {
+    const target = (total * index) / parts;
+    const minIndex = boundaries[boundaries.length - 1] + 1;
+    const maxIndex = units.length - (parts - index);
+    let cut = minIndex;
+    let best = Number.POSITIVE_INFINITY;
+    // Prefer a space boundary near the target...
+    for (let probe = minIndex; probe <= maxIndex; probe++) {
+      if (units[probe - 1] !== ' ') continue;
+      const distance = Math.abs(cumulative[probe - 1] - target);
+      if (distance < best) {
+        best = distance;
+        cut = probe;
+      }
+    }
+    // ...and fall back to the nearest grapheme boundary when there is no space.
+    if (best === Number.POSITIVE_INFINITY) {
+      for (let probe = minIndex; probe <= maxIndex; probe++) {
+        const distance = Math.abs(cumulative[probe - 1] - target);
+        if (distance < best) {
+          best = distance;
+          cut = probe;
+        }
+      }
+    }
+    boundaries.push(cut);
+  }
+  boundaries.push(units.length);
+
+  for (let index = 0; index < boundaries.length - 1; index++) {
+    pieces.push(units.slice(boundaries[index], boundaries[index + 1]).join('').trim());
+  }
+  return pieces.filter(Boolean);
+}
+
+/** Split until every piece fits the character ceiling. */
+function splitToCharLimit(text: string, limit: number): string[] {
+  if (codePointLength(text) <= limit) return [text];
+  const parts = Math.ceil(codePointLength(text) / limit);
+  return splitKhmerPieces(text, parts).flatMap((piece) =>
+    codePointLength(piece) <= limit ? [piece] : splitToCharLimit(piece, limit),
+  );
+}
+
+export interface DubbingCueCeilingResult {
+  segments: DubbingSegmentInternal[];
+  /**
+   * Cues that cannot be repaired automatically. Any violation fails the chunk,
+   * because returning them would hand the TTS engine unusable input.
+   */
+  violations: string[];
+}
+
+/**
+ * Enforce the per-cue TTS ceilings: split cues longer than
+ * `DUBBING_MAX_CUE_SECONDS` or wider than `DUBBING_MAX_KHMER_CHARS`, then reject
+ * cues that still cannot be repaired (empty/foreign text, zero duration).
+ *
+ * Splitting keeps the original timeline; each fragment gets a slice of the
+ * parent's window proportional to its grapheme length, so a long fragment is not
+ * squeezed into the same time as a short one.
+ */
+export function enforceDubbingCueCeilings(
+  segments: DubbingSegmentInternal[],
+): DubbingCueCeilingResult {
+  const out: DubbingSegmentInternal[] = [];
+  const violations: string[] = [];
+
+  for (const segment of segments) {
+    if (!isKhmerDubLine(segment.khmer_dubbing)) {
+      violations.push(
+        `cue at ${segment.start} is not pure Khmer script: ${JSON.stringify(
+          segment.khmer_dubbing.slice(0, 40),
+        )}`,
+      );
+      continue;
+    }
+
+    const duration = segment.endSeconds - segment.startSeconds;
+    if (!(duration > 0)) {
+      violations.push(`cue at ${segment.start} has no duration`);
+      continue;
+    }
+
+    const textLength = codePointLength(segment.khmer_dubbing);
+    const byTime = Math.ceil(duration / DUBBING_MAX_CUE_SECONDS);
+    const byChars = Math.ceil(textLength / DUBBING_MAX_KHMER_CHARS);
+    // A fragment needs at least a few graphemes to be worth an utterance. For a
+    // 10 s window holding only one short phrase, splitting would produce
+    // one-word cues, so the window is not divided further.
+    const maxPartsByText = Math.max(1, Math.floor(textLength / 6));
+    let parts = Math.max(1, Math.min(byTime, maxPartsByText), byChars);
+
+    const buildTexts = (count: number): string[] =>
+      (count > 1 ? splitKhmerPieces(segment.khmer_dubbing, count) : [segment.khmer_dubbing])
+        .flatMap((text) => splitToCharLimit(text, DUBBING_MAX_KHMER_CHARS));
+
+    let texts = buildTexts(parts);
+    let weights = texts.map((text) => Math.max(1, codePointLength(text)));
+    let totalWeight = weights.reduce((sum, value) => sum + value, 0);
+    // Proportional slices can push one fragment a few milliseconds past the
+    // ceiling when the pieces are uneven. Add a fragment and rebalance instead
+    // of returning a cue the TTS ceiling rejects.
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const longest = (duration * Math.max(...weights)) / totalWeight;
+      if (longest <= DUBBING_MAX_CUE_SECONDS + 1e-9 || parts >= maxPartsByText) break;
+      parts += 1;
+      texts = buildTexts(parts);
+      weights = texts.map((text) => Math.max(1, codePointLength(text)));
+      totalWeight = weights.reduce((sum, value) => sum + value, 0);
+    }
+    let cursor = segment.startSeconds;
+
+    for (let index = 0; index < texts.length; index++) {
+      const isLast = index === texts.length - 1;
+      const endSeconds = isLast
+        ? segment.endSeconds
+        : cursor + (duration * weights[index]) / totalWeight;
+      const text = texts[index];
+      const characters = codePointLength(text);
+
+      if (characters > DUBBING_MAX_KHMER_CHARS) {
+        violations.push(
+          `cue at ${formatDubbingTimestamp(cursor)} has ${characters} Khmer characters (limit ${DUBBING_MAX_KHMER_CHARS})`,
+        );
+      }
+      if (endSeconds - cursor > DUBBING_MAX_CUE_SECONDS + 0.001) {
+        violations.push(
+          `cue at ${formatDubbingTimestamp(cursor)} is ${(endSeconds - cursor).toFixed(
+            1,
+          )}s long (limit ${DUBBING_MAX_CUE_SECONDS}s)`,
+        );
+      }
+
+      out.push({
+        ...segment,
+        start: formatDubbingTimestamp(cursor),
+        end: formatDubbingTimestamp(endSeconds),
+        startSeconds: cursor,
+        endSeconds,
+        khmer_dubbing: text,
+      });
+      cursor = endSeconds;
+    }
+  }
+
+  return { segments: out, violations };
+}
+
 export interface DubbingCoverageVerdict {
   ok: boolean;
   reason?: 'empty_script' | 'single_segment' | 'low_coverage';
   coveredSeconds: number;
   speechSeconds?: number;
   ratio?: number;
+  /**
+   * False when silence detection found no silence, so the ratio cannot
+   * distinguish dialogue from a music bed and was not used to reject the chunk.
+   */
+  speechReliable?: boolean;
 }
 
 /** Union of the segment intervals, clamped to the chunk window. */
@@ -2344,6 +2605,25 @@ export function dubbingCoverageVerdict(input: {
   ) {
     return { ...base, ok: false, reason: 'single_segment' };
   }
+
+  // When silence detection found no silence at all, the chunk is either
+  // non-stop speech or — far more often on drama footage — a continuous music
+  // bed that sits above the noise floor. Either way the measurement cannot
+  // separate dialogue from music, so the speech-relative ratio would reject a
+  // script that transcribed every line. Measured against a real 120 s clip:
+  // 25 s of dialogue in a 60 s chunk with music throughout read as 41%
+  // coverage. Fall back to a duration-based floor, which still catches gross
+  // under-transcription.
+  const measurementCoversChunk =
+    duration > 0 && speechSeconds >= duration * DUBBING_SPEECH_MEASUREMENT_MAX_RATIO;
+  if (measurementCoversChunk) {
+    const chunkRatio = duration > 0 ? coveredSeconds / duration : 0;
+    if (chunkRatio < DUBBING_MIN_UNMEASURED_COVERAGE) {
+      return { ...base, ok: false, reason: 'low_coverage', speechReliable: false };
+    }
+    return { ...base, speechReliable: false };
+  }
+
   if ((ratio ?? 0) < DUBBING_MIN_SPEECH_COVERAGE) {
     return { ...base, ok: false, reason: 'low_coverage' };
   }
@@ -2703,16 +2983,32 @@ export async function dubChunks(
         options.maxTokens ?? dubbingMaxOutputTokens(chunk.durationSeconds, options.model);
 
       // Measure audible speech once per chunk so an empty or single-line answer
-      // can be told apart from a chunk that is genuinely silent.
-      const speechSeconds = await measureSpeechSeconds(
-        chunk.filePath,
-        chunk.durationSeconds,
-        config,
-        signal,
-      ).catch((error) => {
-        log.warn({ err: error, media: { chunk: index + 1 } }, 'media: speech detection failed');
-        return undefined;
-      });
+      // can be told apart from a chunk that is genuinely silent. A failed
+      // measurement is retried: without it the completeness check is skipped
+      // entirely, so a transient FFmpeg error would silently accept a partial
+      // script.
+      let speechSeconds: number | undefined;
+      for (let measureAttempt = 0; measureAttempt < DUBBING_SPEECH_MEASURE_ATTEMPTS; measureAttempt++) {
+        try {
+          speechSeconds = await measureSpeechSeconds(
+            chunk.filePath,
+            chunk.durationSeconds,
+            config,
+            signal,
+          );
+          break;
+        } catch (error) {
+          if (isAbortError(error) || signal.aborted) throw abortError(signal);
+          if (measureAttempt === DUBBING_SPEECH_MEASURE_ATTEMPTS - 1) {
+            log.warn(
+              { err: error, media: { chunk: index + 1 } },
+              'media: speech detection failed, coverage validation is skipped for this chunk',
+            );
+            break;
+          }
+          await sleepWithSignal(250, signal);
+        }
+      }
 
       log.info(
         {
@@ -3017,22 +3313,40 @@ async function dubChunkWithRetry(
       }
       segments.sort((a, b) => a.startSeconds - b.startSeconds || a.endSeconds - b.endSeconds);
 
+      // Split cues that exceed the TTS ceiling and reject cues that cannot be
+      // repaired. A model that returns one 12-second cue would otherwise reach
+      // the synthesizer unchanged.
+      const ceilings = enforceDubbingCueCeilings(segments);
+      const repairedSegments = ceilings.segments;
+
       const coveredSeconds = dubbingCoveredSeconds(
-        segments,
+        repairedSegments,
         chunk.startSeconds,
         chunk.endSeconds,
       );
       const verdict = dubbingCoverageVerdict({
-        segmentCount: segments.length,
+        segmentCount: repairedSegments.length,
         coveredSeconds,
         speechSeconds,
         durationSeconds: chunk.durationSeconds,
       });
 
-      if (!verdict.ok) {
+      // A cue the model returned without a Khmer line, or with a cue the TTS
+      // engine cannot speak, is dialogue that would silently disappear from the
+      // finished dub. Fail the chunk instead of returning holes in the timeline.
+      const cueIssue =
+        droppedSegments > 0
+          ? 'dropped_segments'
+          : ceilings.violations.length > 0
+            ? 'cue_violations'
+            : undefined;
+
+      if (!verdict.ok || cueIssue) {
         const details = {
           chunkIndex: chunk.index,
-          segmentCount: segments.length,
+          segmentCount: repairedSegments.length,
+          droppedSegments,
+          cueViolations: ceilings.violations.slice(0, 10),
           coveredSeconds: verdict.coveredSeconds,
           speechSeconds: verdict.speechSeconds ?? null,
           durationSeconds: Number(chunk.durationSeconds.toFixed(2)),
@@ -3045,22 +3359,39 @@ async function dubChunkWithRetry(
         if (!completenessRetried && !signal.aborted) {
           completenessRetried = true;
           maxAttempts = Math.max(maxAttempts, attempt + 2);
-          activePrompt = `${prompt}\n\n${DUBBING_COMPLETENESS_RETRY_PROMPT}`;
+          activePrompt = `${prompt}\n\n${
+            cueIssue ? DUBBING_CUE_RETRY_PROMPT : DUBBING_COMPLETENESS_RETRY_PROMPT
+          }`;
           log.warn(
-            { media: { chunk: chunk.index + 1, ...details, reason: verdict.reason } },
+            {
+              media: {
+                chunk: chunk.index + 1,
+                ...details,
+                reason: cueIssue ?? verdict.reason,
+              },
+            },
             'media: dubbing answer rejected as incomplete; retrying with the completeness prompt',
           );
           await sleepWithSignal(250, signal);
           continue;
         }
 
-        const reason = verdict.reason ?? 'low_coverage';
+        const reason = cueIssue ?? verdict.reason ?? 'low_coverage';
+        const message =
+          cueIssue === 'dropped_segments'
+            ? `Chunk ${chunk.index + 1} returned ${droppedSegments} cue(s) with no Khmer dub line or no valid timing. Those lines would be missing from the finished dub, so the request is failed instead of returning a script with holes. Try a smaller chunk_seconds or a different model.`
+            : cueIssue === 'cue_violations'
+              ? `Chunk ${chunk.index + 1} returned ${ceilings.violations.length} cue(s) that break the TTS ceilings (max ${DUBBING_MAX_CUE_SECONDS}s and ${DUBBING_MAX_KHMER_CHARS} Khmer characters per cue, Khmer script only): ${ceilings.violations
+                  .slice(0, 3)
+                  .join('; ')}. The request is failed instead of returning cues the synthesizer cannot speak.`
+              : `Chunk ${chunk.index + 1} returned ${repairedSegments.length} segment(s) covering ${verdict.coveredSeconds}s of ${verdict.speechSeconds ?? 0}s of audible speech (${Math.round(
+                  (verdict.ratio ?? 0) * 100,
+                )}%). The script is incomplete, so the request is failed instead of silently dropping dialogue. Try a smaller chunk_seconds or a different model.`;
+
         lastError = new MediaError(
-           502,
+          502,
           reason === 'empty_script' ? 'empty_model_response' : 'partial_script',
-          `Chunk ${chunk.index + 1} returned ${segments.length} segment(s) covering ${verdict.coveredSeconds}s of ${verdict.speechSeconds ?? 0}s of audible speech (${Math.round(
-            (verdict.ratio ?? 0) * 100,
-          )}%). The script is incomplete, so the request is failed instead of silently dropping dialogue. Try a smaller chunk_seconds or a different model.`,
+          message,
           details,
         );
         throw lastError;
@@ -3070,13 +3401,14 @@ async function dubChunkWithRetry(
         index: chunk.index,
         startSeconds: chunk.startSeconds,
         endSeconds: chunk.endSeconds,
-        segments,
+        segments: repairedSegments,
         droppedSegments,
         content,
         model: typeof data?.model === 'string' ? data.model : options.model,
         maxOutputTokens,
         usage,
         speechSeconds: verdict.speechSeconds,
+        speechReliable: verdict.speechReliable !== false,
         coveredSeconds: verdict.coveredSeconds,
         thoughtCharacters,
       };
@@ -3171,6 +3503,9 @@ export function buildDubbingResponse(input: {
         speechSeconds === undefined ? null : Number(speechSeconds.toFixed(3)),
       covered_seconds: Number(coveredSeconds.toFixed(3)),
       ratio: coverageRatio === undefined ? null : Number(coverageRatio.toFixed(3)),
+      // False when at least one chunk had no detected silence, so the ratio
+      // mixes music with dialogue and should not be read as completeness.
+      speech_reliable: ordered.every((result) => result.speechReliable !== false),
     },
     chunks: ordered.map((result) => ({
       index: result.index,

@@ -17,6 +17,9 @@ import { spawnSync } from 'node:child_process';
 import type { GoogleAccount, LocalStateStore } from '../src/store.js';
 import {
   DUBBING_COMPLETENESS_RETRY_PROMPT,
+  DUBBING_CUE_RETRY_PROMPT,
+  DUBBING_MAX_CUE_SECONDS,
+  DUBBING_MAX_KHMER_CHARS,
   buildChunkPrompt,
   buildDubbingPrompt,
   buildDubbingResponse,
@@ -26,9 +29,11 @@ import {
   dubbingCoveredSeconds,
   dubbingMaxOutputTokens,
   dubbingSpeechSecondsFromSilences,
+  enforceDubbingCueCeilings,
   estimatedDubbingMs,
   formatDubbingTimestamp,
   geminiResponseAnswer,
+  isKhmerDubLine,
   isModelFailureText,
   isLiteDubbingModel,
   isReasoningDubbingModel,
@@ -105,6 +110,8 @@ function defaultDubbingReply(index: number): string {
   // Timestamps are intentionally chunk-local; the bridge must add the offset.
   const start = index === 1 ? '00:01.0' : '00:00.5';
   const end = index === 1 ? '00:04.5' : '00:03.0';
+  // The dub line must be pure Khmer script, so the chunk number uses Khmer digits.
+  const khmerIndex = '០១២៣៤៥៦៧៨៩'[index % 10];
   return JSON.stringify([
     {
       start,
@@ -113,7 +120,7 @@ function defaultDubbingReply(index: number): string {
       vocal_timbre: 'young and bright',
       character_role: 'younger sister',
       original_transcript: `小梨说第 ${index} 段`,
-      khmer_dubbing: `ប្អូនស្រីនិយាយភាគទី ${index} ចាស`,
+      khmer_dubbing: `ប្អូនស្រីនិយាយភាគទី ${khmerIndex} ចាស`,
     },
   ]);
 }
@@ -910,6 +917,213 @@ test('dubbing coverage verdict rejects empty, single and low-coverage scripts', 
   );
 });
 
+test('dubbing coverage verdict requires most of the audible speech', () => {
+  // 0.35 was the old bar, and it let a script lose a third of the dialogue.
+  assert.equal(
+    dubbingCoverageVerdict({
+      segmentCount: 4,
+      coveredSeconds: 30,
+      speechSeconds: 45,
+      durationSeconds: 60,
+    }).ok,
+    false,
+  );
+  assert.equal(
+    dubbingCoverageVerdict({
+      segmentCount: 4,
+      coveredSeconds: 40,
+      speechSeconds: 45,
+      durationSeconds: 60,
+    }).ok,
+    true,
+  );
+});
+
+test('a chunk with no detected silence does not fail on the coverage ratio', () => {
+  // Production case: a 60 s chunk with a continuous music bed and 25 s of
+  // dialogue. silencedetect finds no silence, so ratio alone reads 41%.
+  const musicBed = dubbingCoverageVerdict({
+    segmentCount: 6,
+    coveredSeconds: 25,
+    speechSeconds: 60.01,
+    durationSeconds: 60.01,
+  });
+  assert.equal(musicBed.ok, true, 'a music bed must not be counted as missing dialogue');
+  assert.equal(musicBed.speechReliable, false);
+
+  // Gross under-transcription is still caught, against the chunk duration.
+  const nearlyEmpty = dubbingCoverageVerdict({
+    segmentCount: 2,
+    coveredSeconds: 3,
+    speechSeconds: 60.01,
+    durationSeconds: 60.01,
+  });
+  assert.equal(nearlyEmpty.ok, false);
+  assert.equal(nearlyEmpty.reason, 'low_coverage');
+
+  // When real silences were found, the ratio is still enforced.
+  const measured = dubbingCoverageVerdict({
+    segmentCount: 6,
+    coveredSeconds: 15,
+    speechSeconds: 31,
+    durationSeconds: 60,
+  });
+  assert.equal(measured.ok, false);
+  assert.equal(measured.reason, 'low_coverage');
+  assert.notEqual(measured.speechReliable, false);
+});
+
+test('a dub line is rejected unless it is pure Khmer script', () => {
+  assert.equal(isKhmerDubLine('សួស្តី លោកម្ចាស់។'), true);
+  assert.equal(isKhmerDubLine('កុំកម្រើក !'), true);
+  assert.equal(isKhmerDubLine(''), false);
+  assert.equal(isKhmerDubLine('   '), false);
+  assert.equal(isKhmerDubLine('sister_line'), false, 'a Latin line must not reach the synthesizer');
+  assert.equal(isKhmerDubLine('ចាស OK'), false, 'Latin inside a Khmer line is rejected too');
+  assert.equal(
+    isKhmerDubLine('万恶毒体ចាស'),
+    false,
+    'untranslated Chinese source text must not be dubbed',
+  );
+  assert.equal(isKhmerDubLine('បីថ្ងៃ 3'), false, 'numbers must be spelled out in Khmer');
+});
+
+test('cues over the TTS ceiling are split without moving the timeline', () => {
+  const segment = normalizeDubbingSegment(
+    {
+      start: '00:00.0',
+      end: '00:10.0',
+      speaker_gender: 'male',
+      character_role: 'boss',
+      original_transcript: 'a long line',
+      khmer_dubbing: 'មួយ ពីរ បី បួន ប្រាំ ប្រាំមួយ',
+    },
+    { startSeconds: 0, endSeconds: 12 },
+  );
+  assert.ok(segment);
+
+  const { segments, violations } = enforceDubbingCueCeilings([segment]);
+  assert.deepEqual(violations, []);
+  assert.equal(segments.length, 3, 'a 10-second cue becomes three ceiling-sized cues');
+  assert.equal(segments[0].start, '00:00.0');
+  assert.equal(segments[2].end, '00:10.0', 'the parent window must not move');
+  for (const cue of segments) {
+    assert.ok(
+      cue.endSeconds - cue.startSeconds <= DUBBING_MAX_CUE_SECONDS + 0.001,
+      `cue ${cue.start} is too long`,
+    );
+  }
+  assert.equal(
+    segments.map((cue) => cue.khmer_dubbing).join(' '),
+    'មួយ ពីរ បី បួន ប្រាំ ប្រាំមួយ',
+    'splitting must not drop or duplicate words',
+  );
+  assert.equal(
+    new Set(segments.map((cue) => cue.speaker_id)).size,
+    1,
+    'the speaker must stay the same across the split',
+  );
+});
+
+test('a cue over the character ceiling is split instead of rejected', () => {
+  const dense = normalizeDubbingSegment(
+    {
+      start: '00:00.0',
+      end: '00:02.0',
+      khmer_dubbing: 'ក'.repeat(DUBBING_MAX_KHMER_CHARS + 1),
+    },
+    { startSeconds: 0, endSeconds: 2 },
+  );
+  assert.ok(dense);
+  const result = enforceDubbingCueCeilings([dense]);
+  assert.deepEqual(result.violations, [], 'a dense cue must be repaired, not failed');
+  assert.ok(result.segments.length >= 2, 'the cue must be cut into ceiling-sized pieces');
+  assert.equal(
+    result.segments.map((cue) => cue.khmer_dubbing).join(''),
+    'ក'.repeat(DUBBING_MAX_KHMER_CHARS + 1),
+    'splitting must not drop characters',
+  );
+  for (const cue of result.segments) {
+    assert.ok(
+      [...cue.khmer_dubbing].length <= DUBBING_MAX_KHMER_CHARS,
+      `cue ${cue.start} still exceeds the character ceiling`,
+    );
+  }
+
+  const latin = normalizeDubbingSegment(
+    { start: '00:00.0', end: '00:01.0', khmer_dubbing: 'sister_line' },
+    { startSeconds: 0, endSeconds: 5 },
+  );
+  assert.ok(latin);
+  assert.match(enforceDubbingCueCeilings([latin]).violations[0], /not pure Khmer/);
+
+  // A single character cannot be divided into three cues, so the 12-second
+  // window is reported instead of pretending the split worked.
+  const unsplittable = normalizeDubbingSegment(
+    { start: '00:00.0', end: '00:12.0', khmer_dubbing: 'ក' },
+    { startSeconds: 0, endSeconds: 20 },
+  );
+  assert.ok(unsplittable);
+  const durationResult = enforceDubbingCueCeilings([unsplittable]);
+  assert.equal(durationResult.violations.length, 1);
+  assert.match(durationResult.violations[0], /long/);
+});
+
+test('split timing follows text length, not equal steps', () => {
+  // A phrase boundary near the balance point makes the pieces uneven: 20 vs 39
+  // graphemes. Equal time would hand each half 3 s; proportional gives the short
+  // phrase about 2 s.
+  const text = `${'ក'.repeat(20)} ${'ខ'.repeat(39)}`;
+  const segment = normalizeDubbingSegment(
+    { start: '00:00.0', end: '00:06.0', khmer_dubbing: text },
+    { startSeconds: 0, endSeconds: 6 },
+  );
+  assert.ok(segment);
+  const { segments, violations } = enforceDubbingCueCeilings([segment]);
+  assert.deepEqual(violations, []);
+  assert.equal(segments.length, 2);
+  assert.ok(
+    segments[0].endSeconds < 2.5,
+    `the short fragment must not receive half the window (got ${segments[0].endSeconds}s)`,
+  );
+  assert.equal(segments[1].endSeconds, 6, 'the parent window must not move');
+});
+
+test('splitting never breaks a Khmer grapheme cluster', () => {
+  const cluster = 'ស្ត្រី'; // base + coeng + subscript + vowel
+  const text = Array.from({ length: 40 }, () => cluster).join(' ');
+  const segment = normalizeDubbingSegment(
+    { start: '00:00.0', end: '00:08.0', khmer_dubbing: text },
+    { startSeconds: 0, endSeconds: 8 },
+  );
+  assert.ok(segment);
+  const { segments, violations } = enforceDubbingCueCeilings([segment]);
+  assert.deepEqual(violations, []);
+  assert.ok(segments.length >= 2);
+  for (const cue of segments) {
+    assert.ok(
+      !cue.khmer_dubbing.endsWith('\u17D2'),
+      `cue ends on a dangling coeng: ${JSON.stringify(cue.khmer_dubbing)}`,
+    );
+    assert.ok(
+      !/^[\u17B4-\u17D3]/.test(cue.khmer_dubbing),
+      `cue starts with a combining mark: ${JSON.stringify(cue.khmer_dubbing)}`,
+    );
+  }
+  assert.equal(
+    segments.map((cue) => cue.khmer_dubbing).join(' ').replace(/\s+/g, ''),
+    text.replace(/\s+/g, ''),
+    'no grapheme may be lost',
+  );
+});
+
+test('the cue retry prompt restates the ceilings that failed', () => {
+  assert.match(DUBBING_CUE_RETRY_PROMPT, /4\.0 seconds/);
+  assert.match(DUBBING_CUE_RETRY_PROMPT, /70 Khmer characters/);
+  assert.match(DUBBING_CUE_RETRY_PROMPT, /Khmer script/);
+  assert.match(DUBBING_COMPLETENESS_RETRY_PROMPT, /INCOMPLETE ANSWER/);
+});
+
 test('dubbing timestamps parse and format on the MM:SS.S contract', () => {
   assert.equal(parseDubbingTimestamp('01:02.5'), 62.5);
   assert.equal(parseDubbingTimestamp('1:02:03.4'), 3723.4);
@@ -1385,6 +1599,111 @@ test(
     assert.equal(body.error.details.segmentCount, 1);
     assert.ok(body.error.details.speechSeconds >= 2);
     assert.equal(geminiRequests.length, 2, 'the strict retry runs once, then the request fails');
+  },
+);
+
+test(
+  'dubbing fails when a cue has no Khmer line instead of returning holes',
+  { skip: !hasFfmpeg },
+  async () => {
+    geminiRequests.length = 0;
+    scriptedDubbingReplies.length = 0;
+
+    const withEmptyCue = JSON.stringify([
+      {
+        start: '00:00.0',
+        end: '00:01.5',
+        speaker_gender: 'male',
+        character_role: 'boss',
+        original_transcript: '첫 번째 대사',
+        khmer_dubbing: 'បាទ មកហើយ',
+      },
+      {
+        start: '00:01.6',
+        end: '00:03.0',
+        speaker_gender: 'male',
+        character_role: 'boss',
+        original_transcript: 'second line with no dub',
+        khmer_dubbing: '',
+      },
+    ]);
+    scriptedDubbingReplies.push({ text: withEmptyCue }, { text: withEmptyCue });
+
+    const form = new FormData();
+    form.append('file', new Blob([makeToneWav(3)], { type: 'audio/wav' }), 'holes.wav');
+    form.append('model', 'gemini-3.5-flash-lite');
+    form.append('chunk_seconds', '60');
+
+    const response = await fetch(`http://127.0.0.1:${bridgePort}/v1/audio/dubbing`, {
+      method: 'POST',
+      headers: authHeaders(),
+      body: form,
+    });
+
+    const rawBody = await response.text();
+    assert.equal(response.status, 502, rawBody);
+    const body: any = JSON.parse(rawBody);
+    assert.equal(body.error.code, 'partial_script');
+    assert.match(body.error.message, /no Khmer dub line/);
+    assert.equal(
+      body.error.details.droppedSegments,
+      1,
+      'the cue without a dub line must be reported, not silently removed',
+    );
+    assert.equal(geminiRequests.length, 2, 'the strict retry runs once, then the request fails');
+  },
+);
+
+test(
+  'dubbing splits an oversized cue before the synthesizer sees it',
+  { skip: !hasFfmpeg },
+  async () => {
+    geminiRequests.length = 0;
+    scriptedDubbingReplies.length = 0;
+
+    const oneLongCue = JSON.stringify([
+      {
+        start: '00:00.0',
+        end: '00:10.0',
+        speaker_gender: 'female',
+        character_role: 'narrator',
+        original_transcript: 'one very long line',
+        khmer_dubbing: 'មួយ ពីរ បី បួន ប្រាំ ប្រាំមួយ',
+      },
+    ]);
+    scriptedDubbingReplies.push({ text: oneLongCue });
+
+    const form = new FormData();
+    form.append('file', new Blob([makeToneWav(10)], { type: 'audio/wav' }), 'long-cue.wav');
+    form.append('model', 'gemini-3.5-flash-lite');
+    form.append('chunk_seconds', '60');
+
+    const response = await fetch(`http://127.0.0.1:${bridgePort}/v1/audio/dubbing`, {
+      method: 'POST',
+      headers: authHeaders(),
+      body: form,
+    });
+
+    const rawBody = await response.text();
+    assert.equal(response.status, 200, rawBody);
+    const body: any = JSON.parse(rawBody);
+    assert.equal(body.segment_count, 3, 'the 10-second cue must be split');
+    assert.equal(response.headers.get('x-geminirouter-segments'), '3');
+    for (const segment of body.segments) {
+      assert.ok(
+        segment.end_seconds - segment.start_seconds <= DUBBING_MAX_CUE_SECONDS + 0.001,
+        `cue ${segment.start} to ${segment.end} is too long for the synthesizer`,
+      );
+      assert.ok(
+        segment.khmer_dubbing.length <= DUBBING_MAX_KHMER_CHARS,
+        `cue ${segment.start} has too many Khmer characters`,
+      );
+    }
+    assert.ok(
+      body.segments[0].start_seconds <= body.segments[1].start_seconds &&
+        body.segments[1].start_seconds <= body.segments[2].start_seconds,
+      'split cues must stay chronological',
+    );
   },
 );
 
