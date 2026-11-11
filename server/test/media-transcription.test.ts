@@ -1055,7 +1055,27 @@ test('a cue over the character ceiling is split instead of rejected', () => {
     { startSeconds: 0, endSeconds: 5 },
   );
   assert.ok(latin);
-  assert.match(enforceDubbingCueCeilings([latin]).violations[0], /not pure Khmer/);
+  const latinResult = enforceDubbingCueCeilings([latin]);
+  assert.deepEqual(latinResult.violations, []);
+  assert.equal(latinResult.droppedCues, 1, 'an untranslated cue is dropped, not fatal');
+  assert.equal(latinResult.segments.length, 0);
+
+  // One untranslated cue must not take a valid line with it.
+  const mixed = [
+    normalizeDubbingSegment(
+      { start: '00:00.0', end: '00:01.5', khmer_dubbing: 'បាទ មកហើយ' },
+      { startSeconds: 0, endSeconds: 5 },
+    ),
+    normalizeDubbingSegment(
+      { start: '00:02.0', end: '00:03.5', khmer_dubbing: '哇！新人又出现御气境了' },
+      { startSeconds: 0, endSeconds: 5 },
+    ),
+  ].filter(Boolean) as any[];
+  const mixedResult = enforceDubbingCueCeilings(mixed);
+  assert.deepEqual(mixedResult.violations, []);
+  assert.equal(mixedResult.droppedCues, 1);
+  assert.equal(mixedResult.segments.length, 1);
+  assert.equal(mixedResult.segments[0].khmer_dubbing, 'បាទ មកហើយ');
 
   // A 12-second window holding one character is too sparse to split: the TTS
   // engine finishes in a moment and the slot stays silent, so the cue is kept

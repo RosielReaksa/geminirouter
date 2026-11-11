@@ -2412,6 +2412,12 @@ export interface DubbingCueCeilingResult {
    * because returning them would hand the TTS engine unusable input.
    */
   violations: string[];
+  /**
+   * Cues dropped because the model never translated them (the text was still
+   * Chinese). They are reported in the response instead of failing the whole
+   * chunk: losing one or two lines is better than losing the other hundred.
+   */
+  droppedCues: number;
 }
 
 /**
@@ -2428,6 +2434,7 @@ export function enforceDubbingCueCeilings(
 ): DubbingCueCeilingResult {
   const out: DubbingSegmentInternal[] = [];
   const violations: string[] = [];
+  let droppedCues = 0;
 
   for (const segment of segments) {
     // Clean every cue: stray foreign letters and invisible separators are
@@ -2435,11 +2442,9 @@ export function enforceDubbingCueCeilings(
     // merely carried three Latin characters is repaired and kept.
     const sourceText = stripNonKhmerLetters(segment.khmer_dubbing);
     if (!isKhmerDubLine(sourceText)) {
-      violations.push(
-        `cue at ${segment.start} is not pure Khmer script: ${JSON.stringify(
-          segment.khmer_dubbing.slice(0, 40),
-        )}`,
-      );
+      // The model left this cue untranslated. Drop it and count it; failing the
+      // chunk here used to trigger a slow fallback and lose every other line.
+      droppedCues += 1;
       continue;
     }
 
@@ -2517,7 +2522,7 @@ export function enforceDubbingCueCeilings(
     }
   }
 
-  return { segments: out, violations };
+  return { segments: out, violations, droppedCues };
 }
 
 export interface DubbingCoverageVerdict {
@@ -3373,6 +3378,12 @@ async function dubChunkWithRetry(
       // the synthesizer unchanged.
       const ceilings = enforceDubbingCueCeilings(segments);
       const repairedSegments = ceilings.segments;
+      if (ceilings.droppedCues > 0) {
+        log.warn(
+          { media: { chunk: chunk.index + 1, droppedCues: ceilings.droppedCues } },
+          'media: dropped untranslated cues instead of failing the chunk',
+        );
+      }
 
       const coveredSeconds = dubbingCoveredSeconds(
         repairedSegments,
@@ -3389,8 +3400,13 @@ async function dubChunkWithRetry(
       // A cue the model returned without a Khmer line, or with a cue the TTS
       // engine cannot speak, is dialogue that would silently disappear from the
       // finished dub. Fail the chunk instead of returning holes in the timeline.
+      // normalizeDropped counts cues with no usable timing/text; those still
+      // fail. Untranslated cues were already dropped and counted by the ceiling
+      // pass, because failing the chunk costs every other line.
+      const normalizeDropped = droppedSegments;
+      const totalDropped = normalizeDropped + ceilings.droppedCues;
       const cueIssue =
-        droppedSegments > 0
+        normalizeDropped > 0
           ? 'dropped_segments'
           : ceilings.violations.length > 0
             ? 'cue_violations'
@@ -3407,7 +3423,8 @@ async function dubChunkWithRetry(
         const details = {
           chunkIndex: chunk.index,
           segmentCount: repairedSegments.length,
-          droppedSegments,
+          droppedSegments: totalDropped,
+          droppedCues: ceilings.droppedCues,
           cueViolations: ceilings.violations.slice(0, 10),
           coveredSeconds: verdict.coveredSeconds,
           speechSeconds: verdict.speechSeconds ?? null,
@@ -3464,7 +3481,7 @@ async function dubChunkWithRetry(
         startSeconds: chunk.startSeconds,
         endSeconds: chunk.endSeconds,
         segments: repairedSegments,
-        droppedSegments,
+        droppedSegments: totalDropped,
         content,
         model: typeof data?.model === 'string' ? data.model : options.model,
         maxOutputTokens,
