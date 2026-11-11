@@ -226,6 +226,13 @@ export interface DubbingOptions {
   /** True when the caller sent an explicit `concurrency` value. */
   concurrencyExplicit: boolean;
   responseFormat: 'json' | 'array';
+  /**
+   * fast: one model call for the whole requested chunk (5/10 min). Cheapest and
+   * fastest, but the model usually returns only part of the dialogue.
+   * complete: 60-second model windows with coverage validation and hole repair.
+   * Default comes from MEDIA_DUBBING_MODE (fast) and is an admin choice.
+   */
+  mode: 'fast' | 'complete';
 }
 
 type UsageTotals = { promptTokens: number; completionTokens: number; totalTokens: number };
@@ -2757,6 +2764,13 @@ function parseDubbingOptions(fields: Record<string, string>, config: MediaConfig
     ? Math.min(DUBBING_MAX_CHUNK_SECONDS, Math.max(60, requestedChunkSeconds))
     : Math.min(DUBBING_DEFAULT_CHUNK_SECONDS, DUBBING_MAX_CHUNK_SECONDS);
 
+  const requestedMode = String(
+    fields.mode || fields.completeness || process.env.MEDIA_DUBBING_MODE || 'fast',
+  )
+    .trim()
+    .toLowerCase();
+  const mode: 'fast' | 'complete' = requestedMode === 'complete' ? 'complete' : 'fast';
+
   const requestedMaxTokens = Number.parseInt(fields.max_tokens || fields.maxTokens || '', 10);
   const maxTokens = Number.isFinite(requestedMaxTokens)
     ? Math.min(65535, Math.max(256, requestedMaxTokens))
@@ -2798,6 +2812,7 @@ function parseDubbingOptions(fields: Record<string, string>, config: MediaConfig
     concurrency,
     concurrencyExplicit,
     responseFormat,
+    mode,
   };
 }
 
@@ -2844,7 +2859,10 @@ async function handleAudioDubbing(
       60,
       Math.floor((14 * 1024 * 1024 * 8) / (config.audioBitrateKbps * 1000)),
     );
-    const modelChunkSeconds = dubbingChunkSecondsForModel(options.model, options.chunkSeconds);
+    const modelChunkSeconds =
+      options.mode === 'fast'
+        ? Math.max(60, options.chunkSeconds)
+        : dubbingChunkSecondsForModel(options.model, options.chunkSeconds);
     const effectiveChunkSeconds = Math.min(modelChunkSeconds, maxSecondsBySize);
     if (effectiveChunkSeconds < options.chunkSeconds) {
       request.log.info(
@@ -3369,7 +3387,14 @@ async function dubChunkWithRetry(
             ? 'cue_violations'
             : undefined;
 
-      if (!verdict.ok || cueIssue) {
+      // Fast mode is an explicit trade: one call per 5/10-minute chunk and no
+      // completeness retry. It accepts a short answer (that is the point) but
+      // still rejects an empty one, because an empty chunk has nothing to dub.
+      const coverageBlocked =
+        !verdict.ok && (options.mode === 'complete' || verdict.reason === 'empty_script');
+      const blockingReason = cueIssue ?? (coverageBlocked ? verdict.reason ?? 'low_coverage' : undefined);
+
+      if (blockingReason) {
         const details = {
           chunkIndex: chunk.index,
           segmentCount: repairedSegments.length,
@@ -3404,7 +3429,7 @@ async function dubChunkWithRetry(
           continue;
         }
 
-        const reason = cueIssue ?? verdict.reason ?? 'low_coverage';
+        const reason = blockingReason;
         const message =
           cueIssue === 'dropped_segments'
             ? `Chunk ${chunk.index + 1} returned ${droppedSegments} cue(s) with no Khmer dub line or no valid timing. Those lines would be missing from the finished dub, so the request is failed instead of returning a script with holes. Try a smaller chunk_seconds or a different model.`
@@ -3523,6 +3548,7 @@ export function buildDubbingResponse(input: {
     duration_seconds: Number(durationSeconds.toFixed(3)),
     chunk_count: chunks.length,
     chunk_seconds: options.chunkSeconds,
+    mode: options.mode,
     concurrency: options.concurrency,
     segment_count: segments.length,
     segments,

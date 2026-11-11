@@ -332,6 +332,12 @@ The route reuses the transcription upload parsers: multipart `file`,
 - `model` — defaults to `MEDIA_DEFAULT_MODEL` or `gemini-3.5-flash-lite`.
 - `chunk_seconds` — 60–1800 seconds; default `300` (five minutes). The server
   also shrinks it automatically if a chunk would exceed the core's audio limit.
+- `mode` — `fast` (default) or `complete`. `fast` sends **one model call for the
+  whole `chunk_seconds`** (5 or 10 minutes): cheapest and fastest, but this model
+  usually returns only part of the dialogue (measured 14–47% coverage).
+  `complete` keeps the 60-second model windows with coverage validation and hole
+  repair (~92%). The default comes from `MEDIA_DUBBING_MODE`; it is an admin
+  setting, not a user choice. The response echoes `mode`.
 - `max_tokens` — optional override, 256–65,535. When omitted, each chunk uses
   the duration table below.
 - `temperature` — default `0`; `concurrency` — 1–4 chunks in parallel;

@@ -1402,6 +1402,7 @@ test(
     form.append('file', new Blob([makeWav(130)], { type: 'audio/wav' }), 'lite-window.wav');
     form.append('model', 'gemini-3.5-flash-lite');
     form.append('chunk_seconds', '300');
+    form.append('mode', 'complete');
 
     const response = await fetch(`http://127.0.0.1:${bridgePort}/v1/audio/dubbing`, {
       method: 'POST',
@@ -1426,6 +1427,47 @@ test(
     assert.equal(body.chunks[0].max_output_tokens, 40960);
     assert.equal(body.chunks[2].max_output_tokens, 40960);
     assert.equal(geminiRequests.length, 3);
+  },
+);
+
+test(
+  'dubbing fast mode sends one model call for the whole 5-minute chunk',
+  { skip: !hasFfmpeg },
+  async () => {
+    geminiRequests.length = 0;
+    scriptedDubbingReplies.length = 0;
+    const shortReply = JSON.stringify([
+      {
+        start: '00:00.0',
+        end: '00:02.0',
+        speaker_gender: 'female',
+        character_role: 'narrator',
+        original_transcript: 'hello',
+        khmer_dubbing: 'សួស្តី',
+      },
+    ]);
+    scriptedDubbingReplies.push({ text: shortReply });
+
+    const form = new FormData();
+    form.append('file', new Blob([makeToneWav(120)], { type: 'audio/wav' }), 'fast.wav');
+    form.append('model', 'gemini-3.5-flash-lite');
+    form.append('chunk_seconds', '120');
+    form.append('mode', 'fast');
+
+    const response = await fetch(`http://127.0.0.1:${bridgePort}/v1/audio/dubbing`, {
+      method: 'POST',
+      headers: authHeaders(),
+      body: form,
+    });
+
+    const rawBody = await response.text();
+    assert.equal(response.status, 200, rawBody);
+    const body: any = JSON.parse(rawBody);
+    assert.equal(body.mode, 'fast');
+    assert.equal(body.chunk_count, 1, 'fast mode must not split the requested chunk');
+    assert.equal(body.chunk_seconds, 120);
+    assert.equal(body.segment_count, 1, 'fast mode accepts the short answer');
+    assert.equal(geminiRequests.length, 1, 'exactly one model call for the chunk');
   },
 );
 
@@ -1566,6 +1608,7 @@ test(
     form.append('file', new Blob([makeToneWav(3)], { type: 'audio/wav' }), 'tone.wav');
     form.append('model', 'gemini-3.5-flash-lite');
     form.append('chunk_seconds', '60');
+    form.append('mode', 'complete');
 
     const response = await fetch(`http://127.0.0.1:${bridgePort}/v1/audio/dubbing`, {
       method: 'POST',
@@ -1619,6 +1662,7 @@ test(
     form.append('file', new Blob([makeToneWav(3)], { type: 'audio/wav' }), 'tone.wav');
     form.append('model', 'gemini-3.5-flash-lite');
     form.append('chunk_seconds', '60');
+    form.append('mode', 'complete');
 
     const response = await fetch(`http://127.0.0.1:${bridgePort}/v1/audio/dubbing`, {
       method: 'POST',
