@@ -86,6 +86,9 @@ const DUBBING_MIN_UNMEASURED_COVERAGE = 0.15;
 export const DUBBING_MAX_CUE_SECONDS = 4;
 /** Maximum Khmer characters in one cue, strictly under the 70-char TTS limit. */
 export const DUBBING_MAX_KHMER_CHARS = 70;
+/** Below this many Khmer characters a cue is too sparse to split; it is kept
+ *  even when its slot is longer than the 4-second ceiling. */
+const DUBBING_SPARSE_CUE_MIN_CHARS = 20;
 /** The audible-speech measurement is retried this many times before giving up. */
 const DUBBING_SPEECH_MEASURE_ATTEMPTS = 2;
 
@@ -2488,7 +2491,13 @@ export function enforceDubbingCueCeilings(
           `cue at ${formatDubbingTimestamp(cursor)} has ${characters} Khmer characters (limit ${DUBBING_MAX_KHMER_CHARS})`,
         );
       }
-      if (endSeconds - cursor > DUBBING_MAX_CUE_SECONDS + 0.001) {
+      // A long window with almost no text is not a TTS risk: the synthesizer
+      // finishes early and the rest of the slot stays silent. Splitting it would
+      // produce empty cues. Only cues with enough text to speak need the split.
+      if (
+        endSeconds - cursor > DUBBING_MAX_CUE_SECONDS + 0.001 &&
+        characters >= DUBBING_SPARSE_CUE_MIN_CHARS
+      ) {
         violations.push(
           `cue at ${formatDubbingTimestamp(cursor)} is ${(endSeconds - cursor).toFixed(
             1,

@@ -1057,16 +1057,18 @@ test('a cue over the character ceiling is split instead of rejected', () => {
   assert.ok(latin);
   assert.match(enforceDubbingCueCeilings([latin]).violations[0], /not pure Khmer/);
 
-  // A single character cannot be divided into three cues, so the 12-second
-  // window is reported instead of pretending the split worked.
-  const unsplittable = normalizeDubbingSegment(
+  // A 12-second window holding one character is too sparse to split: the TTS
+  // engine finishes in a moment and the slot stays silent, so the cue is kept
+  // instead of failing the chunk.
+  const sparse = normalizeDubbingSegment(
     { start: '00:00.0', end: '00:12.0', khmer_dubbing: 'ក' },
     { startSeconds: 0, endSeconds: 20 },
   );
-  assert.ok(unsplittable);
-  const durationResult = enforceDubbingCueCeilings([unsplittable]);
-  assert.equal(durationResult.violations.length, 1);
-  assert.match(durationResult.violations[0], /long/);
+  assert.ok(sparse);
+  const sparseResult = enforceDubbingCueCeilings([sparse]);
+  assert.deepEqual(sparseResult.violations, []);
+  assert.equal(sparseResult.segments.length, 1);
+  assert.equal(sparseResult.segments[0].endSeconds, 12);
 });
 
 test('a cue with a stray Latin word is repaired, not failed', () => {
