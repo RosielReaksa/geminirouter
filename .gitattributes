@@ -1,0 +1,11 @@
+# Shell scripts run on Linux, so they must keep LF endings on checkout.
+# Without this, core.autocrlf=true (the Windows default) rewrites them to CRLF
+# and the interpreter fails with "bad interpreter: /usr/bin/env bash^M".
+*.sh text eol=lf
+
+# Service, config and environment files are consumed by systemd, Caddy and the
+# shell on the server, so they keep LF as well.
+*.service text eol=lf
+*.timer text eol=lf
+*.env text eol=lf
+Caddyfile text eol=lf
