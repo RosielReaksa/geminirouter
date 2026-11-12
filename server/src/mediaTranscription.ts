@@ -1879,7 +1879,7 @@ function buildResponse(input: {
 // Timed dubbing (Chinese -> Khmer and any other pair)
 // ---------------------------------------------------------------------------
 
-const DUBBING_DEFAULT_PROMPT = `You are a professional Chinese-to-Khmer audiovisual translator and dubbing director.
+const DUBBING_DEFAULT_PROMPT = `You are a professional audiovisual translator and dubbing director. The source audio may be Chinese, Korean, Japanese, Thai, English or another language; detect the spoken language from the audio and never assume the app's language setting is correct. Write the dub in Khmer.
 Listen to the supplied audio, transcribe every spoken line in the original language, and write a timed Khmer dubbing script that a TTS engine can perform.
 
 Translation rules:
