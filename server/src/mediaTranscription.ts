@@ -1884,8 +1884,10 @@ Listen to the supplied audio, transcribe every spoken line in the original langu
 
 Translation rules:
 - Translate into natural, colloquial spoken Khmer for dubbing, not literary word-for-word Khmer.
-- The Khmer line must be speakable inside its own window. Budget about 7 syllables per second of (end - start): 1.0s -> at most 7 syllables, 1.5s -> 10, 2.0s -> 14, 3.0s -> 21, 4.0s -> 28. Count the syllables before answering. If over, compress the Khmer wording: keep the action and emotion, drop greetings, honorifics, repeated words and connectors. A cut-off line is worse than a shorter line that keeps the story.
-- Never omit, summarize or censor a spoken line. Compress the Khmer wording, not the transcription. If a line cannot fit at all, merge it with the adjacent line from the same speaker (see timing) and use the combined window.
+- The Khmer line must be speakable inside its own window. Budget about 7.5 syllables per second of (end - start): 1.0s -> at most 7 syllables, 1.5s -> 11, 2.0s -> 15, 3.0s -> 22, 4.0s -> 30. Count the syllables before answering. If over, compress the Khmer wording: keep the action and emotion, drop greetings, honorifics, repeated words and connectors. A cut-off line is worse than a shorter line that keeps the story.
+- Transcribe every spoken word verbatim in original_transcript. Never summarize, merge or skip a clause; keep exclamations and repeated emphasis.
+- The Khmer must keep every story fact: who did what to whom, names, numbers, items, rules, threats, promises and negations. Compress grammar, politeness and filler, never a fact or a clause.
+- Never omit, summarize or censor a spoken line. If a line cannot fit, merge it with the adjacent line from the same speaker (see timing) and use the combined window. Only as a last resort keep the key fact and drop descriptive words, never the fact itself.
 - Politeness particles are answers, not prefixes. Never open a full sentence with បាទ or ចាស. Use one only when the line is itself a short polite yes/no or a greeting to a superior, at most once. Male speakers use បាទ, female speakers use ចាស.
 - Read the whole line before choosing a sense. Do not pick a dictionary homonym (an order is not data); when a word is ambiguous, use the meaning the scene supports.
 - Names are names: transliterate personal names and forms of address (for example 小燕 as a name, never "little girl"). Never translate a name's literal meaning.
