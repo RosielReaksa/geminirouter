@@ -1585,26 +1585,39 @@ async function fetchUpstreamWithKeys(
 
   for (const key of candidates) {
     if (signal.aborted) throw abortError(signal);
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'User-Agent': 'geminirouter-media/1.0',
-        ...(key ? { Authorization: `Bearer ${key}` } : {}),
-      },
-      body: JSON.stringify(payload),
-      signal: AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]),
-    });
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'User-Agent': 'geminirouter-media/1.0',
+          ...(key ? { Authorization: `Bearer ${key}` } : {}),
+        },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]),
+      });
 
-    if (response.status === 401 && candidates.length > 1) {
-      lastResponse = response;
-      await response.body?.cancel();
+      if (response.status === 401 && candidates.length > 1) {
+        lastResponse = response;
+        await response.body?.cancel();
+        continue;
+      }
+      return response;
+    } catch (error) {
+      if (signal.aborted) throw abortError(signal);
+      // A timeout or network failure on one gateway key must rotate to the
+      // next key inside this request. Re-throwing here made every bad key
+      // cost the full chunk timeout and then abort the chunk with a 499.
       continue;
     }
-    return response;
   }
 
-  return lastResponse!;
+  if (lastResponse) return lastResponse;
+  throw new MediaError(
+    504,
+    'upstream_timeout',
+    `All ${candidates.length} upstream gateway key(s) timed out for this chunk.`,
+  );
 }
 
 async function transcribeChunkWithRetry(
