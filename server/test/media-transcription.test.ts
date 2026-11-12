@@ -34,6 +34,7 @@ import {
   formatDubbingTimestamp,
   geminiResponseAnswer,
   isKhmerDubLine,
+  stripNonKhmerLetters,
   isModelFailureText,
   isLiteDubbingModel,
   isReasoningDubbingModel,
@@ -986,6 +987,14 @@ test('a dub line is rejected unless it is pure Khmer script', () => {
     'untranslated Chinese source text must not be dubbed',
   );
   assert.equal(isKhmerDubLine('បីថ្ងៃ 3'), true, 'digits are speakable; only foreign letters are rejected');
+});
+
+test('foreign combining marks are removed, Khmer marks are kept', () => {
+  // Myanmar, Sinhala and Devanagari marks leaked into otherwise Khmer lines.
+  assert.equal(stripNonKhmerLetters('សួស្តី\u102F\u1036\u1038'), 'សួស្តី');
+  assert.equal(stripNonKhmerLetters('ក\u0DDCខ្ញុំ'), 'កខ្ញុំ');
+  assert.equal(stripNonKhmerLetters('ខ្ញុំ\u094B'), 'ខ្ញុំ');
+  assert.equal(stripNonKhmerLetters('សួស្តី'), 'សួស្តី', 'Khmer vowel signs are marks inside the Khmer block');
 });
 
 test('cues over the TTS ceiling are split without moving the timeline', () => {

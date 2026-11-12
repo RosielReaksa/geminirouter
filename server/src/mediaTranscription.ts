@@ -2320,8 +2320,13 @@ export function stripNonKhmerLetters(text: string): string {
   return [...text]
     .filter((character) => {
       if (['\u200B', '\u200C', '\u200D', '\uFEFF'].includes(character)) return false;
+      const khmer = /[\u1780-\u17FF]/.test(character);
+      // Foreign combining marks (Myanmar, Sinhala, Devanagari, Thai/Lao)
+      // attach to Khmer letters and corrupt the word. Khmer vowel signs are
+      // marks too and are inside the Khmer block, so they are kept.
+      if (/\p{M}/u.test(character)) return khmer;
       if (!/\p{L}/u.test(character)) return true;
-      return /[\u1780-\u17FF]/.test(character);
+      return khmer;
     })
     .join('')
     .replace(/\s{2,}/g, ' ')
