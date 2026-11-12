@@ -1884,8 +1884,10 @@ Listen to the supplied audio, transcribe every spoken line in the original langu
 
 Translation rules:
 - Translate into natural, colloquial spoken Khmer for dubbing, not literary word-for-word Khmer.
-- Keep every Khmer line short enough to fit its time window.
-- Match the speaker's gender particle: male speakers use បាទ where appropriate; female speakers use ចាស.
+- The Khmer line must be speakable inside its own window. Budget about 7 syllables per second of (end - start): 1.0s -> at most 7 syllables, 1.5s -> 10, 2.0s -> 14, 3.0s -> 21, 4.0s -> 28. Count the syllables before answering. If over, compress the meaning: keep the action and emotion, drop greetings, honorifics, repeated words and connectors. A cut-off line is worse than a shorter line that keeps the story.
+- Politeness particles are answers, not prefixes. Never open a full sentence with បាទ or ចាស. Use one only when the line is itself a short polite yes/no or a greeting to a superior, at most once. Male speakers use បាទ, female speakers use ចាស.
+- Read the whole line before choosing a sense. Do not pick a dictionary homonym (an order is not data); when a word is ambiguous, use the meaning the scene supports.
+- Names are names: transliterate personal names and forms of address (for example 小燕 as a name, never "little girl"). Never translate a name's literal meaning.
 - Follow the real relationship in kinship terms: 小梨 is the younger sister (ប្អូនស្រី), never អ៊ុំស្រី.
 - Render 抢钱 as កាប់ថ្លៃ or ប្លន់លុយ according to context.
 - Render 桃子 as ផ្លែប៉េស.
@@ -1908,7 +1910,7 @@ Every element must be an object with exactly these fields:
   "vocal_timbre": "short voice description",
   "character_role": "stable speaker role",
   "original_transcript": "verbatim original-language line",
-  "khmer_dubbing": "natural spoken Khmer dub line"
+  "khmer_dubbing": "natural spoken Khmer dub line that fits (end - start) at about 7 syllables per second"
 }
 Timing rules:
 - Timestamps are relative to the start of the supplied audio and begin at 00:00.0.
