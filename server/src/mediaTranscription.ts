@@ -1884,7 +1884,8 @@ Listen to the supplied audio, transcribe every spoken line in the original langu
 
 Translation rules:
 - Translate into natural, colloquial spoken Khmer for dubbing, not literary word-for-word Khmer.
-- The Khmer line must be speakable inside its own window. Budget about 7 syllables per second of (end - start): 1.0s -> at most 7 syllables, 1.5s -> 10, 2.0s -> 14, 3.0s -> 21, 4.0s -> 28. Count the syllables before answering. If over, compress the meaning: keep the action and emotion, drop greetings, honorifics, repeated words and connectors. A cut-off line is worse than a shorter line that keeps the story.
+- The Khmer line must be speakable inside its own window. Budget about 7 syllables per second of (end - start): 1.0s -> at most 7 syllables, 1.5s -> 10, 2.0s -> 14, 3.0s -> 21, 4.0s -> 28. Count the syllables before answering. If over, compress the Khmer wording: keep the action and emotion, drop greetings, honorifics, repeated words and connectors. A cut-off line is worse than a shorter line that keeps the story.
+- Never omit, summarize or censor a spoken line. Compress the Khmer wording, not the transcription. If a line cannot fit at all, merge it with the adjacent line from the same speaker (see timing) and use the combined window.
 - Politeness particles are answers, not prefixes. Never open a full sentence with បាទ or ចាស. Use one only when the line is itself a short polite yes/no or a greeting to a superior, at most once. Male speakers use បាទ, female speakers use ចាស.
 - Read the whole line before choosing a sense. Do not pick a dictionary homonym (an order is not data); when a word is ambiguous, use the meaning the scene supports.
 - Names are names: transliterate personal names and forms of address (for example 小燕 as a name, never "little girl"). Never translate a name's literal meaning.
@@ -1914,7 +1915,7 @@ Every element must be an object with exactly these fields:
 }
 Timing rules:
 - Timestamps are relative to the start of the supplied audio and begin at 00:00.0.
-- One element per utterance. Split on pauses and speaker changes; do not merge them.
+- One element per utterance. Split on pauses and speaker changes. If a short utterance cannot carry its Khmer line, merge it with the adjacent line from the same speaker into one cue (maximum 4 seconds) instead of dropping or summarizing it.
 - "end" must be greater than "start" and must not exceed the audio duration.
 - Omit music, noise and stage directions.
 Completeness rules:
