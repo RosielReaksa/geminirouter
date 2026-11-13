@@ -520,7 +520,22 @@ export async function createServer(): Promise<{
    * account, which can serve the same model. When no account can take the call,
    * keys get it (and may return Google's 429 until the quota resets).
    */
-  const sharedModelProvider = (requestedModel: string): string | null => {
+  /**
+   * Decides whether a shared-model turn goes to the AI Studio key pool (returns the
+   * id) or the OAuth account pool (returns null).
+   *
+   * 'keys-first' (chat): the key pool is the only path for the plan-locked families
+   * (3.6/3.7 Flash, 4 Carbon/Hydrogen) and the fastest path for the lite models, so
+   * keys take every turn they have capacity for; accounts only absorb overflow when
+   * every key is rate-limited.
+   *
+   * 'balanced' (native dubbing): keeps the original alternation so dubbing traffic
+   * still splits between both backends exactly as before.
+   */
+  const sharedModelProvider = (
+    requestedModel: string,
+    preference: 'keys-first' | 'balanced' = 'balanced',
+  ): string | null => {
     const routing = store.getGeminiApiSharedRouting();
     const keyReady = geminiApiPool.hasImmediateCapacity(requestedModel);
 
@@ -536,6 +551,8 @@ export async function createServer(): Promise<{
       );
     if (usableAccounts.length === 0) return requestedModel;
     if (!keyReady) return null;
+
+    if (preference === 'keys-first') return requestedModel;
 
     const preferAccounts = sharedModelTurn % 2 === 0;
     sharedModelTurn += 1;
@@ -582,7 +599,9 @@ export async function createServer(): Promise<{
         // direct for 24 hours instead of failing every call.
         proxyManager.markApiKeyProxyRateLimited(keyId);
       },
-      chooseKeyModel: (model: string) => sharedModelProvider(model),
+      // Chat is keys-first: the key pool is the only path for the plan-locked
+      // families and the fast path for the lite models; accounts absorb overflow.
+      chooseKeyModel: (model: string) => sharedModelProvider(model, 'keys-first'),
       forceRouting,
       gatewayKey: auth.identity,
     };
@@ -593,11 +612,12 @@ export async function createServer(): Promise<{
     // The dubbing pipeline calls the Gemini-native route, not the
     // OpenAI-compatible one. Without this branch that traffic could never use
     // the AI Studio key pool.
-    const handledByNativeKeys = await handleGeminiApiNativeRequest(
-      request,
-      reply,
-      apiKeyOptions,
-    );
+    // Native (dubbing) keeps balanced routing: both backends can serve lite audio
+    // and the alternation is what the dubbing pipeline was verified against.
+    const handledByNativeKeys = await handleGeminiApiNativeRequest(request, reply, {
+      ...apiKeyOptions,
+      chooseKeyModel: (model: string) => sharedModelProvider(model, 'balanced'),
+    });
     if (handledByNativeKeys) return;
 
     await handleV1ProxyRequest(request, reply, {
