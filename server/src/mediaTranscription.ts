@@ -1578,6 +1578,7 @@ async function fetchUpstreamWithKeys(
   rawKeys: string[],
   signal: AbortSignal,
   timeoutMs: number,
+  extraHeaders: Record<string, string> = {},
 ): Promise<Response> {
   const keys = [...new Set(rawKeys.map((key) => key.trim()).filter(Boolean))];
   const candidates = keys.length > 0 ? keys : [''];
@@ -1591,6 +1592,7 @@ async function fetchUpstreamWithKeys(
         headers: {
           'Content-Type': 'application/json',
           'User-Agent': 'geminirouter-media/1.0',
+          ...extraHeaders,
           ...(key ? { Authorization: `Bearer ${key}` } : {}),
         },
         body: JSON.stringify(payload),
@@ -1884,6 +1886,10 @@ Listen to the supplied audio, transcribe every spoken line in the original langu
 
 Translation rules:
 - Translate into natural, colloquial spoken Khmer for dubbing, not literary word-for-word Khmer.
+- This recording is one continuous story, not isolated sentences. Track who speaks to whom, their relationship, what just happened, and the emotional register; use that context for pronouns, kinship terms and tone.
+- Translate the complete utterance before splitting it into cues. The cues of one utterance must read as one natural Khmer sentence, with the same subject and tense; never translate a fragment as an isolated sentence.
+- Keep a consistent glossary: give every person, title, sect, place, item and technique one Khmer spelling and reuse it for the whole recording. When a line refers back to something, reuse the earlier wording.
+- Resolve an ambiguous word by the story and the visuals, not by its most common dictionary meaning.
 - The Khmer line must be speakable inside its own window. Budget about 7.5 syllables per second of (end - start): 1.0s -> at most 7 syllables, 1.5s -> 11, 2.0s -> 15, 3.0s -> 22, 4.0s -> 30. Count the syllables before answering. If over, compress the Khmer wording: keep the action and emotion, drop greetings, honorifics, repeated words and connectors. A cut-off line is worse than a shorter line that keeps the story.
 - Transcribe every spoken word verbatim in original_transcript. Never summarize, merge or skip a clause; keep exclamations and repeated emphasis.
 - The Khmer must keep every story fact: who did what to whom, names, numbers, items, rules, threats, promises and negations. Compress grammar, politeness and filler, never a fact or a clause.
@@ -3227,6 +3233,7 @@ async function dubChunkWithRetry(
   let lastError: MediaError | null = null;
   let activePrompt = prompt;
   let completenessRetried = false;
+  let keyFallbackTried = false;
   const attempts = config.maxRetries + 1;
   let maxAttempts = attempts;
 
@@ -3252,13 +3259,33 @@ async function dubChunkWithRetry(
     };
 
     try {
-      const response = await fetchUpstreamWithKeys(
+      let response = await fetchUpstreamWithKeys(
         url,
         payload,
         deps.getGatewayApiKeys(),
         signal,
         config.chunkTimeoutMs,
       );
+
+      if (
+        !response.ok &&
+        !keyFallbackTried &&
+        (response.status === 429 || response.status === 503)
+      ) {
+        // Every OAuth account is unavailable or over quota. Retry the exact
+        // same Gemini request on the AI Studio key pool when one is configured;
+        // the native handler honours x-geminirouter-routing for one request.
+        keyFallbackTried = true;
+        await response.body?.cancel().catch(() => undefined);
+        response = await fetchUpstreamWithKeys(
+          url,
+          payload,
+          deps.getGatewayApiKeys(),
+          signal,
+          config.chunkTimeoutMs,
+          { 'x-geminirouter-routing': 'keys' },
+        );
+      }
 
       if (!response.ok) {
         const errorText = await response.text().catch(() => '');

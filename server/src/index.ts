@@ -560,6 +560,18 @@ export async function createServer(): Promise<{
     // auth check to reject. A matched key is swapped for the core key below so
     // named dashboard keys work without teaching the core about them.
 
+    // A caller may force one pool for a single request. The dubbing pipeline
+    // uses this to retry on the key pool when every account is unavailable.
+    const routingHeader = String(
+      request.headers['x-geminirouter-routing'] || '',
+    )
+      .trim()
+      .toLowerCase();
+    const forceRouting =
+      routingHeader === 'keys' || routingHeader === 'accounts'
+        ? (routingHeader as 'keys' | 'accounts')
+        : undefined;
+
     const apiKeyOptions = {
       pool: geminiApiPool,
       getApiKeys: gatewayApiKeys,
@@ -571,6 +583,7 @@ export async function createServer(): Promise<{
         proxyManager.markApiKeyProxyRateLimited(keyId);
       },
       chooseKeyModel: (model: string) => sharedModelProvider(model),
+      forceRouting,
       gatewayKey: auth.identity,
     };
 

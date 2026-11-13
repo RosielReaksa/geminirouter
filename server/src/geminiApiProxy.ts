@@ -27,6 +27,23 @@ export interface GeminiApiProxyOptions {
    * null to send the request to the OAuth account pool instead.
    */
   chooseKeyModel?: (model: string) => string | null;
+  /**
+   * Per-request override of the shared-model routing. `keys` forces the key
+   * pool, `accounts` forces the OAuth pool. Used by the dubbing pipeline to
+   * retry on the key pool when every account is unavailable.
+   */
+  forceRouting?: 'keys' | 'accounts';
+}
+
+function servedModelFor(
+  requestedModel: string,
+  options: GeminiApiProxyOptions,
+): string | null {
+  if (options.forceRouting === 'keys') return requestedModel;
+  if (options.forceRouting === 'accounts') return null;
+  return options.chooseKeyModel
+    ? options.chooseKeyModel(requestedModel)
+    : requestedModel;
 }
 
 function parseJsonBody(request: FastifyRequest): any | null {
@@ -161,9 +178,7 @@ export async function handleGeminiApiRequest(
   // The two shared models can also be served by the OAuth account pool. Balanced
   // routing returns null here for account turns; the requested model is always
   // preserved.
-  const servedModel = options.chooseKeyModel
-    ? options.chooseKeyModel(requestedModel)
-    : requestedModel;
+  const servedModel = servedModelFor(requestedModel, options);
   if (!servedModel) return false;
   const model = (GEMINI_API_MODELS as readonly string[]).includes(servedModel)
     ? servedModel
@@ -485,9 +500,7 @@ export async function handleGeminiApiNativeRequest(
   if (!(GEMINI_API_MODELS as readonly string[]).includes(requestedModel)) return false;
 
   // Balanced routing: null means this turn belongs to the account pool.
-  const servedModel = options.chooseKeyModel
-    ? options.chooseKeyModel(requestedModel)
-    : requestedModel;
+  const servedModel = servedModelFor(requestedModel, options);
   if (!servedModel) return false;
 
   const configuredKeys = options.getApiKeys().map((key) => key.trim()).filter(Boolean);
