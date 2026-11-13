@@ -122,6 +122,25 @@ for _ in $(seq 1 30); do
 done
 systemctl start geminirouter-bridge
 
+# The restored Caddyfile must reach the running process. The apt install in
+# step [2/8] auto-starts Caddy with the package's default localhost config and
+# the tarball overwrites the file afterwards, so without this restart Caddy
+# keeps serving the default on :80 only and never attempts HTTPS.
+if command -v caddy >/dev/null 2>&1; then
+  systemctl restart caddy
+  echo "    caddy restarted on the restored Caddyfile"
+fi
+
+# Some cloud images (Vultr's Ubuntu 24.04) ship ufw ACTIVE with only 22 open,
+# which makes the ACME HTTP/TLS-ALPN challenges time out and the certificate
+# never issues. The source box had ufw inactive, so these two rules reproduce
+# its effective policy while keeping everything else closed.
+if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
+  ufw allow 80/tcp >/dev/null 2>&1 || true
+  ufw allow 443/tcp >/dev/null 2>&1 || true
+  echo "    ufw active: opened 80/tcp and 443/tcp for Caddy + ACME"
+fi
+
 echo "==> [7/8] Waiting for the bridge to answer"
 ok=0
 for _ in $(seq 1 30); do
