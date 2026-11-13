@@ -39,11 +39,18 @@ function postKeys(payload: Record<string, unknown>) {
   return app.inject({ method: 'POST', url: '/api/gemini/keys', payload });
 }
 
-test('config starts empty with the two Gemini models', async () => {
+test('config starts empty with the key-pool Gemini models', async () => {
   const res = await app.inject({ method: 'GET', url: '/api/gemini/config' });
   assert.equal(res.statusCode, 200);
   const body = res.json();
-  assert.deepEqual(body.models, ['gemini-3.1-flash-lite', 'gemini-3.5-flash-lite']);
+  assert.deepEqual(body.models, [
+    'gemini-3.1-flash-lite',
+    'gemini-3.5-flash-lite',
+    'gemini-3.6-flash',
+    'gemini-3.7-flash',
+    'gemini-4-carbon',
+    'gemini-4-hydrogen',
+  ]);
   assert.equal(body.limits.rpm, 15);
   assert.equal(body.limits.tpm, 250000);
   assert.equal(body.limits.rpd, 500);

@@ -96,16 +96,10 @@ export const UNAVAILABLE_WEBSITE_MODEL_IDS: ReadonlySet<string> = new Set([
   'gemini-3.5-flash-high',
   'gemini-3.5-flash-low',
   'gemini-3.5-flash-medium',
-  'gemini-3.6-flash',
-  'gemini-3.6-flash-high',
-  'gemini-3.6-flash-low',
-  'gemini-3.6-flash-medium',
-  'gemini-3.6-flash-tiered',
-  'gemini-3.7-flash',
-  'gemini-3.7-flash-high',
-  'gemini-3.7-flash-low',
-  'gemini-3.7-flash-medium',
-  'gemini-3.7-flash-tiered',
+  // 3.6/3.7 Flash were hidden while their only backing (the OAuth account pool) was
+  // plan-locked. The AI Studio key pool now serves them (GEMINI_API_MODELS), so they
+  // are offered again. 3.5-flash high/low/medium stay hidden: the account pool serves
+  // the -high variant, but the base/low/medium ids have no healthy path and no alias.
 ]);
 
 /** True when the website should hide this id (canonical form is checked). */

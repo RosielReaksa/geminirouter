@@ -12,6 +12,27 @@ import {
 } from './geminiApiPool.js';
 import type { TrafficRecord } from './store.js';
 
+/**
+ * Account-pool tier suffixes (-high/-low/-medium/-tiered) do not exist on the AI Studio
+ * API — only base ids. When the key pool serves a variant it calls the base model and
+ * the response echoes that base id. Traffic records keep the requested variant.
+ */
+export const KEY_POOL_MODEL_ALIASES: Readonly<Record<string, string>> = {
+  'gemini-3.6-flash-high': 'gemini-3.6-flash',
+  'gemini-3.6-flash-low': 'gemini-3.6-flash',
+  'gemini-3.6-flash-medium': 'gemini-3.6-flash',
+  'gemini-3.6-flash-tiered': 'gemini-3.6-flash',
+  'gemini-3.7-flash-high': 'gemini-3.7-flash',
+  'gemini-3.7-flash-low': 'gemini-3.7-flash',
+  'gemini-3.7-flash-medium': 'gemini-3.7-flash',
+  'gemini-3.7-flash-tiered': 'gemini-3.7-flash',
+};
+
+/** Resolve the id the AI Studio API actually accepts for this request. */
+export function keyPoolModelFor(requestedModel: string): string {
+  return KEY_POOL_MODEL_ALIASES[requestedModel] ?? requestedModel;
+}
+
 export interface GeminiApiProxyOptions {
   pool: GeminiApiPool;
   getApiKeys: () => string[];
@@ -168,21 +189,20 @@ export async function handleGeminiApiRequest(
   if (!body || typeof body.model !== 'string' || !Array.isArray(body.messages)) return false;
 
   const requestedModel = canonicalModelId(body.model);
-  if (!(GEMINI_API_MODELS as readonly string[]).includes(requestedModel)) return false;
+  const keyPoolModel = keyPoolModelFor(requestedModel);
+  if (!(GEMINI_API_MODELS as readonly string[]).includes(keyPoolModel)) return false;
 
   // The key pool speaks Google's OpenAI-compatible protocol, which rejects
   // inline video. Hand video to the account pool instead of failing half the
   // calls on a coin flip of routing.
   if (hasInlineVideo(body)) return false;
 
-  // The two shared models can also be served by the OAuth account pool. Balanced
+  // Shared models can also be served by the OAuth account pool. Balanced
   // routing returns null here for account turns; the requested model is always
-  // preserved.
-  const servedModel = servedModelFor(requestedModel, options);
+  // preserved in traffic records and the response model is what served it.
+  const servedModel = servedModelFor(keyPoolModel, options);
   if (!servedModel) return false;
-  const model = (GEMINI_API_MODELS as readonly string[]).includes(servedModel)
-    ? servedModel
-    : requestedModel;
+  const model = servedModel;
 
   // /v1 is public at the bridge; without this check the key pool would be an
   // unauthenticated gateway. An empty configuration keeps local dev open.
@@ -497,10 +517,11 @@ export async function handleGeminiApiNativeRequest(
     /* keep the raw id */
   }
   requestedModel = canonicalModelId(requestedModel);
-  if (!(GEMINI_API_MODELS as readonly string[]).includes(requestedModel)) return false;
+  const nativeKeyPoolModel = keyPoolModelFor(requestedModel);
+  if (!(GEMINI_API_MODELS as readonly string[]).includes(nativeKeyPoolModel)) return false;
 
   // Balanced routing: null means this turn belongs to the account pool.
-  const servedModel = servedModelFor(requestedModel, options);
+  const servedModel = servedModelFor(nativeKeyPoolModel, options);
   if (!servedModel) return false;
 
   const configuredKeys = options.getApiKeys().map((key) => key.trim()).filter(Boolean);

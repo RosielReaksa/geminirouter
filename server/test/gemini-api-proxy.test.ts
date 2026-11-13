@@ -192,6 +192,35 @@ test('a rate-limited key fails over to the next key', async () => {
   assert.equal(calls[0].model, 'gemini-3.1-flash-lite');
 });
 
+test('account-pool tier variants are served by the key pool under their base id', async () => {
+  // The account pool cannot serve 3.6/3.7 (plan-locked upstream), but the AI Studio
+  // API only knows the base ids. A client asking for the -high variant must still be
+  // served by keys, calling the base model upstream.
+  calls.length = 0;
+  const res = await chat({
+    model: 'gemini-3.7-flash-high',
+    messages: [{ role: 'user', content: 'ping' }],
+  });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  // The response echoes the base id that actually served the call.
+  assert.equal(body.model, 'gemini-3.7-flash');
+  assert.equal(calls.length >= 1, true);
+  assert.equal(calls[0].model, 'gemini-3.7-flash');
+});
+
+test('a dead-family id outside the key-pool list still goes to the account pool', async () => {
+  calls.length = 0;
+  const res = await chat({
+    model: 'gemini-3-flash',
+    messages: [{ role: 'user', content: 'ping' }],
+  });
+  // No keys were called: gemini-3-flash is not in GEMINI_API_MODELS, so the request
+  // falls through to the account pool (which fails upstream — status is not the point).
+  assert.equal(calls.length, 0, 'gemini-3-flash must bypass the key pool');
+  assert.notEqual(res.status, 400);
+});
+
 test('inline video is never sent to the OpenAI-compatible key pool', async () => {
   // The key pool speaks /v1beta/openai/chat/completions, which rejects a
   // video_url part with "Invalid content part type". Balanced routing used to

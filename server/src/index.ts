@@ -2596,6 +2596,11 @@ export async function createServer(): Promise<{
     { id: 'gemini-3.5-flash-lite', name: 'Gemini 3.5 Flash Lite', provider: 'Google Gemini', family: 'gemini', contextLength: 1048576, maxOutputTokens: 65535 },
     { id: 'gemini-3-pro-image', name: 'Gemini 3 Pro Image', provider: 'Google Gemini', family: 'gemini-image', contextLength: 1048576, maxOutputTokens: 65535 },
     { id: 'gemini-3.8-flash-high', name: 'Gemini 3.8 Flash High', provider: 'Google Gemini', family: 'gemini', contextLength: 1048576, maxOutputTokens: 65535 },
+    { id: 'gemini-3.6-flash', name: 'Gemini 3.6 Flash', provider: 'Google Gemini', family: 'gemini', contextLength: 1000000, maxOutputTokens: 65536 },
+    { id: 'gemini-3.7-flash', name: 'Gemini 3.7 Flash', provider: 'Google Gemini', family: 'gemini', contextLength: 1000000, maxOutputTokens: 65536 },
+    { id: 'gemini-4-argon', name: 'Gemini 4 Argon', provider: 'Google Gemini', family: 'gemini', contextLength: 1000000, maxOutputTokens: 65536 },
+    { id: 'gemini-4-carbon', name: 'Gemini 4 Carbon', provider: 'Google Gemini', family: 'gemini', contextLength: 1000000, maxOutputTokens: 65536 },
+    { id: 'gemini-4-hydrogen', name: 'Gemini 4 Hydrogen', provider: 'Google Gemini', family: 'gemini', contextLength: 1000000, maxOutputTokens: 65536 },
   ];
 
   app.get('/api/models', async () => {

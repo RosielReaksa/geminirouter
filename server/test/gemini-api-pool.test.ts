@@ -158,6 +158,10 @@ test('snapshot masks keys and exposes per-model budgets', async () => {
   assert.deepEqual(Object.keys(pool.snapshot()[0].models).sort(), [
     'gemini-3.1-flash-lite',
     'gemini-3.5-flash-lite',
+    'gemini-3.6-flash',
+    'gemini-3.7-flash',
+    'gemini-4-carbon',
+    'gemini-4-hydrogen',
   ]);
   assert.equal(pool.getQueueStats().maxConcurrentPerKey, 4);
 });

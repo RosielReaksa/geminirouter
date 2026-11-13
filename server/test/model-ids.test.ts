@@ -84,18 +84,24 @@ test('the website list adds verified ids and drops every non-Gemini id', () => {
 
 test('the website list drops core ids whose pool is currently unhealthy', () => {
   const live = [
-    'gemini-3.6-flash',
-    'gemini-3.7-flash-tiered',
+    'gemini-3-flash',
+    'gemini-3.1-pro-high',
     'gemini-3.5-flash-high',
     'gemini-3.8-flash-high',
     'gemini-3.5-flash-lite',
+    // 3.6/3.7 were hidden while only the plan-locked account pool backed them; the
+    // AI Studio key pool serves them now, so they survive the filter again.
+    'gemini-3.6-flash',
+    'gemini-3.7-flash-tiered',
   ];
 
   const merged = includeVerifiedWebsiteModels(live);
 
-  for (const id of ['gemini-3.6-flash', 'gemini-3.7-flash-tiered', 'gemini-3.5-flash-high']) {
+  for (const id of ['gemini-3-flash', 'gemini-3.1-pro-high', 'gemini-3.5-flash-high']) {
     assert.ok(!merged.includes(id), `${id} is hidden`);
   }
+  assert.ok(merged.includes('gemini-3.6-flash'), 'key-pool-backed 3.6 is offered');
+  assert.ok(merged.includes('gemini-3.7-flash-tiered'), 'key-pool-backed 3.7 tiered is offered');
   assert.ok(merged.includes('gemini-3.8-flash-high'));
   assert.ok(merged.includes('gemini-3.5-flash-lite'));
   for (const id of UNAVAILABLE_WEBSITE_MODEL_IDS) {
@@ -106,8 +112,11 @@ test('the website list drops core ids whose pool is currently unhealthy', () => 
 });
 
 test('hiding is decided on the canonical id, so a retired alias cannot slip through', () => {
-  assert.equal(isUnavailableWebsiteModel('gemini-3.7-flash-tiered'), true);
-  assert.equal(isUnavailableWebsiteModel('gemini-3.6-flash-tiered'), true);
+  // 3.6/3.7 became key-pool-backed and are offered again; the still-dead families stay hidden.
+  assert.equal(isUnavailableWebsiteModel('gemini-3.7-flash-tiered'), false);
+  assert.equal(isUnavailableWebsiteModel('gemini-3.6-flash-tiered'), false);
+  assert.equal(isUnavailableWebsiteModel('gemini-3.1-pro-high'), true);
+  assert.equal(isUnavailableWebsiteModel('gemini-3-flash'), true);
   assert.equal(isUnavailableWebsiteModel('gemini-3.8-flash-tiered'), false);
   assert.equal(isUnavailableWebsiteModel('gemini-3.8-flash-high'), false);
 });

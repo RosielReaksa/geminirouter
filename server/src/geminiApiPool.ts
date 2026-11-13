@@ -1,7 +1,22 @@
 import type { GeminiApiKeyRecord, GeminiApiUsageState } from './store.js';
 
-/** Models served by AI Studio keys for now. Others stay on the account pool. */
-export const GEMINI_API_MODELS = ['gemini-3.1-flash-lite', 'gemini-3.5-flash-lite'] as const;
+/**
+ * Models the AI Studio key pool may serve. Others stay on the account pool.
+ *
+ * The 3.6/3.7 Flash and Gemini 4 Carbon/Hydrogen families have no healthy OAuth-account
+ * backing (plan-tier availability: 3.6/3.7 are Enterprise-only, Carbon/Hydrogen are
+ * Ultra-only upstream), so the key pool is their only path. 3.8 Flash and 4 Argon are
+ * deliberately NOT listed: the account pool serves them and the AI Studio API was
+ * answering 503 high-demand / hanging for them, so key turns would regress reliability.
+ */
+export const GEMINI_API_MODELS = [
+  'gemini-3.1-flash-lite',
+  'gemini-3.5-flash-lite',
+  'gemini-3.6-flash',
+  'gemini-3.7-flash',
+  'gemini-4-carbon',
+  'gemini-4-hydrogen',
+] as const;
 export type GeminiApiModel = (typeof GEMINI_API_MODELS)[number];
 
 export interface GeminiApiLimits {
