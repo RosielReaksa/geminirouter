@@ -121,6 +121,10 @@ for _ in $(seq 1 30); do
   sleep 1
 done
 systemctl start geminirouter-bridge
+# Enable only schedules the timer for the next boot; a timer also has to be
+# STARTED for the current boot, and the daily credential drift check must not
+# wait for a reboot to begin running.
+systemctl start geminirouter-core-creds.timer
 
 # The restored Caddyfile must reach the running process. The apt install in
 # step [2/8] auto-starts Caddy with the package's default localhost config and
