@@ -54,9 +54,12 @@ The gateway serves Gemini models through two backends:
    older core every account-pool stream answered the Antigravity deprecation
    notice.
 
-Chat turns prefer the key pool when it has capacity (`keys-first`) and fall
-back to the account pool when every key is rate-limited. The native dubbing
-path keeps the original balanced alternation. Account-pool tier variants
+Every shared-model turn — chat and native dubbing alike — prefers the key pool
+when it has capacity and falls back to the account pool only when every key is
+rate-limited. There is no alternation: three of the shared families have no
+account backing at all, and an account turn for them is a guaranteed 503 that
+also burns the dubbing retry budget (a 5-minute Hydrogen dub failed after
+160.5 s of exactly those retries before this was fixed). Account-pool tier variants
 (`-high/-low/-medium/-tiered`) do not exist on the AI Studio API —
 `KEY_POOL_MODEL_ALIASES` maps them to base ids when the key pool serves a
 variant, and traffic records keep the requested variant.

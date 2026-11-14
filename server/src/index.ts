@@ -515,37 +515,25 @@ export async function createServer(): Promise<{
   // /v1beta is the Gemini-native path used by the dubbing app
   // (/v1beta/models/<model>:generateContent). It goes through the same leases,
   // quota checks and failover as /v1, and the path is forwarded unchanged.
-  // Round-robin turn for the two shared flash-lite models under balanced routing.
-  let sharedModelTurn = 0;
   /**
    * Pick the model the key pool should serve, or null for an account turn.
    *
-   * The exact requested model is always preserved: a key is only used when that
-   * model has key capacity. Otherwise balanced routing sends the request to an
-   * account, which can serve the same model. When no account can take the call,
-   * keys get it (and may return Google's 429 until the quota resets).
+   * Keys take every turn they have capacity for. Three of the shared families
+   * (3.6/3.7 Flash, 4 Carbon/Hydrogen) have NO account backing at all — they are
+   * plan-locked upstream, and an account turn is a guaranteed 503 that also
+   * burns the dubbing retry budget (measured: a 5-minute Hydrogen dub failed
+   * after 160.5 s of account-turn retries). The account pool only sees these
+   * requests as overflow when every key is rate-limited. The operator's routing
+   * mode still wins when pinned to 'accounts' or 'keys'.
    */
-  /**
-   * Decides whether a shared-model turn goes to the AI Studio key pool (returns the
-   * id) or the OAuth account pool (returns null).
-   *
-   * 'keys-first' (chat): the key pool is the only path for the plan-locked families
-   * (3.6/3.7 Flash, 4 Carbon/Hydrogen) and the fastest path for the lite models, so
-   * keys take every turn they have capacity for; accounts only absorb overflow when
-   * every key is rate-limited.
-   *
-   * 'balanced' (native dubbing): keeps the original alternation so dubbing traffic
-   * still splits between both backends exactly as before.
-   */
-  const sharedModelProvider = (
-    requestedModel: string,
-    preference: 'keys-first' | 'balanced' = 'balanced',
-  ): string | null => {
+  const sharedModelProvider = (requestedModel: string): string | null => {
     const routing = store.getGeminiApiSharedRouting();
     const keyReady = geminiApiPool.hasImmediateCapacity(requestedModel);
 
     if (routing === 'accounts') return null;
     if (routing === 'keys') return requestedModel;
+
+    if (keyReady) return requestedModel;
 
     const usableAccounts = store
       .getAccounts()
@@ -554,14 +542,7 @@ export async function createServer(): Promise<{
           account.status !== 'error' &&
           !leaseManager.isAccountModelInCooldown(account.id, requestedModel),
       );
-    if (usableAccounts.length === 0) return requestedModel;
-    if (!keyReady) return null;
-
-    if (preference === 'keys-first') return requestedModel;
-
-    const preferAccounts = sharedModelTurn % 2 === 0;
-    sharedModelTurn += 1;
-    return preferAccounts ? null : requestedModel;
+    return usableAccounts.length > 0 ? null : requestedModel;
   };
 
   const gatewayKeyLabel = (id: string | undefined): string | undefined => {
@@ -606,7 +587,7 @@ export async function createServer(): Promise<{
       },
       // Chat is keys-first: the key pool is the only path for the plan-locked
       // families and the fast path for the lite models; accounts absorb overflow.
-      chooseKeyModel: (model: string) => sharedModelProvider(model, 'keys-first'),
+      chooseKeyModel: (model: string) => sharedModelProvider(model),
       forceRouting,
       gatewayKey: auth.identity,
     };
@@ -617,12 +598,11 @@ export async function createServer(): Promise<{
     // The dubbing pipeline calls the Gemini-native route, not the
     // OpenAI-compatible one. Without this branch that traffic could never use
     // the AI Studio key pool.
-    // Native (dubbing) keeps balanced routing: both backends can serve lite audio
-    // and the alternation is what the dubbing pipeline was verified against.
-    const handledByNativeKeys = await handleGeminiApiNativeRequest(request, reply, {
-      ...apiKeyOptions,
-      chooseKeyModel: (model: string) => sharedModelProvider(model, 'balanced'),
-    });
+    const handledByNativeKeys = await handleGeminiApiNativeRequest(
+      request,
+      reply,
+      apiKeyOptions,
+    );
     if (handledByNativeKeys) return;
 
     await handleV1ProxyRequest(request, reply, {
