@@ -127,9 +127,19 @@ export class CoreClient {
     return res.status >= 200 && res.status < 300;
   }
 
+  /**
+   * Start an OAuth login on the core.
+   *
+   * Since core v0.30.0 the request schema is a z.strictObject({ diagnosticId,
+   * oauthClientKey? }) — the core self-hosts the OAuth callback on its own
+   * loopback listener and derives the redirect URI itself. Any extra field
+   * (the old redirectUri) makes the strict schema reject the whole request
+   * with "Invalid OAuth login request", so redirectUri is accepted for
+   * caller compatibility but deliberately not sent.
+   */
   async startOAuth(
     oauthClientKey?: string,
-    redirectUri?: string,
+    _redirectUri?: string,
   ): Promise<
     | { ok: true; sessionId: string; authorizationUrl: string }
     | { ok: false; status: number; error: string }
@@ -147,7 +157,6 @@ export class CoreClient {
       data: {
         diagnosticId,
         ...(oauthClientKey ? { oauthClientKey } : {}),
-        ...(redirectUri ? { redirectUri } : {}),
       },
     });
 
