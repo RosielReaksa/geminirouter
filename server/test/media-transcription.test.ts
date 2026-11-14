@@ -735,6 +735,12 @@ test('dubbing reasoning models get a token floor and a 120-second chunk window',
   assert.equal(isReasoningDubbingModel('gemini-3.8-flash-high'), true);
   assert.equal(isReasoningDubbingModel('gemini-3.8-flash-low'), true);
   assert.equal(isReasoningDubbingModel('gemini-3.5-pro'), true);
+  // The whole Gemini 4 family reasons; a hydrogen dub on the plain budget hit
+  // the 8,192-token cap before finishing its script.
+  assert.equal(isReasoningDubbingModel('gemini-4-hydrogen'), true);
+  assert.equal(isReasoningDubbingModel('gemini-4-argon'), true);
+  assert.equal(isReasoningDubbingModel('gemini-4-argon-high'), true);
+  assert.equal(isReasoningDubbingModel('gemini-4-carbon'), true);
   assert.equal(isReasoningDubbingModel('gemini-3.5-flash-lite'), false);
 
   // Lite needs the same short window, but it is not a reasoning model.

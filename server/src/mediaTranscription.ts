@@ -1977,9 +1977,16 @@ export const DUBBING_RESPONSE_SCHEMA = {
 /**
  * True for models that emit a thinking pass before the JSON answer. Their
  * thoughts consume the output budget and they degrade on long audio windows.
+ *
+ * The whole Gemini 4 family reasons: a hydrogen transcription burned ~3.6k
+ * hidden reasoning tokens, and a dubbing call on the plain duration budget hit
+ * the 8,192-token cap before finishing its script.
  */
 export function isReasoningDubbingModel(model: string): boolean {
-  return /(^|[-_/])3\.8|(^|[-_/])(high|thinking|reasoner|pro)([-_/]|$)/i.test(model.trim());
+  return (
+    /gemini-4/i.test(model) ||
+    /(^|[-_/])3\.8|(^|[-_/])(high|thinking|reasoner|pro)([-_/]|$)/i.test(model.trim())
+  );
 }
 
 /** True for the small `-lite` models, which stop at the end of a script pass. */
