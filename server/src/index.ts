@@ -2689,6 +2689,12 @@ export async function createServer(): Promise<{
     if (!model || typeof model !== 'string') {
       return reply.code(400).send({ ok: false, error: 'A "model" field is required' });
     }
+    if (!isGeminiModelId(model)) {
+      return reply.code(400).send({
+        ok: false,
+        error: 'Only Gemini models can be tested. Anthropic and OpenAI-compatible ids are not available.',
+      });
+    }
 
     const { port: gatewayPort, apiKey } = resolveGateway();
     const startedAt = Date.now();
@@ -2767,6 +2773,14 @@ export async function createServer(): Promise<{
     const { model, prompt, systemPrompt, temperature, maxTokens, media: rawMedia } = request.body || {};
     if (typeof model !== 'string' || !model.trim()) {
       return reply.code(400).send({ ok: false, error: 'Choose a model to run.' });
+    }
+    // The gateway is Gemini-only: the account pool's Claude/GPT ids answer
+    // upstream or are plan-locked, and no surface should offer them anymore.
+    if (!isGeminiModelId(model)) {
+      return reply.code(400).send({
+        ok: false,
+        error: 'Only Gemini models are served. Anthropic and OpenAI-compatible ids are not available.',
+      });
     }
 
     let media: {
