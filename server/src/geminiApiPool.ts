@@ -17,6 +17,19 @@ export const GEMINI_API_MODELS = [
   'gemini-4-carbon',
   'gemini-4-hydrogen',
 ] as const;
+
+/**
+ * Gemini ids the OAuth account pool demonstrably serves (verified with real
+ * requests on 2026-11-14). These are offered on the public model list next to
+ * the key-pool models so the marketing site reflects everything the gateway
+ * can do. Tier variants stay off the public list; the dashboard shows them.
+ */
+export const ACCOUNT_POOL_PUBLIC_MODELS = [
+  'gemini-3.8-flash-high',
+  'gemini-3.8-flash-low',
+  'gemini-3.8-flash-medium',
+  'gemini-4-argon',
+] as const;
 export type GeminiApiModel = (typeof GEMINI_API_MODELS)[number];
 
 export interface GeminiApiLimits {

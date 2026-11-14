@@ -21,7 +21,12 @@ import { derivePoolState, bridgeToCoreProxy, coreProxyToBridge } from './pool-st
 import { readCoreProxyConfig, applyCoreProxyConfig } from './coreConfig.js';
 import { ConcurrencyLeaseManager } from './leaseManager.js';
 import { handleV1ProxyRequest } from './v1Proxy.js';
-import { GeminiApiPool, GEMINI_API_MODELS, geminiApiBaseUrl } from './geminiApiPool.js';
+import {
+  ACCOUNT_POOL_PUBLIC_MODELS,
+  GeminiApiPool,
+  GEMINI_API_MODELS,
+  geminiApiBaseUrl,
+} from './geminiApiPool.js';
 import { handleGeminiApiNativeRequest, handleGeminiApiRequest } from './geminiApiProxy.js';
 import {
   canonicalModelId,
@@ -780,21 +785,35 @@ export async function createServer(): Promise<{
   });
 
   app.get('/api/public/models', async () => {
-    // The public site exposes only the two AI Studio models for now. The
-    // dashboard still lists the rest of the Gemini catalog for the account pool.
-    const models = GEMINI_API_MODELS.map((id) => {
+    // The public site lists every Gemini model the gateway can serve right now:
+    // the AI Studio key-pool families plus the account-pool models verified with
+    // real requests. No plan-locked or dead ids, no Anthropic/OpenAI ids.
+    const seen = new Set<string>();
+    const models: Array<{
+      id: string;
+      name: string;
+      provider: string;
+      contextLength: number;
+      maxOutputTokens: number;
+    }> = [];
+    for (const id of [...GEMINI_API_MODELS, ...ACCOUNT_POOL_PUBLIC_MODELS]) {
+      if (seen.has(id)) continue;
+      seen.add(id);
       const meta = MODEL_CATALOG.find((entry) => entry.id === id);
-      return {
+      models.push({
         id,
         name: meta?.name || id,
         provider: 'Google Gemini',
         contextLength: meta?.contextLength || 1048576,
         maxOutputTokens: meta?.maxOutputTokens || 65535,
-      };
-    });
+      });
+    }
+    const accountsUsable = store
+      .getAccounts()
+      .some((account) => account.status !== 'error');
     return {
       source: 'gemini-api',
-      online: geminiApiPool.hasEnabledKeys(),
+      online: geminiApiPool.hasEnabledKeys() || accountsUsable,
       models,
     };
   });
@@ -2616,6 +2635,8 @@ export async function createServer(): Promise<{
     { id: 'gemini-3.5-flash-lite', name: 'Gemini 3.5 Flash Lite', provider: 'Google Gemini', family: 'gemini', contextLength: 1048576, maxOutputTokens: 65535 },
     { id: 'gemini-3-pro-image', name: 'Gemini 3 Pro Image', provider: 'Google Gemini', family: 'gemini-image', contextLength: 1048576, maxOutputTokens: 65535 },
     { id: 'gemini-3.8-flash-high', name: 'Gemini 3.8 Flash High', provider: 'Google Gemini', family: 'gemini', contextLength: 1048576, maxOutputTokens: 65535 },
+    { id: 'gemini-3.8-flash-low', name: 'Gemini 3.8 Flash Low', provider: 'Google Gemini', family: 'gemini', contextLength: 1048576, maxOutputTokens: 65536 },
+    { id: 'gemini-3.8-flash-medium', name: 'Gemini 3.8 Flash Medium', provider: 'Google Gemini', family: 'gemini', contextLength: 1048576, maxOutputTokens: 65536 },
     { id: 'gemini-3.6-flash', name: 'Gemini 3.6 Flash', provider: 'Google Gemini', family: 'gemini', contextLength: 1000000, maxOutputTokens: 65536 },
     { id: 'gemini-3.7-flash', name: 'Gemini 3.7 Flash', provider: 'Google Gemini', family: 'gemini', contextLength: 1000000, maxOutputTokens: 65536 },
     { id: 'gemini-4-argon', name: 'Gemini 4 Argon', provider: 'Google Gemini', family: 'gemini', contextLength: 1000000, maxOutputTokens: 65536 },
