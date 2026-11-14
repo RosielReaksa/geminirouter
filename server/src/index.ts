@@ -320,6 +320,29 @@ export async function createServer(): Promise<{
   };
 
   /**
+   * Assign a proxy to accounts that just landed in the pool (OAuth sign-in,
+   * import, or a core-side add). The periodic Webshare refresh picks them up
+   * within a cycle, but the Accounts and Proxy pages should show the new
+   * account pinned immediately. Skipped when proxy routing is off or the
+   * Webshare inventory is not loaded — the next enabled cycle assigns then.
+   */
+  const syncProxyForNewAccounts = async (): Promise<void> => {
+    if (!proxyManager.isEnabled() || !proxyManager.isProxyInventoryActive()) return;
+    try {
+      await loadCoreAccounts();
+    } catch {
+      // Keep the last known pool; sync still runs against the store.
+    }
+    const sync = await runProxySync();
+    if (sync.failed > 0) {
+      console.warn(
+        '[ProxyManager] Could not assign proxies for the new account(s):',
+        sync.errors.join('; '),
+      );
+    }
+  };
+
+  /**
    * Attach the egress IP and country to each traffic record.
    *
    * Proxied accounts get the static Webshare IP they are pinned to. Anything
@@ -1755,6 +1778,7 @@ export async function createServer(): Promise<{
           message: 'Check the core logs for the exact reason.',
         });
       }
+      await syncProxyForNewAccounts();
       return { success: true, strategy: importStrategy, result };
     } catch (error: any) {
       return reply.code(500).send({
@@ -1779,7 +1803,11 @@ export async function createServer(): Promise<{
       } catch {
         app.log.warn('testAndRefreshAll failed; returning last known accounts');
       }
-      return (await loadCoreAccounts()) ?? store.getAccounts();
+      const accounts = (await loadCoreAccounts()) ?? store.getAccounts();
+      // A refresh can reveal accounts added on the core side (OAuth sign-in or
+      // import); pin their proxies now instead of waiting for the next cycle.
+      await syncProxyForNewAccounts();
+      return accounts;
     }
 
     // Core offline: keep last known data untouched. Do not invent numbers.
@@ -2070,6 +2098,9 @@ export async function createServer(): Promise<{
         });
       }
 
+      // The newly enrolled account gets its dedicated proxy immediately
+      // instead of waiting for the next Webshare refresh cycle.
+      await syncProxyForNewAccounts();
       return { success: true, email: result.email };
     },
   );
