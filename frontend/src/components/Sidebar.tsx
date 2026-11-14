@@ -1,5 +1,5 @@
 import React from 'react';
-import { Link } from '../router';
+import { Link } from '../RouterLink';
 import {
   LayoutDashboard,
   Users,
