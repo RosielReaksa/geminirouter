@@ -301,10 +301,11 @@ raise the request-body and response timeouts for this path.
 
 `POST /v1/audio/dubbing` is the server-side dubbing pipeline. It accepts the
 same multipart, raw-binary, and JSON/base64 uploads as the transcription route,
-splits the recording into safe chunks, and sends each chunk to the
-Gemini-native `:generateContent` endpoint with `inline_data`, a JSON response
-schema, and a duration-based `maxOutputTokens` cap. The returned timed segments
-are shifted from chunk-local time onto the absolute recording timeline.
+splits the recording into safe chunks, and runs **two Gemini-native
+`:generateContent` calls per chunk** — a multimodal transcription pass and a
+text-only Khmer adaptation pass (see *Two-pass dubbing* below). The returned
+timed segments are shifted from chunk-local time onto the absolute recording
+timeline.
 
 The endpoint returns the **text script only**. TTS, duration fitting, stem
 mixing, video muxing and finished-media storage belong to the dubbing product
@@ -321,12 +322,12 @@ The route reuses the transcription upload parsers: multipart `file`,
 `Content-Type: audio/*` raw body with query metadata, or JSON with
 `audio_base64`. Options:
 
-- `prompt` — optional full dubbing instruction. When omitted, the server sends
-  a built-in Chinese→Khmer prompt covering gender particles (male `បាទ`, female
-  `ចាស`), kinship terms, and the money/fruit terminology rules. When supplied,
-  the caller's prompt is used and the JSON/timing output contract is appended.
-- `glossary` — optional glossary text. It is appended to the dubbing prompt so
-  names and fixed terms are translated consistently across chunks.
+- `prompt` — optional replacement for the **Khmer adaptation** instruction.
+  Transcription always uses the built-in precision-transcription prompt; this
+  field customises how the transcript is written in Khmer. The output contract
+  and the transcript payload are always appended.
+- `glossary` — optional glossary text. It is appended to the Khmer adaptation
+  prompt so names and fixed terms are translated consistently across chunks.
 - `source_language` — default `zh`.
 - `target_language` — default `km`.
 - `model` — defaults to `MEDIA_DEFAULT_MODEL` or `gemini-3.5-flash-lite`.
@@ -339,8 +340,9 @@ The route reuses the transcription upload parsers: multipart `file`,
   repair (~92%). The default comes from `MEDIA_DUBBING_MODE`; it is an admin
   setting, not a user choice. The response echoes `mode`.
 - `max_tokens` — optional override, 256–65,535. When omitted, each chunk uses
-  the duration table below.
-- `temperature` — default `0`; `concurrency` — 1–4 chunks in parallel;
+  the duration table below. Both passes share the cap.
+- `temperature` — per-pass defaults (`0.1` transcription, `0.25` Khmer); an
+  explicit value applies to both passes. `concurrency` — 1–4 chunks in parallel;
   `response_format` — `json` (default) or `array`.
 
 When `concurrency` is omitted, short-window models (`-lite` and the reasoning
@@ -363,6 +365,36 @@ on a 120-second chunk it still stopped at `01:09`. 60-second windows end mid-pas
 so the whole chunk is transcribed (300 s → 5 chunks, 67 segments). Other models
 keep the requested chunk size and the duration table. This cap is dubbing-only:
 the same model id is unchanged for `/v1/chat/completions` and `/v1/models`.
+
+### Two-pass dubbing
+
+Each chunk is answered by two sequential calls instead of one:
+
+| Pass | Input | Instruction | Temperature | Output |
+|---|---|---|---|---|
+| 1. Transcription | chunk audio (`audio/mp3`) | `TRANSCRIPT_SYSTEM_PROMPT` — verbatim, one short clause per cue (1.0–2.2 s), tight non-overlapping timestamps, speaker gender/timbre/role | `0.1` | transcript array (no Khmer) |
+| 2. Khmer adaptation | transcript JSON only | `KHMER_DUB_SYSTEM_PROMPT` — 5.5 Khmer syllables/sec, spoken Khmer, glossary/continuity | `0.25` | same array plus `khmer_dubbing` |
+
+The split exists because one call was doing four jobs at once and losing some
+of them: long 3–4 s cues overflowed the TTS window, and forcing translation
+into the same pass caused dropped lines and timing drift.
+
+Guarantees:
+
+- **Metadata lock.** Only `khmer_dubbing` is taken from Call 2. `start`,
+  `end`, `speaker_gender`, `vocal_timbre`, `character_role` and
+  `original_transcript` are always the Call-1 values, so a translation can
+  never move the timeline or rename a speaker.
+- **Call 1 retry.** An empty or implausibly short transcript for a chunk with
+  audible speech is retried once with `RETRY - INCOMPLETE ANSWER` (no extra
+  upload; the same audio is resent).
+- **Call 2 retry.** If the Khmer array length differs from the transcript, it is
+  retried once with `RETRY - WRONG CUE COUNT`. A second mismatch fails the chunk
+  with `translation_count_mismatch` instead of returning a shifted timeline.
+- **Continuity** (part *N* of *M*, the previous part's last three lines and the
+  glossary) is attached to Call 2; the previous part's speaker roles are attached
+  to Call 1 so `character_role` stays identical across chunks.
+- The final JSON is unchanged, so callers do not need to change anything.
 
 ### Output contract
 
