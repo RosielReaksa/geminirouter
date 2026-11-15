@@ -92,6 +92,28 @@ const DUBBING_SPARSE_CUE_MIN_CHARS = 20;
 /** The audible-speech measurement is retried this many times before giving up. */
 const DUBBING_SPEECH_MEASURE_ATTEMPTS = 2;
 
+/**
+ * Two-call dubbing: Call 1 transcribes the media, Call 2 rewrites the transcript
+ * in Khmer. Transcription stays literal at a low temperature; the Khmer pass
+ * needs a little room to phrase naturally.
+ */
+export const TRANSCRIPT_TEMPERATURE = 0.1;
+export const KHMER_DUB_TEMPERATURE = 0.25;
+
+/**
+ * Per-phase temperature. A caller's explicit `temperature` wins for both
+ * passes; otherwise each phase uses its tuned default.
+ */
+export function dubbingPhaseTemperature(
+  options: { temperature: number; temperatureExplicit?: boolean },
+  phase: 'transcript' | 'khmer',
+): number {
+  if (options.temperatureExplicit) {
+    return options.temperature;
+  }
+  return phase === 'transcript' ? TRANSCRIPT_TEMPERATURE : KHMER_DUB_TEMPERATURE;
+}
+
 // Extra upload paths that need the streaming body parser but are not public
 // API model routes. The playground uses this for large files.
 const EXTRA_MEDIA_UPLOAD_PATHS = ['/api/playground/media'];
@@ -216,6 +238,27 @@ export interface DubbingChunkResult {
   thoughtCharacters: number;
 }
 
+/**
+ * One Call-1 transcript cue. This is the shape passed to Call 2 and the shape
+ * whose metadata is locked back onto the merged segment, so `khmer_dubbing`
+ * can never move a timestamp or rename a speaker.
+ */
+export interface TranscriptSegmentInternal {
+  start: string;
+  end: string;
+  speaker_id: string;
+  speaker_gender: DubbingSpeakerGender;
+  vocal_timbre: string;
+  character_role: string;
+  original_transcript: string;
+  /** Cue timing inside the chunk, in seconds. */
+  localStartSeconds: number;
+  localEndSeconds: number;
+  /** Cue timing on the whole recording, used for coverage. */
+  startSeconds: number;
+  endSeconds: number;
+}
+
 export interface DubbingOptions {
   model: string;
   prompt?: string;
@@ -225,6 +268,8 @@ export interface DubbingOptions {
   chunkSeconds: number;
   maxTokens?: number;
   temperature: number;
+  /** True when the caller sent an explicit `temperature` value. */
+  temperatureExplicit?: boolean;
   concurrency: number;
   /** True when the caller sent an explicit `concurrency` value. */
   concurrencyExplicit: boolean;
@@ -1881,55 +1926,74 @@ function buildResponse(input: {
 // Timed dubbing (Chinese -> Khmer and any other pair)
 // ---------------------------------------------------------------------------
 
-const DUBBING_DEFAULT_PROMPT = `You are a professional audiovisual translator and dubbing director. The source audio may be Chinese, Korean, Japanese, Thai, English or another language; detect the spoken language from the audio and never assume the app's language setting is correct. Write the dub in Khmer.
-Listen to the supplied audio, transcribe every spoken line in the original language, and write a timed Khmer dubbing script that a TTS engine can perform.
+export const TRANSCRIPT_SYSTEM_PROMPT = `You are a precision audiovisual transcriptionist and dialogue editor for animation and drama dubbing.
+Detect the spoken language directly from the audio (Chinese, Korean, Japanese, Thai, English, etc.) and transcribe every spoken utterance verbatim.
 
-Translation rules:
-- Translate into natural, colloquial spoken Khmer for dubbing, not literary word-for-word Khmer.
-- This recording is one continuous story, not isolated sentences. Track who speaks to whom, their relationship, what just happened, and the emotional register; use that context for pronouns, kinship terms and tone.
-- Translate the complete utterance before splitting it into cues. The cues of one utterance must read as one natural Khmer sentence, with the same subject and tense; never translate a fragment as an isolated sentence.
-- Keep a consistent glossary: give every person, title, sect, place, item and technique one Khmer spelling and reuse it for the whole recording. When a line refers back to something, reuse the earlier wording.
-- Resolve an ambiguous word by the story and the visuals, not by its most common dictionary meaning.
-- The Khmer line must be speakable inside its own window. Budget about 7.5 syllables per second of (end - start): 1.0s -> at most 7 syllables, 1.5s -> 11, 2.0s -> 15, 3.0s -> 22, 4.0s -> 30. Count the syllables before answering. If over, compress the Khmer wording: keep the action and emotion, drop greetings, honorifics, repeated words and connectors. A cut-off line is worse than a shorter line that keeps the story.
-- Transcribe every spoken word verbatim in original_transcript. Never summarize, merge or skip a clause; keep exclamations and repeated emphasis.
-- The Khmer must keep every story fact: who did what to whom, names, numbers, items, rules, threats, promises and negations. Compress grammar, politeness and filler, never a fact or a clause.
-- Never omit, summarize or censor a spoken line. If a line cannot fit, merge it with the adjacent line from the same speaker (see timing) and use the combined window. Only as a last resort keep the key fact and drop descriptive words, never the fact itself.
-- Politeness particles are answers, not prefixes. Never open a full sentence with បាទ or ចាស. Use one only when the line is itself a short polite yes/no or a greeting to a superior, at most once. Male speakers use បាទ, female speakers use ចាស.
-- Read the whole line before choosing a sense. Do not pick a dictionary homonym (an order is not data); when a word is ambiguous, use the meaning the scene supports.
-- Names are names: transliterate personal names and forms of address (for example 小燕 as a name, never "little girl"). Never translate a name's literal meaning.
-- Follow the real relationship in kinship terms: 小梨 is the younger sister (ប្អូនស្រី), never អ៊ុំស្រី.
-- Render 抢钱 as កាប់ថ្លៃ or ប្លន់លុយ according to context.
-- Render 桃子 as ផ្លែប៉េស.
-- Render 块/元 (money) as យ័ន or រៀល as appropriate, never បាត.
-- Keep personal and place names consistent across the whole recording.
-- Do not add, omit, summarize or censor content.
+Segmentation & Timing Rules (CRITICAL FOR TTS):
+- ONE SHORT CLAUSE PER CUE: Never combine two sentences or separate thoughts into one object. Split at every pause, breath, or sentence boundary.
+- IDEAL CUE LENGTH: Keep segments between 1.0s and 2.2s whenever possible. Never merge lines across pauses into 3s–4s blocks.
+- TIGHT NON-OVERLAPPING TIMESTAMPS: Align "start" and "end" strictly to when speech begins and ends. Leave at least a 0.1s gap between consecutive cues. Never let "end" exceed the chunk duration.
+- ZERO MISSING SPEECH: Capture every spoken word, inner monologue, exclamation, and vocal reaction (e.g., "Huh?", "Aaaah!"). Never summarize or skip fast lines.
+- NO STAGE DIRECTIONS: Never write bracketed descriptions like [gasps], [laughs], or （惊呼） inside "original_transcript". Write only speakable words or vocalizations.
+- VISUAL & SUBTITLE VERIFICATION: Use on-screen video frames and burned-in subtitles (if present) to verify character names, cultivation/fantasy terms, and who is speaking, while keeping timestamps locked to the actual spoken audio.
 
-Voice rules:
-- speaker_gender must be male or female.
-- character_role must stay the same for the same character across lines (for example "younger sister", "boss", "mother").
-- Mention whispering, shouting or crying in vocal_timbre when audible.`;
+Speaker & Voice Rules:
+- "speaker_gender" must be strictly "male" or "female".
+- "character_role" must remain identical for the same character across all cues (including inner monologues/voiceovers).
+- Describe audible emotion/delivery in "vocal_timbre" (e.g., "calm male voice", "panicked shouting", "whispering", "sarcastic tone").`;
 
-const DUBBING_OUTPUT_CONTRACT = `OUTPUT CONTRACT
-Return ONLY a JSON array. Do not wrap it in Markdown fences and do not add comments or prose.
-Every element must be an object with exactly these fields:
+export const TRANSCRIPT_OUTPUT_CONTRACT = `OUTPUT CONTRACT
+Return ONLY a valid JSON array. Do not wrap in Markdown fences and do not include prose or comments.
+Every element must have these exact fields:
 {
   "start": "MM:SS.S",
   "end": "MM:SS.S",
   "speaker_gender": "male" or "female",
-  "vocal_timbre": "short voice description",
-  "character_role": "stable speaker role",
-  "original_transcript": "verbatim original-language line",
-  "khmer_dubbing": "natural spoken Khmer dub line that fits (end - start) at about 7 syllables per second"
+  "vocal_timbre": "short voice and emotion description",
+  "character_role": "consistent speaker identifier",
+  "original_transcript": "verbatim spoken line in original language (no stage directions)"
 }
-Timing rules:
-- Timestamps are relative to the start of the supplied audio and begin at 00:00.0.
-- One element per utterance. Split on pauses and speaker changes. If a short utterance cannot carry its Khmer line, merge it with the adjacent line from the same speaker into one cue (maximum 4 seconds) instead of dropping or summarizing it.
-- "end" must be greater than "start" and must not exceed the audio duration.
-- Omit music, noise and stage directions.
-Completeness rules:
-- If speech is present, return every utterance. An empty array, or a single segment for a clip that contains a conversation, is an error.
-- Do not stop after the first line. Keep going until the end of the audio.
-If there is no audible speech, return [].`;
+If no speech is audible in the chunk, return [].`;
+
+export const KHMER_DUB_SYSTEM_PROMPT = `You are a professional Khmer audiovisual translator and dubbing director.
+You will receive a JSON array of timed, verbatim dialogue cues from a continuous story. Add a natural, spoken Khmer dubbing line ("khmer_dubbing") to every object while preserving all existing fields and timestamps untouched.
+
+Strict TTS Syllable Budget (HIGHEST PRIORITY):
+- Khmer TTS speaks slower than Chinese or English. A cut-off audio line ruins the dub.
+- Budget strictly 5.5 Khmer syllables per second of (end - start):
+  * 1.0s -> max 5 syllables
+  * 1.5s -> max 8 syllables
+  * 2.0s -> max 11 syllables
+  * 2.5s -> max 14 syllables
+- Count the Khmer syllables before finalizing each line. If over budget, compress the phrasing immediately: drop redundant pronouns, subjects already obvious from context, greetings, repeated words, and filler connectors while keeping the core action and emotion.
+
+Khmer Dubbing & Story Rules:
+- COLOQUIAL SPOKEN KHMER: Write natural, punchy spoken Khmer used in modern movie/donghua dubbing—never stiff literary or word-for-word translation.
+- NO ENGLISH OR BRACKETS: Never include English words, pinyin, or parentheses inside "khmer_dubbing". Transliterate all names and cultivation terms purely into Khmer script.
+- CONTINUITY & GLOSSARY: Track who is speaking to whom, their relationship, and emotional tone across the whole array. Reuse exact Khmer spellings for every character name, title, sect, place, item, and technique.
+- NO POLITENESS PREFIXES: Never open a full sentence with បាទ or ចាស. Use បាទ (male) or ចាស (female) only when the entire cue is a standalone yes/no answer or brief greeting to a superior.
+- ACCURATE SENSE & KINSHIP: Resolve words by story context, not dictionary homonyms. Use accurate kinship terms (e.g., younger sister -> ប្អូនស្រី). Transliterate personal names (e.g., 小燕 -> សៀវយ៉ាន, never "little swallow").
+- SPECIFIC TERMS: Render 抢钱 as កាប់ថ្លៃ or ប្លន់លុយ by context; 桃子 as ផ្លែប៉េស; 块/元 as យ័ន or រៀល (never បាត).
+- 1-TO-1 ARRAY ALIGNMENT: Return the exact same number of objects in the exact same order. Never merge, drop, or alter "start" and "end" timestamps.`;
+
+export const KHMER_DUB_OUTPUT_CONTRACT = `OUTPUT CONTRACT
+Return ONLY a valid JSON array with the exact same length and order as the input array. Do not wrap in Markdown fences or add comments.
+Every element must contain these exact fields:
+{
+  "start": "MM:SS.S",
+  "end": "MM:SS.S",
+  "speaker_gender": "male" or "female",
+  "vocal_timbre": "short voice and emotion description",
+  "character_role": "consistent speaker identifier",
+  "original_transcript": "unchanged original transcript from input",
+  "khmer_dubbing": "concise spoken Khmer line fitting the 5.5 syllables/sec budget"
+}`;
+
+/** Appended to the Call-2 prompt once when its array length does not match the transcript. */
+export const KHMER_DUB_COUNT_RETRY_PROMPT = `RETRY - WRONG CUE COUNT
+Your previous answer had a different number of objects than the input array.
+Return exactly the same number of objects, in the same order, one per input cue. Do not merge, split, add or drop a cue.`;
+
 
 /**
  * Appended to the prompt for one retry when the model returned an empty or
@@ -1973,6 +2037,29 @@ export const DUBBING_RESPONSE_SCHEMA = {
     propertyOrdering: Object.keys(DUBBING_SEGMENT_PROPERTIES),
   },
 };
+
+const TRANSCRIPT_SEGMENT_PROPERTIES = {
+  start: { type: 'STRING', description: 'Utterance start as MM:SS.S from the start of this audio part.' },
+  end: { type: 'STRING', description: 'Utterance end as MM:SS.S from the start of this audio part.' },
+  speaker_gender: { type: 'STRING', enum: ['male', 'female'] },
+  vocal_timbre: { type: 'STRING', description: 'Short description of the voice quality and emotion.' },
+  character_role: { type: 'STRING', description: 'Stable role of the speaker in the scene.' },
+  original_transcript: { type: 'STRING', description: 'Verbatim original-language line, no stage directions.' },
+};
+
+/** Call 1 schema: transcript metadata only; the Khmer line is added in Call 2. */
+export const TRANSCRIPT_RESPONSE_SCHEMA = {
+  type: 'ARRAY',
+  items: {
+    type: 'OBJECT',
+    properties: TRANSCRIPT_SEGMENT_PROPERTIES,
+    required: Object.keys(TRANSCRIPT_SEGMENT_PROPERTIES),
+    propertyOrdering: Object.keys(TRANSCRIPT_SEGMENT_PROPERTIES),
+  },
+};
+
+/** Call 2 schema: the full public segment shape, one object per transcript cue. */
+export const KHMER_DUB_RESPONSE_SCHEMA = DUBBING_RESPONSE_SCHEMA;
 
 /**
  * True for models that emit a thinking pass before the JSON answer. Their
@@ -2294,6 +2381,62 @@ export function normalizeDubbingSegment(
     khmer_dubbing: khmer,
     startSeconds,
     endSeconds,
+  };
+}
+
+/**
+ * Validate one Call-1 transcript cue. Unlike `normalizeDubbingSegment`, a cue
+ * without a Khmer line is valid here: Khmer is added by Call 2. A cue without
+ * any source text is dropped because it cannot be translated.
+ */
+export function normalizeTranscriptSegment(
+  raw: Record<string, unknown>,
+  chunk: { startSeconds: number; endSeconds: number },
+  fallbackStartSeconds = 0,
+): TranscriptSegmentInternal | undefined {
+  const original = firstString(raw, [
+    'original_transcript',
+    'originalTranscript',
+    'original',
+    'transcript',
+    'source_text',
+    'source',
+  ]);
+  if (!original) return undefined;
+
+  const chunkDuration = Math.max(0.1, chunk.endSeconds - chunk.startSeconds);
+  const parsedStart = parseDubbingTimestamp(
+    raw.start ?? raw.start_time ?? raw.startTime ?? raw.begin,
+  );
+  const parsedEnd = parseDubbingTimestamp(raw.end ?? raw.end_time ?? raw.endTime ?? raw.finish);
+
+  let localStart = parsedStart !== undefined ? parsedStart : fallbackStartSeconds;
+  localStart = Math.min(Math.max(0, localStart), Math.max(0, chunkDuration - 0.1));
+
+  let localEnd = parsedEnd !== undefined ? parsedEnd : localStart + 1;
+  if (localEnd <= localStart) localEnd = localStart + 0.5;
+  localEnd = Math.min(localEnd, chunkDuration);
+  if (localEnd <= localStart) return undefined;
+
+  const gender = normalizeSpeakerGender(
+    firstString(raw, ['speaker_gender', 'speakerGender', 'gender', 'sex']),
+    original,
+  );
+  const timbre = firstString(raw, ['vocal_timbre', 'vocalTimbre', 'timbre', 'voice', 'voice_type', 'voiceType']);
+  const role = firstString(raw, ['character_role', 'characterRole', 'role', 'speaker', 'character']);
+
+  return {
+    start: formatDubbingTimestamp(localStart),
+    end: formatDubbingTimestamp(localEnd),
+    speaker_id: speakerIdFromRole(role, gender),
+    speaker_gender: gender,
+    vocal_timbre: timbre || (gender === 'female' ? 'female voice' : 'male voice'),
+    character_role: role,
+    original_transcript: original,
+    localStartSeconds: localStart,
+    localEndSeconds: localEnd,
+    startSeconds: chunk.startSeconds + localStart,
+    endSeconds: chunk.startSeconds + localEnd,
   };
 }
 
@@ -2742,23 +2885,66 @@ async function measureSpeechSeconds(
   return dubbingSpeechSecondsFromSilences(durationSeconds, stderr);
 }
 
-/** `prompt` overrides the built-in instructions; the output contract is always appended. */
-export function buildDubbingPrompt(options: {  prompt?: string;
+/**
+ * Call 1 prompt: fixed transcription rules plus the part marker and the
+ * previous chunk's speaker roles so `character_role` stays stable across
+ * chunks. A caller prompt cannot replace this: transcription accuracy is not
+ * a style knob.
+ */
+export function buildTranscriptPrompt(options: {
+  index: number;
+  count: number;
+  previousRoles?: string[];
+}): string {
+  const parts: string[] = [TRANSCRIPT_SYSTEM_PROMPT, TRANSCRIPT_OUTPUT_CONTRACT];
+
+  if (options.count > 1) {
+    parts.push(
+      `This audio is part ${options.index + 1} of ${options.count} of one continuous recording. ` +
+        'Transcribe only the speech in this part. Start timestamps at 00:00.0 for this part.',
+    );
+  }
+
+  const roles = (options.previousRoles ?? [])
+    .map((role) => role.trim())
+    .filter(Boolean)
+    .slice(-3);
+  if (options.count > 1 && options.index > 0 && roles.length > 0) {
+    parts.push(
+      `For continuity only, the previous part used these speaker roles: ${roles.join(', ')}. ` +
+        'Reuse the exact same character_role strings for the same speakers; do not repeat their lines.',
+    );
+  }
+
+  return parts.join('\n\n');
+}
+
+/**
+ * Call 2 prompt: text-only Khmer adaptation. The transcript array is embedded
+ * as the payload, and continuity, glossary and the caller's custom prompt all
+ * live here because they are terminology and tone instructions.
+ */
+export function buildKhmerDubPrompt(options: {
+  prompt?: string;
   glossary?: string;
   index: number;
   count: number;
+  cues: Array<Record<string, unknown>>;
   previousSegments?: Array<{
     original_transcript: string;
     khmer_dubbing: string;
     character_role: string;
   }>;
 }): string {
-  const parts: string[] = [options.prompt?.trim() || DUBBING_DEFAULT_PROMPT, DUBBING_OUTPUT_CONTRACT];
+  const parts: string[] = [
+    options.prompt?.trim() || KHMER_DUB_SYSTEM_PROMPT,
+    KHMER_DUB_OUTPUT_CONTRACT,
+  ];
 
   if (options.count > 1) {
     parts.push(
-      `This audio is part ${options.index + 1} of ${options.count} of one continuous recording. ` +
-        'Transcribe only the speech in this part. Start timestamps at 00:00.0 for this part.',
+      `This is part ${options.index + 1} of ${options.count} of one continuous recording. ` +
+        'Translate only the cues supplied here; do not repeat lines from a previous part.',
     );
   }
 
@@ -2775,14 +2961,22 @@ export function buildDubbingPrompt(options: {  prompt?: string;
       )
       .join('\n');
     parts.push(
-      `For continuity only, the previous part ended with:\n${tail}\n` +
+      `For continuity only, the previous part ended with:
+${tail}
+` +
         'Match their names, roles and terminology, but do not repeat these lines.',
     );
   }
 
   if (options.glossary?.trim()) {
-    parts.push(`Glossary — use these translations/names exactly:\n${options.glossary.trim()}`);
+    parts.push(`Glossary — use these translations/names exactly:
+${options.glossary.trim()}`);
   }
+
+  parts.push(
+    'Translate this JSON array. Keep the same number of objects, the same order, and every field except "khmer_dubbing" unchanged:\n' +
+      JSON.stringify(options.cues),
+  );
 
   return parts.join('\n\n');
 }
@@ -2827,7 +3021,8 @@ function parseDubbingOptions(fields: Record<string, string>, config: MediaConfig
     : undefined;
 
   const requestedTemperature = Number.parseFloat(fields.temperature || '');
-  const temperature = Number.isFinite(requestedTemperature)
+  const temperatureExplicit = Number.isFinite(requestedTemperature);
+  const temperature = temperatureExplicit
     ? Math.min(2, Math.max(0, requestedTemperature))
     : 0;
 
@@ -2859,6 +3054,7 @@ function parseDubbingOptions(fields: Record<string, string>, config: MediaConfig
     chunkSeconds,
     maxTokens,
     temperature,
+    temperatureExplicit,
     concurrency,
     concurrencyExplicit,
     responseFormat,
@@ -3068,12 +3264,17 @@ export async function dubChunks(
       const chunk = chunks[index];
       const previousSegments =
         options.concurrency === 1 && index > 0 ? results[index - 1]?.segments ?? [] : [];
-      const prompt = buildDubbingPrompt({
-        prompt: options.prompt,
-        glossary: options.glossary,
+      const previousRoles =
+        options.concurrency === 1 && index > 0
+          ? previousSegments
+              .map((segment) => segment.character_role)
+              .filter((role) => role && role.trim())
+              .slice(-3)
+          : [];
+      const transcriptPrompt = buildTranscriptPrompt({
         index,
         count: chunks.length,
-        previousSegments,
+        previousRoles,
       });
       const maxOutputTokens =
         options.maxTokens ?? dubbingMaxOutputTokens(chunk.durationSeconds, options.model);
@@ -3126,7 +3327,14 @@ export async function dubChunks(
 
       results[index] = await dubChunkWithRetry(
         chunk,
-        prompt,
+        transcriptPrompt,
+        {
+          prompt: options.prompt,
+          glossary: options.glossary,
+          index,
+          count: chunks.length,
+          previousSegments,
+        },
         maxOutputTokens,
         options,
         config,
@@ -3220,48 +3428,71 @@ function isSchemaRejection(status: number, message: string): boolean {
   return /schema|response_?mime|response_?format|generation_?config/i.test(message);
 }
 
-async function dubChunkWithRetry(
-  chunk: AudioChunk,
-  prompt: string,
-  maxOutputTokens: number,
-  options: DubbingOptions,
-  config: MediaConfig,
-  deps: MediaRouteDeps,
-  signal: AbortSignal,
-  speechSeconds: number | undefined,
-  log: FastifyRequest['log'],
-): Promise<DubbingChunkResult> {
-  const audioBase64 = fs.readFileSync(chunk.filePath).toString('base64');
-  const url = `${deps.getInternalBaseUrl()}/v1beta/models/${encodeURIComponent(
-    options.model,
+type DubbingPhase = 'transcription' | 'khmer';
+
+interface ModelJsonCall {
+  segments: Record<string, unknown>[];
+  content: string;
+  model: string;
+  maxOutputTokens: number;
+  usage: UsageTotals;
+  thoughtCharacters: number;
+}
+
+interface TranscriptChunkCall extends ModelJsonCall {
+  transcripts: TranscriptSegmentInternal[];
+  droppedSegments: number;
+  verdict: DubbingCoverageVerdict;
+  coveredSeconds: number;
+}
+
+function dubbingPhaseLabel(phase: DubbingPhase): string {
+  return phase === 'transcription' ? 'transcription' : 'Khmer dubbing';
+}
+
+/**
+ * One phase's request loop: transport retries, schema fallback, key fallback
+ * and JSON parsing. Phase-specific validation (coverage, cue count) lives in
+ * the callers so each phase can retry for its own reason.
+ */
+async function requestModelJson(input: {
+  chunk: AudioChunk;
+  phase: DubbingPhase;
+  prompt: string;
+  audioBase64?: string;
+  temperature: number;
+  maxOutputTokens: number;
+  schema: Record<string, unknown>;
+  options: DubbingOptions;
+  config: MediaConfig;
+  deps: MediaRouteDeps;
+  signal: AbortSignal;
+  log: FastifyRequest['log'];
+}): Promise<ModelJsonCall> {
+  const phaseLabel = dubbingPhaseLabel(input.phase);
+  const url = `${input.deps.getInternalBaseUrl()}/v1beta/models/${encodeURIComponent(
+    input.options.model,
   )}:generateContent`;
+  const parts: Array<Record<string, unknown>> = [{ text: input.prompt }];
+  if (input.audioBase64) {
+    parts.push({ inline_data: { mime_type: 'audio/mp3', data: input.audioBase64 } });
+  }
 
   let schemaEnabled = true;
   let lastError: MediaError | null = null;
-  let activePrompt = prompt;
-  let completenessRetried = false;
   let keyFallbackTried = false;
-  const attempts = config.maxRetries + 1;
-  let maxAttempts = attempts;
+  const attempts = input.config.maxRetries + 1;
 
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    if (signal.aborted) throw abortError(signal);
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    if (input.signal.aborted) throw abortError(input.signal);
 
     const payload = {
-      contents: [
-        {
-          role: 'user',
-          parts: [
-            { text: activePrompt },
-            { inline_data: { mime_type: 'audio/mp3', data: audioBase64 } },
-          ],
-        },
-      ],
+      contents: [{ role: 'user', parts }],
       generationConfig: {
-        temperature: options.temperature,
-        maxOutputTokens,
+        temperature: input.temperature,
+        maxOutputTokens: input.maxOutputTokens,
         responseMimeType: 'application/json',
-        ...(schemaEnabled ? { responseSchema: DUBBING_RESPONSE_SCHEMA } : {}),
+        ...(schemaEnabled ? { responseSchema: input.schema } : {}),
       },
     };
 
@@ -3269,9 +3500,9 @@ async function dubChunkWithRetry(
       let response = await fetchUpstreamWithKeys(
         url,
         payload,
-        deps.getGatewayApiKeys(),
-        signal,
-        config.chunkTimeoutMs,
+        input.deps.getGatewayApiKeys(),
+        input.signal,
+        input.config.chunkTimeoutMs,
       );
 
       if (
@@ -3287,9 +3518,9 @@ async function dubChunkWithRetry(
         response = await fetchUpstreamWithKeys(
           url,
           payload,
-          deps.getGatewayApiKeys(),
-          signal,
-          config.chunkTimeoutMs,
+          input.deps.getGatewayApiKeys(),
+          input.signal,
+          input.config.chunkTimeoutMs,
           { 'x-geminirouter-routing': 'keys' },
         );
       }
@@ -3297,6 +3528,7 @@ async function dubChunkWithRetry(
       if (!response.ok) {
         const errorText = await response.text().catch(() => '');
         const message = extractUpstreamError(errorText, response.status);
+        const prefix = `Chunk ${input.chunk.index + 1} ${phaseLabel}`;
 
         if (response.status === 401) {
           throw new MediaError(
@@ -3310,31 +3542,29 @@ async function dubChunkWithRetry(
           lastError = new MediaError(
             422,
             'schema_rejected',
-            `Chunk ${chunk.index + 1} was rejected with a response schema (HTTP ${
-              response.status
-            }): ${message}`,
-            { chunkIndex: chunk.index, upstreamStatus: response.status },
+            `${prefix} was rejected with a response schema (HTTP ${response.status}): ${message}`,
+            { chunkIndex: input.chunk.index, phase: input.phase, upstreamStatus: response.status },
           );
-          await sleepWithSignal(250, signal);
+          await sleepWithSignal(250, input.signal);
           continue;
         }
         if ([400, 404, 413, 415, 422].includes(response.status)) {
           throw new MediaError(
             422,
             'model_rejected_media',
-            `Chunk ${chunk.index + 1} was rejected by the model (HTTP ${response.status}): ${message}`,
-            { chunkIndex: chunk.index, upstreamStatus: response.status },
+            `${prefix} was rejected by the model (HTTP ${response.status}): ${message}`,
+            { chunkIndex: input.chunk.index, phase: input.phase, upstreamStatus: response.status },
           );
         }
         if ([403, 408, 429, 500, 502, 503, 504].includes(response.status)) {
           lastError = new MediaError(
             502,
             'upstream_unavailable',
-            `Chunk ${chunk.index + 1} failed (HTTP ${response.status}): ${message}`,
-            { chunkIndex: chunk.index, upstreamStatus: response.status },
+            `${prefix} failed (HTTP ${response.status}): ${message}`,
+            { chunkIndex: input.chunk.index, phase: input.phase, upstreamStatus: response.status },
           );
           if (attempt < attempts - 1) {
-            await sleepWithSignal(backoffMs(attempt), signal);
+            await sleepWithSignal(backoffMs(attempt), input.signal);
             continue;
           }
           throw lastError;
@@ -3342,8 +3572,8 @@ async function dubChunkWithRetry(
         throw new MediaError(
           502,
           'upstream_error',
-          `Chunk ${chunk.index + 1} failed (HTTP ${response.status}): ${message}`,
-          { chunkIndex: chunk.index, upstreamStatus: response.status },
+          `${prefix} failed (HTTP ${response.status}): ${message}`,
+          { chunkIndex: input.chunk.index, phase: input.phase, upstreamStatus: response.status },
         );
       }
 
@@ -3352,10 +3582,11 @@ async function dubChunkWithRetry(
       const usage = usageFromResponse(data);
       const { text: content, thoughtCharacters } = geminiResponseAnswer(data);
 
-      log.info(
+      input.log.info(
         {
           media: {
-            chunk: chunk.index + 1,
+            chunk: input.chunk.index + 1,
+            phase: input.phase,
             finishReason: finishReason ?? null,
             thoughtCharacters,
             answerCharacters: content.length,
@@ -3369,11 +3600,12 @@ async function dubChunkWithRetry(
         throw new MediaError(
           502,
           'model_output_truncated',
-          `Chunk ${chunk.index + 1} hit the ${maxOutputTokens}-token output cap before finishing, so its dubbing script would be incomplete. Lower chunk_seconds or raise max_tokens.`,
+          `Chunk ${input.chunk.index + 1} ${phaseLabel} hit the ${input.maxOutputTokens}-token output cap before finishing, so the script would be incomplete. Lower chunk_seconds or raise max_tokens.`,
           {
-            chunkIndex: chunk.index,
+            chunkIndex: input.chunk.index,
+            phase: input.phase,
             finishReason,
-            maxTokens: maxOutputTokens,
+            maxTokens: input.maxOutputTokens,
             thoughtCharacters,
           },
         );
@@ -3385,167 +3617,49 @@ async function dubChunkWithRetry(
           502,
           failed ? 'model_failure_text' : 'empty_model_response',
           failed
-            ? `Chunk ${chunk.index + 1} returned a model failure message instead of a dubbing script. Try a simpler prompt or a different model.`
-            : `Chunk ${chunk.index + 1} returned an empty model response.`,
+            ? `Chunk ${input.chunk.index + 1} ${phaseLabel} returned a model failure message instead of JSON. Try a simpler prompt or a different model.`
+            : `Chunk ${input.chunk.index + 1} ${phaseLabel} returned an empty model response.`,
           {
-            chunkIndex: chunk.index,
+            chunkIndex: input.chunk.index,
+            phase: input.phase,
             thoughtCharacters,
             ...(failed ? { model_text: content.slice(0, 1000) } : {}),
           },
         );
         const retryBudget = failed ? 2 : attempts;
         if (attempt + 1 < retryBudget) {
-          await sleepWithSignal(backoffMs(attempt), signal);
+          await sleepWithSignal(backoffMs(attempt), input.signal);
           continue;
         }
         throw lastError;
       }
 
-      const rawSegments = parseDubbingPayload(content);
-      if (!rawSegments) {
+      const segments = parseDubbingPayload(content);
+      if (!segments) {
         lastError = new MediaError(
           502,
           'invalid_model_json',
-          `Chunk ${chunk.index + 1} did not return a JSON array of dubbing segments. Retrying with a shorter prompt may help, or choose a model with reliable JSON output.`,
-          { chunkIndex: chunk.index, model_text: content.slice(0, 2000), thoughtCharacters },
+          `Chunk ${input.chunk.index + 1} ${phaseLabel} did not return a JSON array. Retrying with a shorter prompt may help, or choose a model with reliable JSON output.`,
+          {
+            chunkIndex: input.chunk.index,
+            phase: input.phase,
+            model_text: content.slice(0, 2000),
+            thoughtCharacters,
+          },
         );
         if (attempt < attempts - 1) {
-          await sleepWithSignal(backoffMs(attempt), signal);
+          await sleepWithSignal(backoffMs(attempt), input.signal);
           continue;
         }
-        throw lastError;
-      }
-
-      const segments: DubbingSegmentInternal[] = [];
-      let droppedSegments = 0;
-      let cursor = 0;
-      for (const raw of rawSegments) {
-        const segment = normalizeDubbingSegment(raw, chunk, cursor);
-        if (!segment) {
-          droppedSegments++;
-          continue;
-        }
-        segments.push(segment);
-        cursor = Math.max(cursor, segment.endSeconds - chunk.startSeconds);
-      }
-      segments.sort((a, b) => a.startSeconds - b.startSeconds || a.endSeconds - b.endSeconds);
-
-      // Split cues that exceed the TTS ceiling and reject cues that cannot be
-      // repaired. A model that returns one 12-second cue would otherwise reach
-      // the synthesizer unchanged.
-      const ceilings = enforceDubbingCueCeilings(segments);
-      const repairedSegments = ceilings.segments;
-      if (ceilings.droppedCues > 0) {
-        log.warn(
-          { media: { chunk: chunk.index + 1, droppedCues: ceilings.droppedCues } },
-          'media: dropped untranslated cues instead of failing the chunk',
-        );
-      }
-
-      const coveredSeconds = dubbingCoveredSeconds(
-        repairedSegments,
-        chunk.startSeconds,
-        chunk.endSeconds,
-      );
-      const verdict = dubbingCoverageVerdict({
-        segmentCount: repairedSegments.length,
-        coveredSeconds,
-        speechSeconds,
-        durationSeconds: chunk.durationSeconds,
-      });
-
-      // A cue the model returned without a Khmer line, or with a cue the TTS
-      // engine cannot speak, is dialogue that would silently disappear from the
-      // finished dub. Fail the chunk instead of returning holes in the timeline.
-      // normalizeDropped counts cues with no usable timing/text; those still
-      // fail. Untranslated cues were already dropped and counted by the ceiling
-      // pass, because failing the chunk costs every other line.
-      const normalizeDropped = droppedSegments;
-      const totalDropped = normalizeDropped + ceilings.droppedCues;
-      const cueIssue =
-        normalizeDropped > 0
-          ? 'dropped_segments'
-          : ceilings.violations.length > 0
-            ? 'cue_violations'
-            : undefined;
-
-      // Fast mode is an explicit trade: one call per 5/10-minute chunk and no
-      // completeness retry. It accepts a short answer (that is the point) but
-      // still rejects an empty one, because an empty chunk has nothing to dub.
-      const coverageBlocked =
-        !verdict.ok && (options.mode === 'complete' || verdict.reason === 'empty_script');
-      const blockingReason = cueIssue ?? (coverageBlocked ? verdict.reason ?? 'low_coverage' : undefined);
-
-      if (blockingReason) {
-        const details = {
-          chunkIndex: chunk.index,
-          segmentCount: repairedSegments.length,
-          droppedSegments: totalDropped,
-          droppedCues: ceilings.droppedCues,
-          cueViolations: ceilings.violations.slice(0, 10),
-          coveredSeconds: verdict.coveredSeconds,
-          speechSeconds: verdict.speechSeconds ?? null,
-          durationSeconds: Number(chunk.durationSeconds.toFixed(2)),
-          coverageRatio: verdict.ratio ?? null,
-          thoughtCharacters,
-        };
-
-        // One explicit retry with the completeness prompt. It does not consume
-        // the transient-failure budget, because the transport was healthy.
-        if (!completenessRetried && !signal.aborted) {
-          completenessRetried = true;
-          maxAttempts = Math.max(maxAttempts, attempt + 2);
-          activePrompt = `${prompt}\n\n${
-            cueIssue ? DUBBING_CUE_RETRY_PROMPT : DUBBING_COMPLETENESS_RETRY_PROMPT
-          }`;
-          log.warn(
-            {
-              media: {
-                chunk: chunk.index + 1,
-                ...details,
-                reason: cueIssue ?? verdict.reason,
-              },
-            },
-            'media: dubbing answer rejected as incomplete; retrying with the completeness prompt',
-          );
-          await sleepWithSignal(250, signal);
-          continue;
-        }
-
-        const reason = blockingReason;
-        const message =
-          cueIssue === 'dropped_segments'
-            ? `Chunk ${chunk.index + 1} returned ${droppedSegments} cue(s) with no Khmer dub line or no valid timing. Those lines would be missing from the finished dub, so the request is failed instead of returning a script with holes. Try a smaller chunk_seconds or a different model.`
-            : cueIssue === 'cue_violations'
-              ? `Chunk ${chunk.index + 1} returned ${ceilings.violations.length} cue(s) that break the TTS ceilings (max ${DUBBING_MAX_CUE_SECONDS}s and ${DUBBING_MAX_KHMER_CHARS} Khmer characters per cue, Khmer script only): ${ceilings.violations
-                  .slice(0, 3)
-                  .join('; ')}. The request is failed instead of returning cues the synthesizer cannot speak.`
-              : `Chunk ${chunk.index + 1} returned ${repairedSegments.length} segment(s) covering ${verdict.coveredSeconds}s of ${verdict.speechSeconds ?? 0}s of audible speech (${Math.round(
-                  (verdict.ratio ?? 0) * 100,
-                )}%). The script is incomplete, so the request is failed instead of silently dropping dialogue. Try a smaller chunk_seconds or a different model.`;
-
-        lastError = new MediaError(
-          502,
-          reason === 'empty_script' ? 'empty_model_response' : 'partial_script',
-          message,
-          details,
-        );
         throw lastError;
       }
 
       return {
-        index: chunk.index,
-        startSeconds: chunk.startSeconds,
-        endSeconds: chunk.endSeconds,
-        segments: repairedSegments,
-        droppedSegments: totalDropped,
+        segments,
         content,
-        model: typeof data?.model === 'string' ? data.model : options.model,
-        maxOutputTokens,
+        model: typeof data?.model === 'string' ? data.model : input.options.model,
+        maxOutputTokens: input.maxOutputTokens,
         usage,
-        speechSeconds: verdict.speechSeconds,
-        speechReliable: verdict.speechReliable !== false,
-        coveredSeconds: verdict.coveredSeconds,
         thoughtCharacters,
       };
     } catch (error) {
@@ -3554,25 +3668,24 @@ async function dubChunkWithRetry(
           error.code === 'upstream_auth_failed' ||
           error.code === 'model_rejected_media' ||
           error.code === 'model_output_truncated' ||
-          error.code === 'schema_rejected' ||
-          error.code === 'partial_script'
+          error.code === 'schema_rejected'
         ) {
           throw error;
         }
         lastError = error;
       } else if (isAbortError(error)) {
-        throw abortError(signal);
+        throw abortError(input.signal);
       } else {
         lastError = new MediaError(
           502,
           'chunk_request_failed',
-          `Chunk ${chunk.index + 1} request failed: ${(error as Error)?.message || String(error)}`,
-          { chunkIndex: chunk.index },
+          `Chunk ${input.chunk.index + 1} ${phaseLabel} request failed: ${(error as Error)?.message || String(error)}`,
+          { chunkIndex: input.chunk.index, phase: input.phase },
         );
       }
 
       if (attempt < attempts - 1) {
-        await sleepWithSignal(backoffMs(attempt), signal);
+        await sleepWithSignal(backoffMs(attempt), input.signal);
         continue;
       }
       throw lastError;
@@ -3580,6 +3693,396 @@ async function dubChunkWithRetry(
   }
 
   throw lastError ?? new MediaError(502, 'chunk_failed', 'The model request failed.');
+}
+
+/**
+ * Call 1: transcribe one chunk and validate that the transcript actually
+ * covers the speech. One strict retry is allowed, because a lite model can
+ * answer only the first line of a busy chunk.
+ */
+async function transcribeChunk(
+  chunk: AudioChunk,
+  prompt: string,
+  maxOutputTokens: number,
+  options: DubbingOptions,
+  config: MediaConfig,
+  deps: MediaRouteDeps,
+  signal: AbortSignal,
+  speechSeconds: number | undefined,
+  log: FastifyRequest['log'],
+): Promise<TranscriptChunkCall> {
+  const audioBase64 = fs.readFileSync(chunk.filePath).toString('base64');
+  const temperature = dubbingPhaseTemperature(options, 'transcript');
+  let activePrompt = prompt;
+  let retried = false;
+
+  for (;;) {
+    const call = await requestModelJson({
+      chunk,
+      phase: 'transcription',
+      prompt: activePrompt,
+      audioBase64,
+      temperature,
+      maxOutputTokens,
+      schema: TRANSCRIPT_RESPONSE_SCHEMA,
+      options,
+      config,
+      deps,
+      signal,
+      log,
+    });
+
+    const transcripts: TranscriptSegmentInternal[] = [];
+    let droppedSegments = 0;
+    let cursor = 0;
+    for (const raw of call.segments) {
+      const segment = normalizeTranscriptSegment(raw, chunk, cursor);
+      if (!segment) {
+        droppedSegments++;
+        continue;
+      }
+      transcripts.push(segment);
+      cursor = Math.max(cursor, segment.localEndSeconds);
+    }
+    transcripts.sort(
+      (a, b) => a.startSeconds - b.startSeconds || a.endSeconds - b.endSeconds,
+    );
+
+    const coveredSeconds = dubbingCoveredSeconds(
+      transcripts,
+      chunk.startSeconds,
+      chunk.endSeconds,
+    );
+    const verdict = dubbingCoverageVerdict({
+      segmentCount: transcripts.length,
+      coveredSeconds,
+      speechSeconds,
+      durationSeconds: chunk.durationSeconds,
+    });
+
+    // Fast mode is an explicit trade: it accepts a short answer (that is the
+    // point) but still rejects an empty transcript, because an empty chunk has
+    // nothing to dub. Complete mode enforces the coverage verdict.
+    const coverageBlocked =
+      !verdict.ok && (options.mode === 'complete' || verdict.reason === 'empty_script');
+    if (droppedSegments === 0 && !coverageBlocked) {
+      return { ...call, transcripts, droppedSegments, verdict, coveredSeconds };
+    }
+
+    if (!retried && !signal.aborted) {
+      retried = true;
+      activePrompt = `${prompt}\n\n${DUBBING_COMPLETENESS_RETRY_PROMPT}`;
+      log.warn(
+        {
+          media: {
+            chunk: chunk.index + 1,
+            phase: 'transcription',
+            segmentCount: transcripts.length,
+            droppedSegments,
+            coveredSeconds: verdict.coveredSeconds,
+            speechSeconds: verdict.speechSeconds ?? null,
+            reason: droppedSegments > 0 ? 'dropped_segments' : verdict.reason,
+          },
+        },
+        'media: dubbing transcript rejected as incomplete; retrying with the completeness prompt',
+      );
+      await sleepWithSignal(250, signal);
+      continue;
+    }
+
+    const reason = droppedSegments > 0 ? 'dropped_segments' : verdict.reason ?? 'low_coverage';
+    const details = {
+      chunkIndex: chunk.index,
+      phase: 'transcription' as const,
+      segmentCount: transcripts.length,
+      droppedSegments,
+      coveredSeconds: verdict.coveredSeconds,
+      speechSeconds: verdict.speechSeconds ?? null,
+      durationSeconds: Number(chunk.durationSeconds.toFixed(2)),
+      coverageRatio: verdict.ratio ?? null,
+      thoughtCharacters: call.thoughtCharacters,
+    };
+    const message =
+      droppedSegments > 0
+        ? `Chunk ${chunk.index + 1} transcription returned ${droppedSegments} cue(s) with no usable text or timing. Those lines would be missing from the finished dub, so the request is failed instead of returning a script with holes. Try a smaller chunk_seconds or a different model.`
+        : `Chunk ${chunk.index + 1} transcription returned ${transcripts.length} cue(s) covering ${verdict.coveredSeconds}s of ${verdict.speechSeconds ?? 0}s of audible speech (${Math.round(
+            (verdict.ratio ?? 0) * 100,
+          )}%). The transcript is incomplete, so the request is failed instead of silently dropping dialogue. Try a smaller chunk_seconds or a different model.`;
+
+    throw new MediaError(
+      502,
+      reason === 'empty_script' ? 'empty_model_response' : 'partial_script',
+      message,
+      details,
+    );
+  }
+}
+
+/**
+ * Call 2: add Khmer to the transcript. The array must stay one-to-one with the
+ * transcript; a wrong count would shift every later line, so it gets exactly
+ * one corrective retry before the chunk fails.
+ */
+async function translateChunk(
+  chunk: AudioChunk,
+  prompt: string,
+  cueCount: number,
+  maxOutputTokens: number,
+  options: DubbingOptions,
+  config: MediaConfig,
+  deps: MediaRouteDeps,
+  signal: AbortSignal,
+  log: FastifyRequest['log'],
+): Promise<ModelJsonCall> {
+  const temperature = dubbingPhaseTemperature(options, 'khmer');
+  let activePrompt = prompt;
+  let retried = false;
+
+  for (;;) {
+    const call = await requestModelJson({
+      chunk,
+      phase: 'khmer',
+      prompt: activePrompt,
+      temperature,
+      maxOutputTokens,
+      schema: KHMER_DUB_RESPONSE_SCHEMA,
+      options,
+      config,
+      deps,
+      signal,
+      log,
+    });
+
+    if (call.segments.length === cueCount) {
+      return call;
+    }
+
+    if (!retried && !signal.aborted) {
+      retried = true;
+      activePrompt = `${prompt}\n\n${KHMER_DUB_COUNT_RETRY_PROMPT}`;
+      log.warn(
+        {
+          media: {
+            chunk: chunk.index + 1,
+            phase: 'khmer',
+            expectedCues: cueCount,
+            returnedCues: call.segments.length,
+          },
+        },
+        'media: Khmer dubbing returned the wrong cue count; retrying once',
+      );
+      await sleepWithSignal(250, signal);
+      continue;
+    }
+
+    throw new MediaError(
+      502,
+      'translation_count_mismatch',
+      `Chunk ${chunk.index + 1} Khmer dubbing returned ${call.segments.length} cue(s) for ${cueCount} transcript cue(s). The arrays must match one-to-one, so the request is failed instead of returning a shifted timeline.`,
+      {
+        chunkIndex: chunk.index,
+        phase: 'khmer',
+        expectedCues: cueCount,
+        returnedCues: call.segments.length,
+      },
+    );
+  }
+}
+
+function addUsage(a: UsageTotals, b: UsageTotals): UsageTotals {
+  return {
+    promptTokens: a.promptTokens + b.promptTokens,
+    completionTokens: a.completionTokens + b.completionTokens,
+    totalTokens: a.totalTokens + b.totalTokens,
+  };
+}
+
+async function dubChunkWithRetry(
+  chunk: AudioChunk,
+  transcriptPrompt: string,
+  khmerContext: {
+    prompt?: string;
+    glossary?: string;
+    index: number;
+    count: number;
+    previousSegments?: Array<{
+      original_transcript: string;
+      khmer_dubbing: string;
+      character_role: string;
+    }>;
+  },
+  maxOutputTokens: number,
+  options: DubbingOptions,
+  config: MediaConfig,
+  deps: MediaRouteDeps,
+  signal: AbortSignal,
+  speechSeconds: number | undefined,
+  log: FastifyRequest['log'],
+): Promise<DubbingChunkResult> {
+  // Call 1: media -> timed transcript, no Khmer yet.
+  const transcript = await transcribeChunk(
+    chunk,
+    transcriptPrompt,
+    maxOutputTokens,
+    options,
+    config,
+    deps,
+    signal,
+    speechSeconds,
+    log,
+  );
+
+  // Call 2: text-only transcript -> Khmer, with continuity and glossary.
+  const cues = transcript.transcripts.map((segment) => ({
+    start: segment.start,
+    end: segment.end,
+    speaker_gender: segment.speaker_gender,
+    vocal_timbre: segment.vocal_timbre,
+    character_role: segment.character_role,
+    original_transcript: segment.original_transcript,
+  }));
+  const khmerPrompt = buildKhmerDubPrompt({ ...khmerContext, cues });
+  const khmer = await translateChunk(
+    chunk,
+    khmerPrompt,
+    cues.length,
+    maxOutputTokens,
+    options,
+    config,
+    deps,
+    signal,
+    log,
+  );
+
+  // Metadata lock: only khmer_dubbing is taken from Call 2. Timestamps,
+  // gender, timbre, role and the source line always come from Call 1.
+  const merged = transcript.transcripts.map((segment, index) => {
+    const line = khmer.segments[index] ?? {};
+    return {
+      start: segment.start,
+      end: segment.end,
+      speaker_gender: segment.speaker_gender,
+      vocal_timbre: segment.vocal_timbre,
+      character_role: segment.character_role,
+      original_transcript: segment.original_transcript,
+      khmer_dubbing: firstString(line, [
+        'khmer_dubbing',
+        'khmerDubbing',
+        'khmer',
+        'dubbing',
+        'translation',
+        'translated_text',
+      ]),
+    };
+  });
+
+  const segments: DubbingSegmentInternal[] = [];
+  let droppedSegments = 0;
+  let cursor = 0;
+  for (const raw of merged) {
+    const segment = normalizeDubbingSegment(raw, chunk, cursor);
+    if (!segment) {
+      droppedSegments++;
+      continue;
+    }
+    segments.push(segment);
+    cursor = Math.max(cursor, segment.endSeconds - chunk.startSeconds);
+  }
+  segments.sort((a, b) => a.startSeconds - b.startSeconds || a.endSeconds - b.endSeconds);
+
+  // Split cues that exceed the TTS ceiling and reject cues that cannot be
+  // repaired. A model that returns one 12-second cue would otherwise reach
+  // the synthesizer unchanged.
+  const ceilings = enforceDubbingCueCeilings(segments);
+  const repairedSegments = ceilings.segments;
+  if (ceilings.droppedCues > 0) {
+    log.warn(
+      { media: { chunk: chunk.index + 1, droppedCues: ceilings.droppedCues } },
+      'media: dropped untranslated cues instead of failing the chunk',
+    );
+  }
+
+  const coveredSeconds = dubbingCoveredSeconds(
+    repairedSegments,
+    chunk.startSeconds,
+    chunk.endSeconds,
+  );
+  const verdict = dubbingCoverageVerdict({
+    segmentCount: repairedSegments.length,
+    coveredSeconds,
+    speechSeconds,
+    durationSeconds: chunk.durationSeconds,
+  });
+
+  // A cue the model returned without a Khmer line, or with a cue the TTS
+  // engine cannot speak, is dialogue that would silently disappear from the
+  // finished dub. Fail the chunk instead of returning holes in the timeline.
+  const normalizeDropped = droppedSegments;
+  const totalDropped = normalizeDropped + ceilings.droppedCues;
+  const cueIssue =
+    normalizeDropped > 0
+      ? 'dropped_segments'
+      : ceilings.violations.length > 0
+        ? 'cue_violations'
+        : undefined;
+
+  // Fast mode is an explicit trade: no completeness retry. It accepts a short
+  // answer (that is the point) but still rejects an empty one, because an
+  // empty chunk has nothing to dub.
+  const coverageBlocked =
+    !verdict.ok && (options.mode === 'complete' || verdict.reason === 'empty_script');
+  const blockingReason =
+    cueIssue ?? (coverageBlocked ? verdict.reason ?? 'low_coverage' : undefined);
+
+  if (blockingReason) {
+    const details = {
+      chunkIndex: chunk.index,
+      segmentCount: repairedSegments.length,
+      droppedSegments: totalDropped,
+      droppedCues: ceilings.droppedCues,
+      cueViolations: ceilings.violations.slice(0, 10),
+      coveredSeconds: verdict.coveredSeconds,
+      speechSeconds: verdict.speechSeconds ?? null,
+      durationSeconds: Number(chunk.durationSeconds.toFixed(2)),
+      coverageRatio: verdict.ratio ?? null,
+      thoughtCharacters: transcript.thoughtCharacters + khmer.thoughtCharacters,
+    };
+
+    const reason = blockingReason;
+    const message =
+      cueIssue === 'dropped_segments'
+        ? `Chunk ${chunk.index + 1} returned ${droppedSegments} cue(s) with no Khmer dub line. Those lines would be missing from the finished dub, so the request is failed instead of returning a script with holes. Try a smaller chunk_seconds or a different model.`
+        : cueIssue === 'cue_violations'
+          ? `Chunk ${chunk.index + 1} returned ${ceilings.violations.length} cue(s) that break the TTS ceilings (max ${DUBBING_MAX_CUE_SECONDS}s and ${DUBBING_MAX_KHMER_CHARS} Khmer characters per cue, Khmer script only): ${ceilings.violations
+              .slice(0, 3)
+              .join('; ')}. The request is failed instead of returning cues the synthesizer cannot speak.`
+          : `Chunk ${chunk.index + 1} returned ${repairedSegments.length} segment(s) covering ${verdict.coveredSeconds}s of ${verdict.speechSeconds ?? 0}s of audible speech (${Math.round(
+              (verdict.ratio ?? 0) * 100,
+            )}%). The script is incomplete, so the request is failed instead of silently dropping dialogue. Try a smaller chunk_seconds or a different model.`;
+
+    throw new MediaError(
+      502,
+      reason === 'empty_script' ? 'empty_model_response' : 'partial_script',
+      message,
+      details,
+    );
+  }
+
+  return {
+    index: chunk.index,
+    startSeconds: chunk.startSeconds,
+    endSeconds: chunk.endSeconds,
+    segments: repairedSegments,
+    droppedSegments: totalDropped,
+    content: khmer.content,
+    model: khmer.model || transcript.model,
+    maxOutputTokens,
+    usage: addUsage(transcript.usage, khmer.usage),
+    speechSeconds: verdict.speechSeconds,
+    speechReliable: verdict.speechReliable !== false,
+    coveredSeconds: verdict.coveredSeconds,
+    thoughtCharacters: transcript.thoughtCharacters + khmer.thoughtCharacters,
+  };
 }
 
 export function buildDubbingResponse(input: {

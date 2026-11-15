@@ -20,8 +20,13 @@ import {
   DUBBING_CUE_RETRY_PROMPT,
   DUBBING_MAX_CUE_SECONDS,
   DUBBING_MAX_KHMER_CHARS,
+  KHMER_DUB_COUNT_RETRY_PROMPT,
+  KHMER_DUB_TEMPERATURE,
+  TRANSCRIPT_OUTPUT_CONTRACT,
+  TRANSCRIPT_TEMPERATURE,
   buildChunkPrompt,
-  buildDubbingPrompt,
+  buildKhmerDubPrompt,
+  buildTranscriptPrompt,
   buildDubbingResponse,
   defaultDubbingConcurrency,
   dubbingChunkSecondsForModel,
@@ -106,13 +111,59 @@ interface ScriptedDubbingReply {
   parts?: Array<Record<string, unknown>>;
 }
 const scriptedDubbingReplies: ScriptedDubbingReply[] = [];
+/** The Call-1 reply that belongs to the next Call 2 request. */
+let pendingScriptedReply: ScriptedDubbingReply | null = null;
+/** Explicit Call-2 answers, consumed before the shared scripted reply. */
+const scriptedKhmerReplies: ScriptedDubbingReply[] = [];
+/** Chunk number inside the current test, used for default timestamps. */
+let dubbingChunkCount = 0;
+const KHMER_DIGITS = '០១២៣៤៥៦៧៨៩';
 
-function defaultDubbingReply(index: number): string {
+function scriptedText(reply: ScriptedDubbingReply): string {
+  if (reply.text) return reply.text;
+  return (reply.parts ?? [])
+    .filter((part) => part.thought !== true && typeof part.text === 'string')
+    .map((part) => part.text as string)
+    .join('');
+}
+
+/** Drop every Khmer column: what Call 1 is allowed to return. */
+function transcriptOnlyReply(text: string): string {
+  try {
+    const parsed = JSON.parse(text);
+    if (!Array.isArray(parsed)) return text;
+    return JSON.stringify(
+      parsed.map((item: Record<string, unknown>) => ({
+        start: item.start,
+        end: item.end,
+        speaker_gender: item.speaker_gender,
+        vocal_timbre: item.vocal_timbre,
+        character_role: item.character_role,
+        original_transcript: item.original_transcript,
+      })),
+    );
+  } catch {
+    return text;
+  }
+}
+
+/** The transcript JSON that buildKhmerDubPrompt embeds after "unchanged:". */
+function transcriptCuesFromPrompt(prompt: string): Array<Record<string, any>> {
+  const marker = 'unchanged:\n';
+  const at = prompt.lastIndexOf(marker);
+  if (at === -1) return [];
+  try {
+    const parsed = JSON.parse(prompt.slice(at + marker.length));
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function defaultTranscriptReply(index: number): string {
   // Timestamps are intentionally chunk-local; the bridge must add the offset.
   const start = index === 1 ? '00:01.0' : '00:00.5';
   const end = index === 1 ? '00:04.5' : '00:03.0';
-  // The dub line must be pure Khmer script, so the chunk number uses Khmer digits.
-  const khmerIndex = '០១២៣៤៥៦៧៨៩'[index % 10];
   return JSON.stringify([
     {
       start,
@@ -121,9 +172,18 @@ function defaultDubbingReply(index: number): string {
       vocal_timbre: 'young and bright',
       character_role: 'younger sister',
       original_transcript: `小梨说第 ${index} 段`,
-      khmer_dubbing: `ប្អូនស្រីនិយាយភាគទី ${khmerIndex} ចាស`,
     },
   ]);
+}
+
+function defaultKhmerReply(prompt: string): string {
+  const cues = transcriptCuesFromPrompt(prompt);
+  return JSON.stringify(
+    cues.map((cue, index) => ({
+      ...cue,
+      khmer_dubbing: `ប្អូនស្រីនិយាយភាគទី ${KHMER_DIGITS[(index + 1) % 10]} ចាស`,
+    })),
+  );
 }
 
 const upstream = http.createServer((request, response) => {
@@ -141,7 +201,10 @@ const upstream = http.createServer((request, response) => {
 
     if (isGenerateContent) {
       geminiRequests.push(parsed as GeminiRequest);
-      const index = geminiRequests.length;
+      const requestParts: Array<any> = parsed?.contents?.[0]?.parts ?? [];
+      const hasAudio = requestParts.some((part) => part && part.inline_data);
+      const requestText =
+        requestParts.find((part) => typeof part?.text === 'string')?.text ?? '';
 
       if (failNextDubbingSchema) {
         failNextDubbingSchema = false;
@@ -157,9 +220,33 @@ const upstream = http.createServer((request, response) => {
         return;
       }
 
-      const scripted = scriptedDubbingReplies.shift();
-      const content = scripted?.text ?? nextDubbingReply ?? defaultDubbingReply(index);
-      const parts = scripted?.parts ?? [{ text: content }];
+      let content = '';
+      let replyParts: Array<Record<string, unknown>> | null = null;
+
+      if (hasAudio) {
+        // Call 1: media -> transcript. The same scripted answer drives both
+        // phases, so its Khmer column is stripped here and returned by Call 2.
+        if (geminiRequests.length === 1) dubbingChunkCount = 0;
+        dubbingChunkCount += 1;
+        const scripted = scriptedDubbingReplies.shift() ?? null;
+        pendingScriptedReply = scripted;
+        const source = scripted ? scriptedText(scripted) : defaultTranscriptReply(dubbingChunkCount);
+        content = transcriptOnlyReply(source);
+      } else {
+        // Call 2: text-only transcript -> Khmer. A scripted reply is shared with
+        // Call 1, so the Khmer column it carried is returned here verbatim;
+        // otherwise the transcript cues in the prompt get the default lines.
+        const explicit = scriptedKhmerReplies.shift() ?? null;
+        const scripted = explicit ?? pendingScriptedReply;
+        pendingScriptedReply = null;
+        if (scripted) {
+          replyParts = scripted.parts ?? null;
+          content = scriptedText(scripted);
+        } else {
+          content = defaultKhmerReply(requestText);
+        }
+      }
+
       nextDubbingReply = null;
       response.writeHead(200, {
         'Content-Type': 'application/json',
@@ -170,7 +257,7 @@ const upstream = http.createServer((request, response) => {
           candidates: [
             {
               finishReason: 'STOP',
-              content: { role: 'model', parts },
+              content: { role: 'model', parts: replyParts ?? [{ text: content }] },
             },
           ],
           usageMetadata: {
@@ -1329,23 +1416,54 @@ test('dubbing response exposes stable speaker_id and numeric timings', () => {
   assert.equal(output.end_seconds, 4);
 });
 
-test('dubbing prompt keeps the caller prompt, contract and chunk context', () => {
-  const prompt = buildDubbingPrompt({
+test('two-pass prompts carry their own contract, continuity and payload', () => {
+  const transcript = buildTranscriptPrompt({
+    index: 1,
+    count: 2,
+    previousRoles: ['narrator', 'sister'],
+  });
+  assert.match(transcript, /precision audiovisual transcriptionist/);
+  assert.match(transcript, /OUTPUT CONTRACT/);
+  assert.match(transcript, /part 2 of 2/);
+  assert.match(transcript, /narrator, sister/);
+  assert.match(transcript, /MM:SS\.S/);
+  assert.match(transcript, /ONE SHORT CLAUSE PER CUE/);
+  assert.match(transcript, /1\.0s and 2\.2s/);
+  assert.doesNotMatch(transcript, /khmer_dubbing/);
+  assert.match(TRANSCRIPT_OUTPUT_CONTRACT, /If no speech is audible/);
+
+  const cues = [
+    {
+      start: '00:00.0',
+      end: '00:02.0',
+      speaker_gender: 'female',
+      vocal_timbre: 'young',
+      character_role: 'sister',
+      original_transcript: '你好',
+    },
+  ];
+  const khmer = buildKhmerDubPrompt({
     prompt: 'Custom dubbing rules.',
+    glossary: '小燕 -> សៀវយ៉ាន',
     index: 1,
     count: 2,
     previousSegments: [
-      { original_transcript: '你好', khmer_dubbing: 'សួស្តី', character_role: 'sister' },
+      { original_transcript: '嗨', khmer_dubbing: 'ហេ', character_role: 'sister' },
     ],
+    cues,
   });
-  assert.match(prompt, /Custom dubbing rules\./);
-  assert.match(prompt, /OUTPUT CONTRACT/);
-  assert.match(prompt, /part 2 of 2/);
-  assert.match(prompt, /សួស្តី/);
-  assert.match(prompt, /do not repeat these lines/i);
-  assert.match(prompt, /MM:SS\.S/);
-  assert.match(prompt, /If speech is present, return every utterance/);
-  assert.match(prompt, /single segment for a clip that contains a conversation, is an error/);
+  assert.match(khmer, /Custom dubbing rules\./);
+  assert.match(khmer, /OUTPUT CONTRACT/);
+  assert.match(khmer, /part 2 of 2/);
+  assert.match(khmer, /ហេ/);
+  assert.match(khmer, /do not repeat these lines/i);
+  assert.match(khmer, /5\.5 syllables\/sec/);
+  assert.match(khmer, /Glossary/);
+  assert.ok(khmer.includes(JSON.stringify(cues)), 'the transcript JSON is the payload');
+  assert.match(khmer, /exact same length and order as the input array/);
+  assert.match(KHMER_DUB_COUNT_RETRY_PROMPT, /WRONG CUE COUNT/);
+  assert.equal(TRANSCRIPT_TEMPERATURE, 0.1);
+  assert.equal(KHMER_DUB_TEMPERATURE, 0.25);
   assert.match(DUBBING_COMPLETENESS_RETRY_PROMPT, /RETRY - INCOMPLETE ANSWER/);
   assert.match(DUBBING_COMPLETENESS_RETRY_PROMPT, /Do not summarize and do not stop early/);
 });
@@ -1384,18 +1502,29 @@ test(
     assert.equal(body.target_language, 'Khmer');
     assert.equal(body.chunks[0].max_output_tokens, 40960);
     assert.equal(body.chunks[1].max_output_tokens, 40960);
-    assert.equal(body.usage.totalTokens, 400);
+    assert.equal(body.usage.totalTokens, 800, 'both passes are charged');
     assert.equal(modelRequests.length, 0, 'dubbing must use generateContent, not chat completions');
-    assert.equal(geminiRequests.length, 2, 'one generateContent request per chunk');
+    assert.equal(geminiRequests.length, 4, 'two model calls per chunk (transcript + Khmer)');
 
-    for (const geminiRequest of geminiRequests) {
-      assert.equal(geminiRequest.generationConfig.maxOutputTokens, 40960);
-      assert.equal(geminiRequest.generationConfig.responseMimeType, 'application/json');
-      assert.equal(geminiRequest.generationConfig.responseSchema?.type, 'ARRAY');
-      const parts = geminiRequest.contents[0].parts;
-      assert.match(parts[0].text || '', /OUTPUT CONTRACT/);
-      assert.equal(parts[1].inline_data?.mime_type, 'audio/mp3');
-      assert.ok(Buffer.from(parts[1].inline_data!.data, 'base64').length > 0);
+    for (let i = 0; i < geminiRequests.length; i += 2) {
+      const transcription = geminiRequests[i];
+      const khmer = geminiRequests[i + 1];
+      assert.equal(transcription.generationConfig.maxOutputTokens, 40960);
+      assert.equal(transcription.generationConfig.responseMimeType, 'application/json');
+      assert.equal(transcription.generationConfig.responseSchema?.type, 'ARRAY');
+      assert.equal(transcription.generationConfig.temperature, 0.1);
+
+      const transcriptionParts = transcription.contents[0].parts;
+      assert.match(transcriptionParts[0].text || '', /CRITICAL FOR TTS/);
+      assert.equal(transcriptionParts[1].inline_data?.mime_type, 'audio/mp3');
+      assert.ok(Buffer.from(transcriptionParts[1].inline_data!.data, 'base64').length > 0);
+
+      assert.equal(khmer.generationConfig.maxOutputTokens, 40960);
+      assert.equal(khmer.generationConfig.responseSchema?.type, 'ARRAY');
+      assert.equal(khmer.generationConfig.temperature, 0.25);
+      assert.equal(khmer.contents[0].parts.length, 1, 'the Khmer pass is text-only');
+      assert.match(khmer.contents[0].parts[0].text || '', /5\.5 Khmer syllables per second/);
+      assert.match(khmer.contents[0].parts[0].text || '', /OUTPUT CONTRACT/);
     }
 
     const first = body.segments[0];
@@ -1463,7 +1592,7 @@ test(
     assert.ok(body.chunks[0].end_seconds <= 61, JSON.stringify(body.chunks[0]));
     assert.equal(body.chunks[0].max_output_tokens, 40960);
     assert.equal(body.chunks[2].max_output_tokens, 40960);
-    assert.equal(geminiRequests.length, 3);
+    assert.equal(geminiRequests.length, 6, 'two calls for each of the three chunks');
   },
 );
 
@@ -1504,7 +1633,7 @@ test(
     assert.equal(body.chunk_count, 1, 'fast mode must not split the requested chunk');
     assert.equal(body.chunk_seconds, 120);
     assert.equal(body.segment_count, 1, 'fast mode accepts the short answer');
-    assert.equal(geminiRequests.length, 1, 'exactly one model call for the chunk');
+    assert.equal(geminiRequests.length, 2, 'one transcript call and one Khmer call for the chunk');
   },
 );
 
@@ -1532,10 +1661,11 @@ test(
     assert.match(body[0].khmer_dubbing, /ប្អូនស្រី/);
     assert.equal(body[0].speaker_gender, 'female');
 
-    assert.equal(geminiRequests.length, 2, 'the schema rejection must trigger one fallback retry');
+    assert.equal(geminiRequests.length, 3, 'one schema fallback, then the Khmer pass');
     assert.ok(geminiRequests[0].generationConfig.responseSchema);
     assert.equal(geminiRequests[1].generationConfig.responseSchema, undefined);
     assert.equal(geminiRequests[1].generationConfig.maxOutputTokens, 40960);
+    assert.ok(geminiRequests[2].generationConfig.responseSchema);
   },
 );
 
@@ -1657,7 +1787,7 @@ test(
     assert.equal(response.status, 200, rawBody);
     const body: any = JSON.parse(rawBody);
     assert.equal(body.segment_count, 1);
-    assert.equal(geminiRequests.length, 2, 'one strict retry after the incomplete answer');
+    assert.equal(geminiRequests.length, 3, 'one strict transcript retry, then the Khmer pass');
     assert.match(
       geminiRequests[1].contents[0].parts[0].text || '',
       /RETRY - INCOMPLETE ANSWER/,
@@ -1824,6 +1954,214 @@ test(
         body.segments[1].start_seconds <= body.segments[2].start_seconds,
       'split cues must stay chronological',
     );
+  },
+);
+
+test(
+  'the Khmer pass cannot move timestamps or metadata from the transcript',
+  { skip: !hasFfmpeg },
+  async () => {
+    geminiRequests.length = 0;
+    scriptedDubbingReplies.length = 0;
+    scriptedKhmerReplies.length = 0;
+
+    const transcript = JSON.stringify([
+      {
+        start: '00:00.0',
+        end: '00:02.0',
+        speaker_gender: 'female',
+        vocal_timbre: 'young and bright',
+        character_role: 'younger sister',
+        original_transcript: '小梨说你好',
+      },
+    ]);
+    // Call 2 answers with different timings, gender, role and source text.
+    const drifting = JSON.stringify([
+      {
+        start: '00:05.0',
+        end: '00:09.0',
+        speaker_gender: 'male',
+        vocal_timbre: 'deep',
+        character_role: 'boss',
+        original_transcript: 'totally different line',
+        khmer_dubbing: 'សួស្តី បង',
+      },
+    ]);
+    scriptedDubbingReplies.push({ text: transcript });
+    scriptedKhmerReplies.push({ text: drifting });
+
+    const form = new FormData();
+    form.append('file', new Blob([makeWav(2)], { type: 'audio/wav' }), 'locked.wav');
+    form.append('model', 'gemini-3.5-flash-lite');
+    form.append('chunk_seconds', '60');
+
+    const response = await fetch(`http://127.0.0.1:${bridgePort}/v1/audio/dubbing`, {
+      method: 'POST',
+      headers: authHeaders(),
+      body: form,
+    });
+
+    const rawBody = await response.text();
+    assert.equal(response.status, 200, rawBody);
+    const body: any = JSON.parse(rawBody);
+    assert.equal(body.segment_count, 1);
+    const segment = body.segments[0];
+    assert.equal(segment.start, '00:00.0', 'Call 1 owns the start timestamp');
+    assert.equal(segment.end, '00:02.0', 'Call 1 owns the end timestamp');
+    assert.equal(segment.speaker_gender, 'female');
+    assert.equal(segment.vocal_timbre, 'young and bright');
+    assert.equal(segment.character_role, 'younger sister');
+    assert.equal(segment.original_transcript, '小梨说你好');
+    assert.equal(segment.khmer_dubbing, 'សួស្តី បង', 'only the Khmer line comes from Call 2');
+    assert.equal(geminiRequests.length, 2);
+  },
+);
+
+test(
+  'the Khmer pass retries once when its cue count differs, then fails clearly',
+  { skip: !hasFfmpeg },
+  async () => {
+    geminiRequests.length = 0;
+    scriptedDubbingReplies.length = 0;
+    scriptedKhmerReplies.length = 0;
+
+    const transcript = JSON.stringify([
+      {
+        start: '00:00.0',
+        end: '00:01.2',
+        speaker_gender: 'male',
+        vocal_timbre: 'calm',
+        character_role: 'guard',
+        original_transcript: 'one',
+      },
+      {
+        start: '00:01.3',
+        end: '00:02.6',
+        speaker_gender: 'male',
+        vocal_timbre: 'calm',
+        character_role: 'guard',
+        original_transcript: 'two',
+      },
+    ]);
+    const merged = JSON.stringify([
+      {
+        start: '00:00.0',
+        end: '00:02.6',
+        speaker_gender: 'male',
+        vocal_timbre: 'calm',
+        character_role: 'guard',
+        original_transcript: 'one two',
+        khmer_dubbing: 'មួយ ពីរ',
+      },
+    ]);
+    scriptedDubbingReplies.push({ text: transcript });
+    scriptedKhmerReplies.push({ text: merged }, { text: merged });
+
+    const form = new FormData();
+    form.append('file', new Blob([makeWav(3)], { type: 'audio/wav' }), 'count.wav');
+    form.append('model', 'gemini-3.5-flash-lite');
+    form.append('chunk_seconds', '60');
+
+    const response = await fetch(`http://127.0.0.1:${bridgePort}/v1/audio/dubbing`, {
+      method: 'POST',
+      headers: authHeaders(),
+      body: form,
+    });
+
+    const rawBody = await response.text();
+    assert.equal(response.status, 502, rawBody);
+    const body: any = JSON.parse(rawBody);
+    assert.equal(body.error.code, 'translation_count_mismatch');
+    assert.equal(body.error.details.expectedCues, 2);
+    assert.equal(body.error.details.returnedCues, 1);
+    assert.equal(geminiRequests.length, 3, 'one transcript call plus two Khmer attempts');
+    assert.match(
+      geminiRequests[2].contents[0].parts[0].text || '',
+      /RETRY - WRONG CUE COUNT/,
+    );
+  },
+);
+
+test(
+  'the Khmer pass accepts a corrected cue count on its retry',
+  { skip: !hasFfmpeg },
+  async () => {
+    geminiRequests.length = 0;
+    scriptedDubbingReplies.length = 0;
+    scriptedKhmerReplies.length = 0;
+
+    const transcript = JSON.stringify([
+      {
+        start: '00:00.0',
+        end: '00:01.2',
+        speaker_gender: 'female',
+        vocal_timbre: 'soft',
+        character_role: 'sister',
+        original_transcript: 'one',
+      },
+      {
+        start: '00:01.3',
+        end: '00:02.6',
+        speaker_gender: 'female',
+        vocal_timbre: 'soft',
+        character_role: 'sister',
+        original_transcript: 'two',
+      },
+    ]);
+    const merged = JSON.stringify([
+      {
+        start: '00:00.0',
+        end: '00:02.6',
+        speaker_gender: 'female',
+        vocal_timbre: 'soft',
+        character_role: 'sister',
+        original_transcript: 'one two',
+        khmer_dubbing: 'មួយ ពីរ',
+      },
+    ]);
+    const corrected = JSON.stringify([
+      {
+        start: '00:00.0',
+        end: '00:01.2',
+        speaker_gender: 'female',
+        vocal_timbre: 'soft',
+        character_role: 'sister',
+        original_transcript: 'one',
+        khmer_dubbing: 'មួយ',
+      },
+      {
+        start: '00:01.3',
+        end: '00:02.6',
+        speaker_gender: 'female',
+        vocal_timbre: 'soft',
+        character_role: 'sister',
+        original_transcript: 'two',
+        khmer_dubbing: 'ពីរ',
+      },
+    ]);
+    scriptedDubbingReplies.push({ text: transcript });
+    scriptedKhmerReplies.push({ text: merged }, { text: corrected });
+
+    const form = new FormData();
+    form.append('file', new Blob([makeWav(3)], { type: 'audio/wav' }), 'count-fixed.wav');
+    form.append('model', 'gemini-3.5-flash-lite');
+    form.append('chunk_seconds', '60');
+
+    const response = await fetch(`http://127.0.0.1:${bridgePort}/v1/audio/dubbing`, {
+      method: 'POST',
+      headers: authHeaders(),
+      body: form,
+    });
+
+    const rawBody = await response.text();
+    assert.equal(response.status, 200, rawBody);
+    const body: any = JSON.parse(rawBody);
+    assert.equal(body.segment_count, 2);
+    assert.deepEqual(
+      body.segments.map((segment: any) => segment.khmer_dubbing),
+      ['មួយ', 'ពីរ'],
+    );
+    assert.equal(geminiRequests.length, 3);
   },
 );
 
