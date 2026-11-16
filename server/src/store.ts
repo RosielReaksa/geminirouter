@@ -128,10 +128,15 @@ export interface TrafficRecord {
   /** Whether the call left through the account's proxy or the gateway host. */
   egressVia?: 'proxy' | 'direct';
   /** Which provider served the call. Undefined means the OAuth core pool. */
-  provider?: 'core' | 'gemini-api';
+  provider?: 'core' | 'gemini-api' | 'tts';
   /** Named gateway client key used by the caller, when known. */
   gatewayKeyId?: string;
   gatewayKeyName?: string;
+  /** TTS: the exact Edge voice that spoke, and how much text was synthesized. */
+  voice?: string;
+  inputCharacters?: number;
+  /** TTS: audio duration in seconds, when reported by the engine. */
+  outputSeconds?: number;
 }
 
 export interface ModelAvailabilityResult {

@@ -371,9 +371,53 @@ const translatedDialogue = result.choices?.[0]?.message?.content;`}
                   <code> /v1/audio/dubbing</code> returns the timed dubbing lines in the target
                   language directly. Turning
                   those lines into audible speech and muxing them back into the video still happens
-                  in the dubbing app.
+                  in the dubbing app — or you can speak them with the TTS endpoint below.
                 </p>
               </div>
+            </section>
+
+            <div className="mkt-rule my-10" />
+
+            <section id="tts" className="scroll-mt-24">
+              <h2 className="mkt-display text-[28px] text-[#191714] mb-3">Text to speech</h2>
+              <p className="text-[14px] leading-relaxed text-[#4A453E]">
+                <code className="px-1.5 py-0.5 rounded bg-[#F0EBE3] text-[12.5px] font-mono-code text-[#A8462A]">
+                  POST /v1/audio/speech
+                </code>{' '}
+                speaks text with an Edge neural voice and returns audio. Use the same gateway key as
+                every other route. Callers are admitted up to a concurrency limit and usage is
+                recorded per key.
+              </p>
+              <Code
+                title="speech · server-side JavaScript"
+                code={`const response = await fetch("${origin}/v1/audio/speech", {
+  method: "POST",
+  headers: {
+    Authorization: \`Bearer \${process.env.GEMINIROUTER_KEY}\`,
+    "Content-Type": "application/json",
+  },
+  body: JSON.stringify({
+    model: "tts-1",
+    input: "Hello and welcome to the show.",
+    voice: "nova",        // or an Edge voice id
+    language: "en",       // picks the voice when omitted
+    response_format: "mp3"
+  }),
+});
+
+const audio = Buffer.from(await response.arrayBuffer());
+console.log(response.headers.get("x-tts-characters"), "characters");`}
+              />
+              <p className="text-[14px] leading-relaxed text-[#4A453E] mt-4">
+                <code className="px-1.5 py-0.5 rounded bg-[#F0EBE3] text-[12.5px] font-mono-code text-[#A8462A]">
+                  voice
+                </code>{' '}
+                accepts the six OpenAI aliases (<code>alloy</code>, <code>echo</code>,{' '}
+                <code>fable</code>, <code>onyx</code>, <code>nova</code>, <code>shimmer</code>) or any
+                Edge voice from <code>GET /v1/audio/voices</code>. Add{' '}
+                <code>timestamp_granularities: ["word"]</code> to get per-word timings for dubbing
+                alignment.
+              </p>
             </section>
 
             <div className="mkt-rule my-10" />

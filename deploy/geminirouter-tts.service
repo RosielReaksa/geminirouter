@@ -1,0 +1,33 @@
+[Unit]
+Description=geminirouter TTS service (Edge TTS behind the Webshare proxy pool)
+After=network.target geminirouter-bridge.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=geminirouter
+Group=geminirouter
+WorkingDirectory=/opt/geminirouter/tts
+Environment=TTS_PORT=8077
+Environment=HOME=/home/geminirouter
+EnvironmentFile=/etc/geminirouter/geminirouter.env
+# Loopback only: the bridge is the public edge and proxies here.
+ExecStart=/opt/geminirouter/tts/.venv/bin/python -m uvicorn app:app --host 127.0.0.1 --port ${TTS_PORT} --workers 1
+Restart=always
+RestartSec=5s
+
+# Edge TTS is I/O-bound (websockets), so a generous file limit is enough.
+LimitNOFILE=65535
+TimeoutStopSec=60s
+KillSignal=SIGTERM
+KillMode=mixed
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/opt/geminirouter/tts /tmp
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

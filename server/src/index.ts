@@ -29,6 +29,7 @@ import {
 } from './geminiApiPool.js';
 import { handleGeminiApiNativeRequest, handleGeminiApiRequest } from './geminiApiProxy.js';
 import { handleGeminiApiResponsesRequest } from './responsesProxy.js';
+import { registerTtsRoutes } from './ttsProxy.js';
 import {
   canonicalModelId,
   canonicalizeModelEntries,
@@ -1090,6 +1091,14 @@ export async function createServer(): Promise<{
     },
   };
   registerMediaRoutes(app, mediaRouteDeps);
+
+  // Public TTS: the bridge authenticates and meters, the loopback tts-server
+  // renders the speech. `/v1/audio/*` already routes here, so no Caddy change.
+  registerTtsRoutes(app, {
+    getApiKeys: gatewayApiKeys,
+    getKeyIdentity: authenticateGatewayKey,
+    recordTraffic: (record) => store.addTrafficRecord(record),
+  });
 
   // The core leaves request_logs at outcome=in_progress when the calling
   // client disconnects mid-request. Those rows never receive a finish event,
@@ -2528,6 +2537,65 @@ export async function createServer(): Promise<{
       return withTrafficEgress(filtered);
     }
     return withTrafficEgress(records.slice(0, 50));
+  });
+
+  // 11c. GET /api/tts/usage — metered TTS usage, grouped per gateway key.
+  // TTS calls are recorded on the bridge, so they never appear in the core
+  // audit stream; this is the ledger the dashboard shows.
+  app.get<{
+    Querystring: { from?: string; to?: string; key?: string };
+  }>('/api/tts/usage', (request) => {
+    const from = request.query.from ? Number(request.query.from) : undefined;
+    const to = request.query.to ? Number(request.query.to) : undefined;
+    const keyFilter = String(request.query.key || '').trim().toLowerCase();
+    const inRange = (record: TrafficRecord): boolean => {
+      if (!record.provider || record.provider !== 'tts') return false;
+      const time = Date.parse(record.timestamp);
+      if (Number.isFinite(from) && time < (from as number)) return false;
+      if (Number.isFinite(to) && time >= (to as number)) return false;
+      return true;
+    };
+
+    const records = store.getTraffic().filter(inRange);
+    const grouped = new Map<
+      string,
+      { keyId: string; keyName: string; calls: number; characters: number; seconds: number; statusCounts: Record<string, number> }
+    >();
+    for (const record of records) {
+      const id = record.gatewayKeyId || 'unattributed';
+      const name = record.gatewayKeyName || 'Unattributed';
+      const entry = grouped.get(id) || {
+        keyId: id,
+        keyName: name,
+        calls: 0,
+        characters: 0,
+        seconds: 0,
+        statusCounts: {},
+      };
+      entry.calls += 1;
+      entry.characters += record.inputCharacters ?? record.promptTokens ?? 0;
+      entry.seconds += record.outputSeconds ?? 0;
+      const status = String(record.status);
+      entry.statusCounts[status] = (entry.statusCounts[status] || 0) + 1;
+      grouped.set(id, entry);
+    }
+
+    const rows = [...grouped.values()]
+      .filter((row) => !keyFilter || row.keyName.toLowerCase().includes(keyFilter) || row.keyId.toLowerCase().includes(keyFilter))
+      .sort((a, b) => b.characters - a.characters);
+
+    return {
+      range: {
+        from: Number.isFinite(from) ? (from as number) : null,
+        to: Number.isFinite(to) ? (to as number) : null,
+      },
+      total: {
+        calls: rows.reduce((sum, row) => sum + row.calls, 0),
+        characters: rows.reduce((sum, row) => sum + row.characters, 0),
+        seconds: Number(rows.reduce((sum, row) => sum + row.seconds, 0).toFixed(2)),
+      },
+      keys: rows,
+    };
   });
 
   // 11b. GET /api/usage/cache — prompt-token cache savings from the core audit SQLite DB.
