@@ -17,7 +17,7 @@ import {
   ShieldCheck,
   ExternalLink,
 } from 'lucide-react';
-import { Link } from '../../router';
+import { Link } from '../../RouterLink';
 import { Reveal } from '../marketing/Chrome';
 
 /**

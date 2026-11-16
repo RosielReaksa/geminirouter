@@ -1,8 +1,8 @@
-/**
+﻿/**
  * Integration tests for the bridge's /v1 proxy contract with the core's
  * account-failover behavior. A fake HTTP upstream stands in for the core
  * gateway (account rotation itself is core-owned and not testable from the
- * bridge — see docs/ACCOUNT-FAILOVER.md). What IS testable here:
+ * bridge â€” see docs/ACCOUNT-FAILOVER.md). What IS testable here:
  *
  *  1. A 429 (all accounts exhausted) passes through unchanged with its
  *     Retry-After header, is never converted into a fake success, and the
@@ -27,36 +27,70 @@ const UPSTREAM_PORT = 3891;
 const BRIDGE_PORT = 3892;
 
 let upstreamHits = 0;
-let upstreamMode = 'exhausted'; // 'exhausted' | 'ok' | 'stream-break'
+let upstreamMode = 'exhausted'; // 'exhausted' | 'ok' | 'stream-break' | 'capability-reject' | 'bad-request'
+let upstreamRequestBody = Buffer.alloc(0);
+let upstreamClosed = false;
 
 const upstream = http.createServer((req, res) => {
   upstreamHits++;
-  if (upstreamMode === 'exhausted') {
-    // What the core emits when the whole pool is exhausted.
-    res.writeHead(429, { 'Retry-After': '60', 'Content-Type': 'application/json' });
-    res.end(
-      JSON.stringify({
-        error: { message: 'All accounts failed or unhealthy', type: 'pool_exhausted' },
-      }),
-    );
-    return;
-  }
-  if (upstreamMode === 'ok') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(
-      JSON.stringify({
-        id: 'cmpl-1',
-        choices: [{ message: { role: 'assistant', content: 'pong from account B' } }],
-      }),
-    );
-    return;
-  }
-  // stream-break: start an SSE response, emit one event, then kill the socket.
-  res.writeHead(200, { 'Content-Type': 'text/event-stream' });
-  res.write('data: {"delta":"partial"}\n\n');
-  setTimeout(() => {
-    res.destroy();
-  }, 150);
+  const chunks: Buffer[] = [];
+  req.on('data', (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
+  req.on('end', () => {
+    upstreamRequestBody = Buffer.concat(chunks);
+    if (upstreamMode === 'exhausted') {
+      // What the core emits when the whole pool is exhausted.
+      res.writeHead(429, { 'Retry-After': '60', 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          error: { message: 'All accounts failed or unhealthy', type: 'pool_exhausted' },
+        }),
+      );
+      return;
+    }
+    if (upstreamMode === 'ok') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          id: 'cmpl-1',
+          choices: [{ message: { role: 'assistant', content: 'pong from account B' } }],
+        }),
+      );
+      return;
+    }
+    // capability-reject: what an upstream account that cannot handle inline
+    // video returns. The request is valid; only this account is unsuitable.
+    if (upstreamMode === 'capability-reject') {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify([
+          {
+            error: {
+              code: 400,
+              message: 'Invalid content part type: video_url',
+              status: 'INVALID_ARGUMENT',
+            },
+          },
+        ]),
+      );
+      return;
+    }
+    // bad-request: a genuine client error that must NOT be retried.
+    if (upstreamMode === 'bad-request') {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          error: { code: 400, message: 'model is required', status: 'INVALID_ARGUMENT' },
+        }),
+      );
+      return;
+    }
+    // stream-break: start an SSE response, emit one event, then kill the socket.
+    res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+    res.write('data: {"delta":"partial"}\n\n');
+    setTimeout(() => {
+      res.destroy();
+    }, 150);
+  });
 });
 
 let bridge: ReturnType<typeof spawn>;
@@ -88,7 +122,22 @@ before(async () => {
           email: 'test1@example.com',
           name: 'Test 1',
           status: 'active',
-          quotas: [{ modelId: 'gemini-2.5-pro', limitIn5h: 50, requestsIn5h: 0, resetTime5h: 'in 4h' }],
+          quotas: [
+            { modelId: 'gemini-2.5-pro', limitIn5h: 50, requestsIn5h: 0, resetTime5h: 'in 4h' },
+            { modelId: 'gemini-3.5-flash-lite', limitIn5h: 50, requestsIn5h: 0, resetTime5h: 'in 4h' },
+          ],
+        },
+        // A second account is required to exercise failover: a pool of one
+        // cannot prove that a rejected account is retried elsewhere.
+        {
+          id: 'test-acc-2',
+          email: 'test2@example.com',
+          name: 'Test 2',
+          status: 'active',
+          quotas: [
+            { modelId: 'gemini-2.5-pro', limitIn5h: 50, requestsIn5h: 0, resetTime5h: 'in 4h' },
+            { modelId: 'gemini-3.5-flash-lite', limitIn5h: 50, requestsIn5h: 0, resetTime5h: 'in 4h' },
+          ],
         },
       ],
     })
@@ -130,7 +179,7 @@ before(async () => {
 
 after(async () => {
   bridge?.kill();
-  upstream.close();
+  if (!upstreamClosed) upstream.close();
   try {
     fs.rmSync(tempHome, { recursive: true, force: true });
   } catch {
@@ -170,6 +219,116 @@ test('successful (failed-over) response passes through', async () => {
   const body = await res.json();
   assert.equal(body.choices[0].message.content, 'pong from account B');
   assert.equal(upstreamHits, 1);
+});
+
+test('a video capability rejection fails over instead of reaching the client', async () => {
+  // The core answered "Invalid content part type: video_url" for the identical
+  // body about half the time, because only some upstream accounts accept inline
+  // video. Survivors must be retried on another account, not surfaced as 400.
+  upstreamMode = 'capability-reject';
+  upstreamHits = 0;
+
+  const res = await request(BRIDGE_PORT, '/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: 'gemini-3.5-flash-lite',
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'Review this video.' },
+            { type: 'video_url', video_url: { url: 'data:video/mp4;base64,AAAA' } },
+          ],
+        },
+      ],
+    }),
+  });
+
+  // The fake upstream always rejects, so the client still sees a 400 once the
+  // pool is spent. The point is that the bridge RETRIED instead of passing the
+  // first rejection straight through.
+  assert.ok(upstreamHits > 1, `must retry on other accounts, got ${upstreamHits} hit(s)`);
+  const body = await res.json();
+  assert.match(JSON.stringify(body), /Invalid content part type|video_url/);
+  assert.equal(res.status, 400, 'a capability rejection must not be reported as a rate limit');
+});
+
+test('a genuine 400 is returned immediately and never retried', async () => {
+  // A malformed request must not be retried across the pool: that would waste
+  // every account and turn one clear error into a slow failure.
+  upstreamMode = 'bad-request';
+  upstreamHits = 0;
+
+  const res = await request(BRIDGE_PORT, '/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }] }),
+  });
+
+  assert.equal(res.status, 400);
+  assert.equal(upstreamHits, 1, 'a real client error must be answered, not retried');
+  const body = await res.json();
+  assert.match(JSON.stringify(body), /model is required/);
+});
+
+test('multimodal JSON larger than 10 MiB reaches the core unchanged', async () => {
+  upstreamMode = 'ok';
+  upstreamHits = 0;
+  upstreamRequestBody = Buffer.alloc(0);
+  const base64Video = Buffer.alloc(8 * 1024 * 1024, 7).toString('base64');
+  const body = JSON.stringify({
+    model: 'gemini-2.5-pro',
+    messages: [
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'Summarize this clip.' },
+          { type: 'video_url', video_url: { url: `data:video/mp4;base64,${base64Video}` } },
+        ],
+      },
+    ],
+  });
+  assert.ok(Buffer.byteLength(body) > 10 * 1024 * 1024);
+
+  const res = await request(BRIDGE_PORT, '/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body,
+  });
+
+  assert.equal(res.status, 200);
+  assert.equal(upstreamHits, 1);
+  assert.equal(upstreamRequestBody.toString('utf8'), body);
+});
+
+test('multipart audio requests keep their boundary and bytes when proxied', async () => {
+  upstreamMode = 'ok';
+  upstreamHits = 0;
+  upstreamRequestBody = Buffer.alloc(0);
+  const boundary = 'framecall-audio-test-boundary';
+  const body = Buffer.from(
+    `--${boundary}\r\n` +
+      'Content-Disposition: form-data; name="model"\r\n\r\n' +
+      'gemini-2.5-pro\r\n' +
+      `--${boundary}\r\n` +
+      'Content-Disposition: form-data; name="file"; filename="sample.wav"\r\n' +
+      'Content-Type: audio/wav\r\n\r\n' +
+      'RIFF-test-audio-bytes\r\n' +
+      `--${boundary}--\r\n`,
+  );
+
+  // Use a normal proxied path: this test is about byte-for-byte multipart
+  // passthrough, not the bridge-level media transcription route.
+  const res = await request(BRIDGE_PORT, '/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}` },
+    body,
+  });
+
+  assert.equal(res.status, 200);
+  assert.equal(upstreamHits, 1);
+  assert.deepEqual(upstreamRequestBody, body);
 });
 
 test('no retry after a streamed response has started', async () => {
@@ -224,3 +383,51 @@ test('core offline: /api/oauth/start errors instead of returning a fake URL', as
   assert.match(body.error, /Core is offline/);
   assert.ok(!body.authorizationUrl, 'no fake authorization URL may be returned');
 });
+
+test('v1beta model paths are proxied and attributed from the URL', async () => {
+  upstreamMode = 'ok';
+  upstreamHits = 0;
+  upstreamRequestBody = Buffer.alloc(0);
+
+  const res = await request(BRIDGE_PORT, '/v1beta/models/gemini-2.5-pro:generateContent', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents: [{ parts: [{ text: 'hi' }] }],
+      generationConfig: { maxOutputTokens: 4 },
+    }),
+  });
+
+  assert.equal(res.status, 200);
+  assert.equal(upstreamHits, 1);
+
+  await wait(100);
+  const traffic = (await (await request(BRIDGE_PORT, '/api/traffic')).json()) as Array<{
+    modelRequested: string;
+  }>;
+  assert.ok(
+    traffic.some((record) => record.modelRequested === 'gemini-2.5-pro'),
+    'the model must be read from /v1beta/models/<model>:generateContent',
+  );
+});
+
+test('core unreachable: /v1 returns 502, never an empty 200', async () => {
+  assert.ok(!upstreamClosed, 'this must be the last test that needs the fake core');
+  await new Promise<void>((resolve) => upstream.close(() => resolve()));
+  upstreamClosed = true;
+
+  const res = await request(BRIDGE_PORT, '/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: 'gemini-2.5-pro',
+      messages: [{ role: 'user', content: 'hi' }],
+    }),
+  });
+
+  assert.equal(res.status, 502, 'connection failure must not look like a 200');
+  const body = await res.json();
+  assert.equal(body.error.type, 'gateway_error');
+  assert.ok(body.error.message.length > 0);
+});
+

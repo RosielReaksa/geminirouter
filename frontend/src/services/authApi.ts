@@ -13,6 +13,27 @@ const TOKEN_KEY = 'geminirouter_session_token';
  */
 const SIGNED_OUT_KEY = 'geminirouter_signed_out';
 
+async function fetchAuthJson(
+  endpoint: string,
+  options: RequestInit,
+  timeoutMs = 10000,
+): Promise<{ response: Response; data: any }> {
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(endpoint, { ...options, signal: controller.signal });
+    const data = await response.json().catch(() => ({}));
+    return { response, data };
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new Error('The gateway did not respond in time. Please try again.');
+    }
+    throw error instanceof Error ? error : new Error('Could not reach the gateway.');
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+}
+
 export interface LoginResult {
   ok: boolean;
   error?: string;
@@ -77,21 +98,23 @@ export const authApi = {
 
   async login(password: string): Promise<LoginResult> {
     try {
-      const res = await fetch('/api/auth/login', {
+      const { response, data } = await fetchAuthJson('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ password }),
       });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
+      if (!response.ok) {
         return { ok: false, error: data?.error || 'Incorrect password.' };
       }
       if (data?.token) this.setToken(data.token);
       // A successful sign-in cancels any earlier sign-out.
       this.clearSignedOut();
       return { ok: true, open: Boolean(data?.open) };
-    } catch {
-      return { ok: false, error: 'Could not reach the gateway.' };
+    } catch (error) {
+      return {
+        ok: false,
+        error: error instanceof Error ? error.message : 'Could not reach the gateway.',
+      };
     }
   },
 
@@ -104,13 +127,16 @@ export const authApi = {
       return { authenticated: false, requiresPassword: true };
     }
     try {
-      const res = await fetch('/api/auth/session', { headers: this.headers() });
-      if (res.status === 401) {
-        const data = await res.json().catch(() => ({}));
+      const { response, data } = await fetchAuthJson('/api/auth/session', {
+        headers: this.headers(),
+      });
+      if (response.status === 401) {
         return { authenticated: false, requiresPassword: data?.requiresPassword !== false };
       }
-      const data = await res.json().catch(() => ({}));
-      return { authenticated: Boolean(data?.authenticated), requiresPassword: false };
+      return {
+        authenticated: response.ok && Boolean(data?.authenticated),
+        requiresPassword: false,
+      };
     } catch {
       return { authenticated: false, requiresPassword: true };
     }
@@ -118,7 +144,10 @@ export const authApi = {
 
   async logout(): Promise<void> {
     try {
-      await fetch('/api/auth/logout', { method: 'POST', headers: this.headers() });
+      await fetchAuthJson('/api/auth/logout', {
+        method: 'POST',
+        headers: this.headers(),
+      }, 5000);
     } catch {
       /* ignore */
     }

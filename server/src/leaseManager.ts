@@ -1,5 +1,6 @@
 import EventEmitter from 'node:events';
 import type { GoogleAccount } from './store.js';
+import { isAccountQuotaExhausted, remainingQuotaPercent } from './quota.js';
 
 export interface LeaseManagerOptions {
   maxConcurrentRequestsPerAccount?: number;
@@ -23,7 +24,7 @@ export class ConcurrencyLeaseManager extends EventEmitter {
     super();
     this.maxConcurrentRequestsPerAccount = options.maxConcurrentRequestsPerAccount ?? 10;
     this.capacityPolicy = options.capacityPolicy ?? 'queue';
-    this.queueTimeoutMs = options.queueTimeoutMs ?? 5000;
+    this.queueTimeoutMs = options.queueTimeoutMs ?? 15_000; // raised: 5 s was too tight for burst traffic
     this.cooldownTtlMs = options.cooldownTtlMs ?? 30 * 60 * 1000;
   }
 
@@ -201,7 +202,11 @@ export class ConcurrencyLeaseManager extends EventEmitter {
     const tryPick = (): GoogleAccount | null => {
       const candidates = accounts.filter((acc) => {
         if (exclude.has(acc.id)) return false;
-        if (acc.status === 'error' || acc.hasValidationLink) return false;
+        if (acc.status === 'error' || acc.hasValidationLink || acc.refreshBlocked) return false;
+        // A window at 0% must not be selected until its reset time passes.
+        // This is checked at selection time so an account returns to rotation
+        // automatically when the core rolls the quota window over.
+        if (isAccountQuotaExhausted(acc, options?.model)) return false;
         if (this.isAccountModelInCooldown(acc.id, options?.model)) return false;
         const currentInFlight = this.getInFlight(acc.id);
         if (currentInFlight >= this.maxConcurrentRequestsPerAccount) return false;
@@ -209,6 +214,13 @@ export class ConcurrencyLeaseManager extends EventEmitter {
       });
 
       if (candidates.length === 0) return null;
+
+      // Pre-compute quota percentages once per selection round so the sort
+      // comparator doesn't recalculate them O(N log N) times.
+      const quotaCache = new Map<string, number>();
+      for (const acc of candidates) {
+        quotaCache.set(acc.id, this.getAccountRemainingQuota(acc, options?.model));
+      }
 
       // Sort by fewest in-flight leases ascending
       candidates.sort((a, b) => {
@@ -219,8 +231,8 @@ export class ConcurrencyLeaseManager extends EventEmitter {
         }
 
         // Tie-breaker: least quota used (highest remaining quota)
-        const quotaA = this.getAccountRemainingQuota(a, options?.model);
-        const quotaB = this.getAccountRemainingQuota(b, options?.model);
+        const quotaA = quotaCache.get(a.id) ?? 0;
+        const quotaB = quotaCache.get(b.id) ?? 0;
         return quotaB - quotaA; // higher remaining percentage comes first
       });
 
@@ -318,20 +330,6 @@ export class ConcurrencyLeaseManager extends EventEmitter {
   }
 
   private getAccountRemainingQuota(acc: GoogleAccount, model?: string): number {
-    if (!acc.quotas || acc.quotas.length === 0) return 100;
-    if (model) {
-      const match = acc.quotas.find((q) => q.modelId === model || q.modelName === model);
-      if (match) {
-        const remainingReq = Math.max(0, match.limitIn5h - match.requestsIn5h);
-        return match.limitIn5h > 0 ? (remainingReq / match.limitIn5h) * 100 : 0;
-      }
-    }
-    // Average remaining quota across all models
-    let totalPct = 0;
-    for (const q of acc.quotas) {
-      const remainingReq = Math.max(0, q.limitIn5h - q.requestsIn5h);
-      totalPct += q.limitIn5h > 0 ? (remainingReq / q.limitIn5h) * 100 : 0;
-    }
-    return totalPct / acc.quotas.length;
+    return remainingQuotaPercent(acc, model);
   }
 }

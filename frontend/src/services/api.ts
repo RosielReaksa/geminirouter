@@ -3,12 +3,23 @@ import {
   GoogleAccount,
   GatewayConfig,
   TrafficRecord,
+  CacheStats,
+  ProxyConfig,
+  ProxyListSummary,
+  ProxyRefreshResult,
+  GeminiApiConfig,
+  GeminiApiTestResult,
+  GatewayApiKey,
+  GatewayApiKeysResponse,
   OAuthStartResponse,
   OAuthCompleteResponse,
   ModelsResponse,
   ModelTestResult,
-} from '../types';
-import {
+  PlaygroundResult,
+  PlaygroundMedia,
+  TrafficVolumeRange,
+  TrafficVolumeResponse,
+} from '../types';import {
   INITIAL_MOCK_ACCOUNTS,
   INITIAL_MOCK_CONFIG,
   INITIAL_MOCK_STATUS,
@@ -54,31 +65,56 @@ function setStored<T>(key: string, value: T): void {
 export class ApiClient {
   private isOnlineCache: boolean | null = null;
 
+  private async fetchJson<T>(
+    endpoint: string,
+    options: RequestInit | undefined,
+    timeoutMs = 35000,
+  ): Promise<{ response: Response; data: T | null }> {
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+    const method = (options?.method || 'GET').toUpperCase();
+    // Fastify rejects an empty body when Content-Type is application/json, and
+    // the headers below always set that content type. Sending `{}` makes
+    // body-less POST/PATCH/DELETE calls (account removal, refresh) valid.
+    const requestOptions: RequestInit =
+      method !== 'GET' && method !== 'HEAD' && options?.body === undefined
+        ? { ...options, body: '{}' }
+        : { ...options };
+
+    try {
+      const response = await fetch(endpoint, {
+        ...requestOptions,
+        signal: controller.signal,
+        headers: {
+          'Content-Type': 'application/json',
+          ...authApi.headers(),
+          ...(requestOptions.headers || {}),
+        },
+      });
+      const data = await response.json().catch(() => null) as T | null;
+      return { response, data };
+    } catch (error) {
+      if (controller.signal.aborted) {
+        throw new Error(`The request timed out after ${Math.ceil(timeoutMs / 1000)} seconds.`);
+      }
+      throw error instanceof Error ? error : new Error('Could not reach the gateway.');
+    } finally {
+      window.clearTimeout(timeoutId);
+    }
+  }
+
   private async fetchWithFallback<T>(
     endpoint: string,
     options: RequestInit | undefined,
     mockFallbackFn: () => Promise<T> | T
   ): Promise<{ data: T; isLiveApi: boolean }> {
     try {
-      const controller = new AbortController();
-      // Allow up to 35 seconds for live LLM completions and Google quota probes
-      const timeoutId = setTimeout(() => controller.abort(), 35000);
-
-      const res = await fetch(endpoint, {
-        ...options,
-        signal: controller.signal,
-        headers: {
-          'Content-Type': 'application/json',
-          ...authApi.headers(),
-          ...(options?.headers || {}),
-        },
-      });
-      clearTimeout(timeoutId);
+      // Keep the deadline active through response-body parsing as well as headers.
+      const { response: res, data } = await this.fetchJson<T>(endpoint, options);
 
       if (res.ok) {
-        const json = await res.json();
         this.isOnlineCache = true;
-        return { data: json as T, isLiveApi: true };
+        return { data: data as T, isLiveApi: true };
       }
 
       // 401 means the session is missing or expired. Surface it so the app can
@@ -95,6 +131,64 @@ export class ApiClient {
     this.isOnlineCache = false;
     const fallbackData = await mockFallbackFn();
     return { data: fallbackData, isLiveApi: false };
+  }
+
+  /** Mutation helper: surface the server's error message instead of mock data. */
+  private async mutateJson<T>(endpoint: string, options: RequestInit): Promise<T> {
+    const method = (options.method || 'GET').toUpperCase();
+    // Fastify rejects an empty body when Content-Type is application/json; send
+    // an empty object for body-less POST/PATCH/DELETE calls.
+    const requestOptions: RequestInit = {
+      ...options,
+      ...(method !== 'GET' && method !== 'HEAD' && options.body === undefined
+        ? { body: '{}' }
+        : {}),
+    };
+    const { response, data } = await this.fetchJson<T>(endpoint, requestOptions);
+    if (!response.ok) {
+      const raw =
+        (data as any)?.error ??
+        (data as any)?.message;
+      let message: string;
+      if (typeof raw === 'string' && raw.trim()) {
+        message = raw;
+      } else if (raw && typeof raw === 'object') {
+        message =
+          (typeof (raw as any).message === 'string' && (raw as any).message) ||
+          (typeof (raw as any).type === 'string' && (raw as any).type) ||
+          JSON.stringify(raw);
+      } else {
+        message = `Request failed (HTTP ${response.status}).`;
+      }
+      throw new Error(String(message));
+    }
+    return data as T;
+  }
+
+  async getGatewayKeys(): Promise<GatewayApiKeysResponse> {
+    const { response, data } = await this.fetchJson<GatewayApiKeysResponse>(
+      '/api/gateway/keys',
+      { method: 'GET' }
+    );
+    if (!response.ok || !data) {
+      throw new Error((data as any)?.error || `Could not load gateway keys (HTTP ${response.status}).`);
+    }
+    return data;
+  }
+
+  async createGatewayKey(name: string): Promise<{ key: string; keys: GatewayApiKey[] }> {
+    return this.mutateJson<{ key: string; keys: GatewayApiKey[] }>('/api/gateway/keys', {
+      method: 'POST',
+      body: JSON.stringify({ name }),
+    });
+  }
+
+  async deleteGatewayKey(id: string): Promise<GatewayApiKey[]> {
+    const result = await this.mutateJson<{ keys: GatewayApiKey[] }>(
+      `/api/gateway/keys/${encodeURIComponent(id)}`,
+      { method: 'DELETE' }
+    );
+    return result.keys;
   }
 
   // 1. GET /api/status
@@ -121,7 +215,7 @@ export class ApiClient {
       { method: 'GET' },
       () => this.cachedAccounts
     );
-    if (res.data && Array.isArray(res.data) && res.data.length > 0) {
+    if (Array.isArray(res.data)) {
       this.cachedAccounts = res.data;
     }
     return res;
@@ -134,7 +228,7 @@ export class ApiClient {
       { method: 'POST' },
       () => this.cachedAccounts
     );
-    if (res.data && Array.isArray(res.data) && res.data.length > 0) {
+    if (Array.isArray(res.data)) {
       this.cachedAccounts = res.data;
     }
     return res;
@@ -295,9 +389,12 @@ export class ApiClient {
   }
 
   // 9. GET /api/traffic
-  async getTraffic(): Promise<{ data: TrafficRecord[]; isLiveApi: boolean }> {
+  async getTraffic(range?: { from: number; to: number }): Promise<{ data: TrafficRecord[]; isLiveApi: boolean }> {
+    const query = range
+      ? `?from=${encodeURIComponent(range.from)}&to=${encodeURIComponent(range.to)}`
+      : '';
     return this.fetchWithFallback<TrafficRecord[]>(
-      '/api/traffic',
+      `/api/traffic${query}`,
       { method: 'GET' },
       () => {
         return getStored<TrafficRecord[]>(
@@ -305,6 +402,179 @@ export class ApiClient {
           INITIAL_MOCK_TRAFFIC
         );
       }
+    );
+  }
+
+  async getCacheStats(range?: { from: number; to: number }): Promise<{ data: CacheStats; isLiveApi: boolean }> {
+    const query = range
+      ? `?from=${encodeURIComponent(range.from)}&to=${encodeURIComponent(range.to)}`
+      : '';
+    return this.fetchWithFallback<CacheStats>(
+      `/api/usage/cache${query}`,
+      { method: 'GET' },
+      () => ({
+        available: false,
+        totalRequests: 0,
+        totalInputTokens: 0,
+        totalCachedTokens: 0,
+        totalOutputTokens: 0,
+        totalReasoningTokens: 0,
+        requestsWithCache: 0,
+        overallHitRate: 0,
+        byModel: [],
+        byFamily: [],
+      })
+    );
+  }
+
+  async getProxyConfig(): Promise<{ data: ProxyConfig; isLiveApi: boolean }> {
+    return this.fetchWithFallback<ProxyConfig>(
+      '/api/proxy/config',
+      { method: 'GET' },
+      () => ({
+        enabled: false,
+        hasApiKey: false,
+        proxyCount: 0,
+        accountCount: 0,
+        lastFetchedAt: 0,
+        fetchIntervalMs: 600000,
+        lastError: null,
+      })
+    );
+  }
+
+  async updateProxyConfig(
+    partial: { enabled?: boolean; webshareApiKey?: string },
+  ): Promise<{ data: ProxyConfig; isLiveApi: boolean }> {
+    return this.fetchWithFallback<ProxyConfig>(
+      '/api/proxy/config',
+      { method: 'POST', body: JSON.stringify(partial) },
+      () => ({
+        enabled: partial.enabled ?? false,
+        hasApiKey: Boolean(partial.webshareApiKey),
+        proxyCount: 0,
+        accountCount: 0,
+        lastFetchedAt: 0,
+        fetchIntervalMs: 600000,
+        lastError: 'Gateway is offline.',
+        error: 'Gateway is offline.',
+      })
+    );
+  }
+
+  async refreshProxyList(): Promise<{ data: ProxyRefreshResult; isLiveApi: boolean }> {
+    return this.fetchWithFallback<ProxyRefreshResult>(
+      '/api/proxy/refresh',
+      { method: 'POST' },
+      () => ({ ok: false, proxyCount: 0, error: 'Gateway is offline.' })
+    );
+  }
+
+  async getProxyList(): Promise<{ data: ProxyListSummary; isLiveApi: boolean }> {
+    return this.fetchWithFallback<ProxyListSummary>(
+      '/api/proxy/list',
+      { method: 'GET' },
+      () => ({
+        enabled: false,
+        proxies: [],
+      })
+    );
+  }
+
+  async setProxyStatus(
+    address: string,
+    port: number,
+    action: 'quarantine' | 'retire' | 'restore',
+    hours?: number,
+  ): Promise<{ data: ProxyListSummary; isLiveApi: boolean }> {
+    return this.fetchWithFallback<ProxyListSummary>(
+      '/api/proxy/status',
+      { method: 'POST', body: JSON.stringify({ address, port, action, hours }) },
+      () => ({
+        enabled: false,
+        proxies: [],
+      })
+    );
+  }
+
+  async getGeminiApiConfig(): Promise<{ data: GeminiApiConfig; isLiveApi: boolean }> {
+    return this.fetchWithFallback<GeminiApiConfig>(
+      '/api/gemini/config',
+      { method: 'GET' },
+      () => ({
+        models: ['gemini-3.1-flash-lite', 'gemini-3.5-flash-lite'],
+        limits: { rpm: 15, tpm: 250000, rpd: 500 },
+        queue: { depth: 0, active: 0, maxWaitMs: 30000, maxConcurrentPerKey: 4, maxQueueSize: 200 },
+        proxy: { enabled: false, available: 0, hasApiKey: false, assigned: 0, keysPerProxy: 3 },
+        sharedRouting: 'balanced',
+        keys: [],
+      })
+    );
+  }
+
+  async addGeminiApiKeys(payload: {
+    label?: string;
+    key?: string;
+    keys?: string[];
+  }): Promise<GeminiApiConfig> {
+    return this.mutateJson<GeminiApiConfig>('/api/gemini/keys', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async updateGeminiApiKey(
+    id: string,
+    patch: { enabled?: boolean; label?: string }
+  ): Promise<GeminiApiConfig> {
+    return this.mutateJson<GeminiApiConfig>(`/api/gemini/keys/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    });
+  }
+
+  async deleteGeminiApiKey(id: string): Promise<GeminiApiConfig> {
+    return this.mutateJson<GeminiApiConfig>(`/api/gemini/keys/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    });
+  }
+
+  async testGeminiApiKey(id: string): Promise<GeminiApiTestResult> {
+    return this.mutateJson<GeminiApiTestResult>(
+      `/api/gemini/keys/${encodeURIComponent(id)}/test`,
+      { method: 'POST' }
+    );
+  }
+
+  async setGeminiApiRouting(
+    routing: 'balanced' | 'keys' | 'accounts',
+  ): Promise<GeminiApiConfig> {
+    return this.mutateJson<GeminiApiConfig>('/api/gemini/routing', {
+      method: 'POST',
+      body: JSON.stringify({ routing }),
+    });
+  }
+
+  async getTrafficVolume(range: TrafficVolumeRange): Promise<{ data: TrafficVolumeResponse; isLiveApi: boolean }> {
+    const durations: Record<TrafficVolumeRange, number> = {
+      '12h': 12 * 60 * 60 * 1000,
+      '24h': 24 * 60 * 60 * 1000,
+      '7d': 7 * 24 * 60 * 60 * 1000,
+    };
+    const windowEnd = Date.now();
+    return this.fetchWithFallback<TrafficVolumeResponse>(
+      `/api/traffic/volume?range=${range}`,
+      { method: 'GET' },
+      () => ({
+        range,
+        available: false,
+        windowStart: new Date(windowEnd - durations[range]).toISOString(),
+        windowEnd: new Date(windowEnd).toISOString(),
+        bucketMs: range === '7d' ? 6 * 60 * 60 * 1000 : 60 * 60 * 1000,
+        buckets: [],
+        totalRequests: 0,
+        totalErrors: 0,
+      }),
     );
   }
 
@@ -324,33 +594,178 @@ export class ApiClient {
 
   // Real test call through the gateway — never falls back to mock data
   async testModel(model: string): Promise<ModelTestResult> {
-    const res = await fetch('/api/models/test', {
+    const { response, data } = await this.fetchJson<ModelTestResult>('/api/models/test', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ model }),
+    }, 45000);
+    if (response.status === 401) {
+      window.dispatchEvent(new CustomEvent('geminirouter:unauthorized'));
+    }
+    if (response.ok && data) return data;
+    return {
+      ok: false,
+      model,
+      latencyMs: 0,
+      error: data?.error || `Model test failed (HTTP ${response.status}).`,
+    };
+  }
+
+  async testAllModelsAcrossAccounts(): Promise<{ ok: boolean; models?: number; accounts?: number; error?: string }> {
+    // This endpoint checks every advertised model against every account serially.
+    const { response, data } = await this.fetchJson<{ ok: boolean; models?: number; accounts?: number; error?: string }>(
+      '/api/models/test-all-accounts',
+      {
+      method: 'POST',
+        body: JSON.stringify({}),
+      },
+      // Up to 31 models × 6 accounts × 25-second probes can take over an hour.
+      2 * 60 * 60 * 1000,
+    );
+    if (response.status === 401) {
+      window.dispatchEvent(new CustomEvent('geminirouter:unauthorized'));
+    }
+    if (response.ok && data) return data;
+    if (data?.error) return { ok: false, error: data.error };
+    return { ok: false, error: `Full model check failed (HTTP ${response.status}).` };
+  }
+
+  async playgroundRequest(input: {
+    model: string;
+    prompt: string;
+    systemPrompt?: string;
+    temperature: number;
+    maxTokens: number;
+    media?: PlaygroundMedia;
+  }): Promise<PlaygroundResult> {
+    const { response, data } = await this.fetchJson<PlaygroundResult & { error?: string }>('/api/playground', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }, 180000);
+    if (response.status === 401) {
+      window.dispatchEvent(new CustomEvent('geminirouter:unauthorized'));
+    }
+    if (!response.ok || !data) {
+      throw new Error(data?.error || `Request failed with HTTP ${response.status}`);
+    }
+    return data;
+  }
+
+  async playgroundMediaRequest(input: {
+    file: File;
+    model: string;
+    prompt: string;
+    systemPrompt?: string;
+    temperature: number;
+    maxTokens: number;
+    onUploadProgress?: (percent: number) => void;
+  }): Promise<PlaygroundResult> {
+    const form = new FormData();
+    form.append('file', input.file, input.file.name);
+    form.append('model', input.model);
+    form.append('prompt', input.prompt);
+    if (input.systemPrompt) form.append('systemPrompt', input.systemPrompt);
+    form.append('temperature', String(input.temperature));
+    form.append('maxTokens', String(input.maxTokens));
+
+    const startedAt = Date.now();
+    return new Promise<PlaygroundResult>((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', '/api/playground/media');
+      const headers = authApi.headers();
+      for (const [name, value] of Object.entries(headers)) {
+        xhr.setRequestHeader(name, value);
+      }
+      // Match the server's MEDIA_TOTAL_TIMEOUT_MS (1.5 h by default: 1 h of
+      // media plus processing headroom). A shorter browser deadline would abort
+      // an upload the server still considers valid.
+      xhr.timeout = 90 * 60 * 1000;
+      xhr.upload.onprogress = (event) => {
+        if (!event.lengthComputable) return;
+        input.onUploadProgress?.(Math.min(100, Math.round((event.loaded / event.total) * 100)));
+      };
+      xhr.onload = () => {
+        let data: (PlaygroundResult & { error?: string }) | null = null;
+        try {
+          data = xhr.responseText ? JSON.parse(xhr.responseText) : null;
+        } catch {
+          data = null;
+        }
+        if (xhr.status === 401) {
+          window.dispatchEvent(new CustomEvent('geminirouter:unauthorized'));
+        }
+        if (xhr.status < 200 || xhr.status >= 300 || !data) {
+          reject(new Error(data?.error || `Large media request failed (HTTP ${xhr.status}).`));
+          return;
+        }
+        resolve({ ...data, latencyMs: Date.now() - startedAt });
+      };
+      xhr.onerror = () => reject(new Error('Could not upload the media.'));
+      xhr.ontimeout = () => reject(new Error('The large media request timed out after 90 minutes.'));
+      xhr.onabort = () => reject(new Error('The large media request was cancelled.'));
+      xhr.send(form);
     });
-    return res.json();
   }
 
   // Helper: Delete account
-  async deleteAccount(accountId: string): Promise<GoogleAccount[]> {    try {
-      const res = await fetch(`/api/accounts/${encodeURIComponent(accountId)}`, {
-        method: 'DELETE',
-      });
-      if (res.ok) {
-        const { data } = await this.getAccounts();
-        return data;
-      }
-    } catch {
-      // fallback
+  async deleteAccount(accountId: string): Promise<GoogleAccount[]> {
+    const { response, data } = await this.fetchJson<{
+      success: boolean;
+      accounts?: GoogleAccount[];
+      error?: string;
+    }>(`/api/accounts/${encodeURIComponent(accountId)}`, { method: 'DELETE' });
+    if (response.status === 401) {
+      window.dispatchEvent(new CustomEvent('geminirouter:unauthorized'));
     }
-    const current = getStored<GoogleAccount[]>(
-      STORAGE_KEYS.ACCOUNTS,
-      INITIAL_MOCK_ACCOUNTS
-    );
-    const updated = current.filter((acc) => acc.id !== accountId);
-    setStored(STORAGE_KEYS.ACCOUNTS, updated);
+    if (!response.ok || !data?.success) {
+      throw new Error(data?.error || `Account removal failed (HTTP ${response.status}).`);
+    }
+
+    // The endpoint returns the updated real account list. Keep the cached list
+    // aligned so a subsequent offline fallback cannot resurrect the removed account.
+    const updated = Array.isArray(data.accounts)
+      ? data.accounts
+      : this.cachedAccounts.filter((account) => account.id !== accountId);
+    this.cachedAccounts = updated;
     return updated;
+  }
+
+  async createPairCode(): Promise<{ code: string; expiresAt: number; error?: string }> {
+    const { response, data } = await this.fetchJson<{ code: string; expiresAt: number; error?: string }>(
+      '/api/device/pair-code',
+      {
+      method: 'POST',
+        body: '{}',
+      },
+    );
+    if (response.status === 401) {
+      window.dispatchEvent(new CustomEvent('geminirouter:unauthorized'));
+      return { code: '', expiresAt: 0, error: 'Unauthorized' };
+    }
+    if (!response.ok || !data) {
+      return { code: '', expiresAt: 0, error: data?.error || `Request failed (HTTP ${response.status})` };
+    }
+    return data;
+  }
+
+  async importAccounts(
+    content: string,
+    strategy: 'merge' | 'overwrite' | 'skip-existing' = 'merge',
+  ): Promise<{ success: boolean; result?: unknown; error?: string; message?: string }> {
+    const { response, data } = await this.fetchJson<{ success: boolean; result?: unknown; error?: string; message?: string }>(
+      '/api/accounts/import',
+      {
+      method: 'POST',
+        body: JSON.stringify({ content, strategy }),
+      },
+      60000,
+    );
+    if (response.status === 401) {
+      window.dispatchEvent(new CustomEvent('geminirouter:unauthorized'));
+    }
+    if (!response.ok || !data) {
+      return { success: false, error: data?.error || `Import failed (HTTP ${response.status})` };
+    }
+    return data;
   }
 
   // Helper: Set default account

@@ -1,6 +1,6 @@
 import React from 'react';
 import { ArrowLeft, Compass } from 'lucide-react';
-import { Link } from '../../router';
+import { Link } from '../../RouterLink';
 
 export const NotFoundPage: React.FC = () => (
   <div className="max-w-3xl mx-auto px-5 sm:px-8 py-24 sm:py-32 text-center">

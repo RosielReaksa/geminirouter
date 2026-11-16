@@ -91,9 +91,11 @@ const PUBLIC_EXACT = new Set([
   '/api/auth/session',
   '/api/auth/logout',
   '/api/health',
+  '/api/device/pair',
+  '/oauth/callback',
 ]);
 
-const PUBLIC_PREFIXES = ['/assets/', '/v1/'];
+const PUBLIC_PREFIXES = ['/assets/', '/v1/', '/v1beta/'];
 
 /** Public marketing pages — served as the SPA shell without auth. */
 const PUBLIC_PAGE_PREFIXES = ['/pricing', '/models', '/docs', '/privacy', '/terms', '/login'];
@@ -106,7 +108,16 @@ export function isPublicRoute(url: string): boolean {
   return false;
 }
 
-export function createAuthMiddleware(adminPassword: string | undefined, sessions: SessionStore) {
+export interface DeviceVerifier {
+  verify(token: string): boolean;
+}
+
+export function createAuthMiddleware(
+  adminPassword: string | undefined,
+  sessions: SessionStore,
+  devices?: DeviceVerifier,
+  deviceRoutes: ReadonlySet<string> = new Set(),
+) {
   return async (request: FastifyRequest, reply: FastifyReply) => {
     const path = request.url.split('?')[0];
 
@@ -131,6 +142,11 @@ export function createAuthMiddleware(adminPassword: string | undefined, sessions
         error: 'Unauthorized',
         message: 'Sign in to access the dashboard.',
       });
+    }
+
+    // Paired desktop helpers get a narrow, route-scoped bearer token.
+    if (devices && deviceRoutes.has(path) && devices.verify(credential)) {
+      return;
     }
 
     if (sessions.isValid(credential)) {

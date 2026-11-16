@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Copy, Check, ArrowUpRight, Terminal } from 'lucide-react';
-import { Link } from '../../router';
+import { Link } from '../../RouterLink';
 import { Reveal } from '../marketing/Chrome';
 
 const CopyLine: React.FC<{ text: string }> = ({ text }) => {
@@ -39,6 +39,7 @@ const Code: React.FC<{ code: string; title?: string }> = ({ code, title }) => (
 const SECTIONS = [
   { id: 'quickstart', label: 'Quickstart' },
   { id: 'endpoints', label: 'Endpoints' },
+  { id: 'media', label: 'Audio & video input' },
   { id: 'openai', label: 'OpenAI SDK' },
   { id: 'anthropic', label: 'Anthropic SDK' },
   { id: 'streaming', label: 'Streaming' },
@@ -123,7 +124,7 @@ export const DocsPage: React.FC = () => {
   -H "Authorization: Bearer $GEMINIROUTER_KEY" \\
   -H "Content-Type: application/json" \\
   -d '{
-    "model": "claude-sonnet-4-6",
+    "model": "gemini-3.5-flash-lite",
     "messages": [{"role": "user", "content": "Hello"}]
   }'`}
               />
@@ -159,6 +160,8 @@ export const DocsPage: React.FC = () => {
                       ['POST', '/v1/responses', 'OpenAI'],
                       ['POST', '/v1/messages', 'Anthropic'],
                       ['POST', '/v1beta/models/:model', 'Gemini'],
+                      ['POST', '/v1/audio/transcriptions', 'Media'],
+                      ['POST', '/v1/audio/dubbing', 'Media'],
                       ['GET', '/v1/models', 'OpenAI'],
                     ].map(([m, p, proto]) => (
                       <tr key={p + m}>
@@ -169,6 +172,207 @@ export const DocsPage: React.FC = () => {
                     ))}
                   </tbody>
                 </table>
+              </div>
+            </section>
+
+            <div className="mkt-rule my-10" />
+
+            <section id="media" className="scroll-mt-24">
+              <h2 className="mkt-display text-[28px] text-[#191714] mb-3">
+                Audio &amp; video input
+              </h2>
+              <p className="text-[14px] leading-relaxed text-[#4A453E]">
+                A separate dubbing app can upload media to its own server, then send the file to{' '}
+                <code className="px-1.5 py-0.5 rounded bg-[#F0EBE3] text-[12.5px] font-mono-code text-[#A8462A]">
+                  /v1/chat/completions
+                </code>{' '}
+                as base64. Keep the gateway key on that server; browser code must never contain it.
+                Select a model from{' '}
+                <code className="px-1.5 py-0.5 rounded bg-[#F0EBE3] text-[12.5px] font-mono-code text-[#A8462A]">
+                  GET /v1/models
+                </code>{' '}
+                and verify it with the media type your app will send.
+              </p>
+              <p className="text-[14px] leading-relaxed text-[#4A453E]">
+                For 10–20 minute recordings use{' '}
+                <code className="px-1.5 py-0.5 rounded bg-[#F0EBE3] text-[12.5px] font-mono-code text-[#A8462A]">
+                  POST /v1/audio/transcriptions
+                </code>
+                . It streams the upload and returns the model's answer for the user's own
+                prompt. The website does not need to set a task or target language. Files up
+                to 1 hour are accepted; split longer files into 10–20 minute windows.
+              </p>
+              <Code
+                title="audio · server-side JavaScript"
+                code={`const audioBase64 = (await fs.readFile(audioPath)).toString("base64");
+
+const response = await fetch("${origin}/v1/chat/completions", {
+  method: "POST",
+  headers: {
+    Authorization: \`Bearer \${process.env.GEMINIROUTER_KEY}\`,
+    "Content-Type": "application/json",
+  },
+  body: JSON.stringify({
+    model: process.env.GEMINIROUTER_MODEL,
+    stream: false,
+    messages: [{ role: "user", content: [
+      { type: "text", text: "Transcribe this dialogue and translate it to Japanese. Keep speakers separate." },
+      { type: "input_audio", input_audio: { data: audioBase64, format: "wav" } },
+    ] }],
+  }),
+});
+
+const result = await response.json();
+const translatedDialogue = result.choices?.[0]?.message?.content;`}
+              />
+              <Code
+                title="audio window · 10–20 minutes"
+                code={`const form = new FormData();
+form.append("file", new Blob([await fs.readFile(audioPath)]), "episode.mp3");
+form.append("model", process.env.GEMINIROUTER_MODEL);
+// Pass the user's own prompt unchanged; no task/target_language is required.
+form.append("prompt", userPrompt);
+
+const response = await fetch("${origin}/v1/audio/transcriptions", {
+  method: "POST",
+  headers: { Authorization: \`Bearer \${process.env.GEMINIROUTER_KEY}\` },
+  body: form,
+});
+
+const result = await response.json();
+console.log(result.transcript, result.translation);`}
+              />
+              <h3 className="mkt-display text-[20px] text-[#191714] mt-8 mb-2">
+                Timed dubbing · any language
+              </h3>
+              <p className="text-[14px] leading-relaxed text-[#4A453E]">
+                <code className="px-1.5 py-0.5 rounded bg-[#F0EBE3] text-[12.5px] font-mono-code text-[#A8462A]">
+                  POST /v1/audio/dubbing
+                </code>{' '}
+                splits the recording, transcribes and translates each part, and returns dialogue
+                segments with absolute timestamps and a dubbing line for each one.{' '}
+                <code className="px-1.5 py-0.5 rounded bg-[#F0EBE3] text-[12.5px] font-mono-code text-[#A8462A]">
+                  target_language
+                </code>{' '}
+                selects the dubbing language (any ISO code or language name; default{' '}
+                <code className="px-1.5 py-0.5 rounded bg-[#F0EBE3] text-[12.5px] font-mono-code text-[#A8462A]">
+                  km
+                </code>
+                ). The line is written only in that language — source-language words are not left
+                in it. It uses the same upload path as transcriptions, so keep it on your server.
+                The alias{' '}
+                <code className="px-1.5 py-0.5 rounded bg-[#F0EBE3] text-[12.5px] font-mono-code text-[#A8462A]">
+                  /v1/media/dubbing
+                </code>{' '}
+                behaves identically.
+              </p>
+              <Code
+                title="dubbing · server-side JavaScript"
+                code={`const form = new FormData();
+form.append("file", new Blob([await fs.readFile(audioPath)]), "episode.mp3");
+form.append("source_language", "zh");
+form.append("target_language", "en"); // any ISO code; default km
+form.append("response_format", "array"); // "json" adds chunk + usage metadata
+
+const response = await fetch("${origin}/v1/audio/dubbing", {
+  method: "POST",
+  headers: { Authorization: \`Bearer \${process.env.GEMINIROUTER_KEY}\` },
+  body: form,
+});
+
+// Bare contract array: start, end, speaker_gender, vocal_timbre,
+// character_role, original_transcript, khmer_dubbing.
+const segments = await response.json();
+for (const line of segments) {
+  schedule(line.start, line.end, line.speaker_gender, line.khmer_dubbing);
+}`}
+              />
+              <Code
+                title="response · one segment"
+                code={`[
+  {
+    "start": "00:00.1",
+    "end": "00:02.1",
+    "speaker_gender": "female",
+    "vocal_timbre": "clear, friendly, welcoming voice",
+    "character_role": "narrator",
+    "original_transcript": "你好，欢迎来到 Duber。",
+    "khmer_dubbing": "Hello and welcome to Duber."
+  }
+]`}
+              />
+              <div className="rounded-xl border border-[#E4DED4] bg-[#FBF9F5] p-4 text-[12.5px] leading-relaxed text-[#7A736A] space-y-2">
+                <p>
+                  Defaults are <code>source_language=zh</code>, <code>target_language=km</code>,
+                  and a 5-minute chunk. <code>target_language</code> accepts any ISO code or
+                  language name (<code>en</code>, <code>th</code>, <code>ja</code>, <code>es</code>,{' '}
+                  <code>ar</code>, …); the dub line is written only in that language. Override the
+                  defaults with <code>chunk_seconds</code> (up to 1800) and <code>model</code>; a
+                  caller <code>prompt</code> replaces the built-in instructions, but the JSON timing
+                  contract is always appended. Output budget
+                  follows the chunk length: 2 min → 8,192 tokens, 5 min → 24,576, 10 min+ → 65,535.
+                  Reasoning models such as <code>gemini-3.8-flash-high</code> use 120-second chunks;
+                  the <code>-lite</code> models use 60-second chunks. Both get a 40,960-token floor
+                  so a thinking pass or an early stop cannot truncate the script.
+                </p>
+                <p>
+                  Timestamps are <code>MM:SS.S</code> and already shifted to the recording start,
+                  so chunk offsets can be used directly. For Khmer, politeness particles are kept
+                  per speaker: male <span className="text-[#4A453E] font-medium">បាទ</span>, female{' '}
+                  <span className="text-[#4A453E] font-medium">ចាស</span>. Each chunk&apos;s audible
+                  speech is measured; an empty or implausibly short script is retried once and then
+                  rejected with a JSON <code>partial_script</code> error instead of silently dropping
+                  dialogue. Each model id still works for normal chat: the shorter window is a
+                  dubbing rule only. Use <code>response_format=json</code> when you also need the{' '}
+                  <code>coverage</code> block, chunk boundaries, token usage, and per-chunk timings.
+                </p>
+                <p>
+                  <code>concurrency</code> defaults to one worker per chunk (max 4) for the short-window
+                  models, so a 5-minute 3.8 request runs its three 120-second chunks in parallel instead
+                  of serialising them. The JSON response echoes <code>concurrency</code> and quotes
+                  <code>timings.estimated_ms</code> — roughly 2.2× the audio duration for reasoning
+                  models, 0.3× for lite, 1× otherwise. Treat it as a planning figure for client
+                  timeouts: a 5-minute clip on <code>gemini-3.8-flash-high</code> needs about ten
+                  minutes, while <code>gemini-3.5-flash-lite</code> returns it in about a minute.
+                </p>
+              </div>
+              <Code
+                title="video · server-side JavaScript"
+                code={`const videoBase64 = (await fs.readFile(videoPath)).toString("base64");
+
+const response = await fetch("${origin}/v1/chat/completions", {
+  method: "POST",
+  headers: {
+    Authorization: \`Bearer \${process.env.GEMINIROUTER_KEY}\`,
+    "Content-Type": "application/json",
+  },
+  body: JSON.stringify({
+    model: process.env.GEMINIROUTER_MODEL,
+    stream: false,
+    messages: [{ role: "user", content: [
+      { type: "text", text: "Transcribe and translate the spoken dialogue. Keep speaker turns separate." },
+      { type: "video_url", video_url: { url: \`data:video/mp4;base64,\${videoBase64}\` } },
+    ] }],
+  }),
+});
+
+const result = await response.json();
+const translatedDialogue = result.choices?.[0]?.message?.content;`}
+              />
+              <div className="rounded-xl border border-[#E4DED4] bg-[#FBF9F5] p-4 text-[12.5px] leading-relaxed text-[#7A736A] space-y-2">
+                <p>
+                  Inline audio supports MP3, WAV, OGG, FLAC, AAC/M4A, and AIFF up to 15 MiB decoded.
+                  Use <code>/v1/audio/transcriptions</code> for 10–20 minute windows; split longer
+                  recordings before sending. Keep inline video around 20 MiB or less. The normal
+                  request limit is 64 MiB.
+                </p>
+                <p>
+                  Chat completions return text such as a transcript or translation.
+                  <code> /v1/audio/dubbing</code> returns the timed dubbing lines in the target
+                  language directly. Turning
+                  those lines into audible speech and muxing them back into the video still happens
+                  in the dubbing app.
+                </p>
               </div>
             </section>
 
@@ -186,7 +390,7 @@ client = OpenAI(
 )
 
 resp = client.chat.completions.create(
-    model="claude-sonnet-4-6",
+    model="gemini-3.5-flash-lite",
     messages=[{"role": "user", "content": "Hello"}],
 )
 print(resp.choices[0].message.content)`}
@@ -201,7 +405,7 @@ const client = new OpenAI({
 });
 
 const resp = await client.chat.completions.create({
-  model: "claude-sonnet-4-6",
+  model: "gemini-3.5-flash-lite",
   messages: [{ role: "user", content: "Hello" }],
 });`}
               />
@@ -225,7 +429,7 @@ client = anthropic.Anthropic(
 )
 
 msg = client.messages.create(
-    model="claude-sonnet-4-6",
+    model="gemini-3.5-flash-lite",
     max_tokens=256,
     messages=[{"role": "user", "content": "Hello"}],
 )`}
@@ -264,7 +468,7 @@ msg = client.messages.create(
                   ['429 from upstream', 'Request retried on the next account; Retry-After honoured.'],
                   ['403 verification', 'Account quarantined; a fresh Google link is surfaced in the dashboard.'],
                   ['All accounts busy', 'Queued briefly, then 429 with Retry-After if nothing frees up.'],
-                  ['Per-model cooldown', 'A Claude limit does not remove the account from Gemini traffic.'],
+                  ['Per-model cooldown', 'A Gemini model limit does not remove the account from other Gemini traffic.'],
                 ].map(([k, v]) => (
                   <div key={k} className="flex items-start gap-3 text-[13px]">
                     <span className="font-mono-code text-[11.5px] text-[#A8462A] shrink-0 w-[150px]">

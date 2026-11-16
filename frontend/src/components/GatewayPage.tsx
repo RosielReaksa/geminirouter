@@ -1,13 +1,17 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Check,
   Copy,
   Eye,
   EyeOff,
   Info,
+  KeyRound,
   Network,
+  Plus,
+  Trash2,
 } from 'lucide-react';
-import { GatewayConfig } from '../types';
+import { GatewayApiKey, GatewayConfig } from '../types';
+import { api } from '../services/api';
 
 interface GatewayPageProps {
   config: GatewayConfig;
@@ -21,8 +25,67 @@ export const GatewayPage: React.FC<GatewayPageProps> = ({ config }) => {
   const [showKey, setShowKey] = useState(false);
   const [copiedKey, setCopiedKey] = useState(false);
   const [copiedSnippet, setCopiedSnippet] = useState(false);
+  const [gatewayKeys, setGatewayKeys] = useState<GatewayApiKey[]>([]);
+  const [keyName, setKeyName] = useState('');
+  const [creatingKey, setCreatingKey] = useState(false);
+  const [newKey, setNewKey] = useState<string | null>(null);
+  const [newKeyCopied, setNewKeyCopied] = useState(false);
+  const [keyError, setKeyError] = useState<string | null>(null);
+  const [deletingKeyId, setDeletingKeyId] = useState<string | null>(null);
 
-  const baseUrl = `http://${config.host}:${config.port}`;
+  useEffect(() => {
+    void api
+      .getGatewayKeys()
+      .then((data) => setGatewayKeys(data.keys))
+      .catch((err: any) => setKeyError(err?.message || 'Could not load gateway keys.'));
+  }, []);
+
+  const handleCreateKey = async (event: React.FormEvent) => {
+    event.preventDefault();
+    const name = keyName.trim();
+    if (!name || creatingKey) return;
+    setCreatingKey(true);
+    setKeyError(null);
+    try {
+      const result = await api.createGatewayKey(name);
+      setGatewayKeys(result.keys);
+      setNewKey(result.key);
+      setKeyName('');
+    } catch (err: any) {
+      setKeyError(err?.message || 'Could not create the key.');
+    } finally {
+      setCreatingKey(false);
+    }
+  };
+
+  const handleDeleteKey = async (key: GatewayApiKey) => {
+    if (!window.confirm(`Delete the gateway key “${key.name}”? Clients using it will get 401.`)) {
+      return;
+    }
+    setDeletingKeyId(key.id);
+    setKeyError(null);
+    try {
+      setGatewayKeys(await api.deleteGatewayKey(key.id));
+      if (newKey) setNewKey(null);
+    } catch (err: any) {
+      setKeyError(err?.message || 'Could not delete the key.');
+    } finally {
+      setDeletingKeyId(null);
+    }
+  };
+
+  const copyNewKey = () => {
+    if (!newKey) return;
+    navigator.clipboard.writeText(newKey);
+    setNewKeyCopied(true);
+    setTimeout(() => setNewKeyCopied(false), 2000);
+  };
+
+  // The reverse proxy exposes the gateway on the same HTTPS origin as the
+  // dashboard. Keep generated client snippets valid for both local and VPS use.
+  const baseUrl = typeof window !== 'undefined'
+    ? window.location.origin
+    : `http://${config.host}:${config.port}`;
   const v1Url = `${baseUrl}/v1`;
 
   const handleCopyKey = () => {
@@ -34,7 +97,7 @@ export const GatewayPage: React.FC<GatewayPageProps> = ({ config }) => {
   const snippets: Record<SdkTab, { title: string; code: string; note: string }> = {
     claude: {
       title: 'Claude Code CLI (~/.claude/settings.json)',
-      note: 'Drop into your Claude Code config to route Sonnet / Opus calls seamlessly to Gemini Pro & Flash models with high context windows.',
+      note: 'Drop into your Claude Code config to use Gemini Pro & Flash models with high context windows.',
       code: `{
   "env": {
     "ANTHROPIC_BASE_URL": "${v1Url}",
@@ -49,11 +112,7 @@ export const GatewayPage: React.FC<GatewayPageProps> = ({ config }) => {
       note: 'Configures Codex review & exec batches through geminirouter via OpenAI-compatible endpoints.',
       code: `model = "gemini-2.5-pro"
 api_base = "${v1Url}"
-api_key = "${config.masterApiKey}"
-
-[aliases]
-"gpt-4o" = "gemini-2.5-pro"
-"deepseek-v4.1-flash" = "gemini-2.5-flash"`,
+api_key = "${config.masterApiKey}"`,
     },
     curl: {
       title: 'Standard cURL (OpenAI Compatible API)',
@@ -211,6 +270,112 @@ Custom Models to add:
         </div>
       </div>
 
+      {/* Named Gateway Keys */}
+      <div className="bg-[#FFFFFF] border border-[#EAE5DE] rounded-2xl p-6 shadow-soft space-y-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h3 className="font-serif-editorial text-xl font-bold text-[#2A2723]">
+              Gateway API Keys
+            </h3>
+            <p className="text-xs text-[#706B65] mt-1 max-w-xl">
+              Create a named key for each app or client. Calls made with it are labelled
+              with that name on the Traffic page.
+            </p>
+          </div>
+          <span className="rounded-full border border-[#EAE5DE] bg-[#FAF7F2] px-2.5 py-1 font-mono-code text-[10px] text-[#706B65]">
+            {gatewayKeys.length} named key{gatewayKeys.length === 1 ? '' : 's'}
+          </span>
+        </div>
+
+        <form onSubmit={handleCreateKey} className="flex flex-col gap-2 sm:flex-row">
+          <input
+            type="text"
+            value={keyName}
+            onChange={(event) => setKeyName(event.target.value)}
+            maxLength={60}
+            placeholder="Key name, e.g. Dubbing app or Codex CLI"
+            className="flex-1 rounded-xl border border-[#EAE5DE] bg-[#FAF7F2] px-3 py-2 text-xs text-[#2A2723] focus:border-[#C25938] focus:outline-none"
+          />
+          <button
+            type="submit"
+            disabled={creatingKey || !keyName.trim()}
+            className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-[#C25938] bg-[#C25938] px-4 py-2 text-xs font-medium text-white transition-colors hover:border-[#a5462b] hover:bg-[#a5462b] disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <Plus className="h-3.5 w-3.5" />
+            {creatingKey ? 'Creating…' : 'Create key'}
+          </button>
+        </form>
+
+        {keyError && (
+          <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+            {keyError}
+          </div>
+        )}
+
+        {newKey && (
+          <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3">
+            <div className="text-[10px] font-semibold uppercase tracking-wider text-emerald-700">
+              New key — copy it now, it is shown once
+            </div>
+            <div className="mt-1.5 flex items-center gap-2">
+              <code className="min-w-0 flex-1 truncate rounded-lg bg-white/70 px-2 py-1.5 font-mono-code text-[11px] text-[#2A2723]">
+                {newKey}
+              </code>
+              <button
+                type="button"
+                onClick={copyNewKey}
+                className="inline-flex shrink-0 items-center gap-1 rounded-lg border border-emerald-200 bg-white px-2 py-1.5 text-[10px] font-medium text-emerald-700 hover:bg-emerald-100"
+              >
+                {newKeyCopied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+                {newKeyCopied ? 'Copied' : 'Copy'}
+              </button>
+            </div>
+          </div>
+        )}
+
+        <div className="divide-y divide-[#EAE5DE] overflow-hidden rounded-xl border border-[#EAE5DE]">
+          <div className="flex items-center justify-between bg-[#FAF7F2] px-4 py-2">
+            <div className="text-xs font-semibold text-[#2A2723]">Master key</div>
+            <div className="font-mono-code text-[11px] text-[#706B65]">
+              {config.masterApiKey.slice(0, 7)}…{config.masterApiKey.slice(-4)}
+            </div>
+          </div>
+          {gatewayKeys.length === 0 ? (
+            <div className="px-4 py-5 text-center text-xs text-[#9E988F]">
+              No named keys yet. The master key above still works.
+            </div>
+          ) : (
+            gatewayKeys.map((key) => (
+              <div key={key.id} className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <KeyRound className="h-3.5 w-3.5 shrink-0 text-[#C25938]" />
+                    <span className="truncate text-sm font-medium text-[#2A2723]">{key.name}</span>
+                  </div>
+                  <div className="mt-0.5 font-mono-code text-[10px] text-[#9E988F]">
+                    {key.maskedKey}
+                    <span className="ml-2">created {new Date(key.createdAt).toLocaleDateString()}</span>
+                    {key.lastUsedAt && (
+                      <span className="ml-2">last used {new Date(key.lastUsedAt).toLocaleString()}</span>
+                    )}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void handleDeleteKey(key)}
+                  disabled={deletingKeyId === key.id}
+                  title="Delete key"
+                  className="inline-flex items-center gap-1 rounded-lg border border-red-200 bg-red-50 px-2.5 py-1.5 text-[10px] font-medium text-red-600 hover:bg-red-100 disabled:opacity-50"
+                >
+                  <Trash2 className="h-3 w-3" />
+                  {deletingKeyId === key.id ? 'Deleting…' : 'Delete'}
+                </button>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+
       {/* Model Compatibility & Routing Mapping Matrix */}
       <div className="bg-[#FFFFFF] border border-[#EAE5DE] rounded-2xl p-6 shadow-soft space-y-4">
         <div className="flex items-center justify-between">
@@ -219,7 +384,7 @@ Custom Models to add:
               Model Aliasing & Routing
             </h3>
             <p className="text-xs text-[#706B65] mt-0.5">
-              geminirouter automatically translates requested OpenAI or Anthropic model strings to their Google Gemini counterparts.
+              gemini models route directly; legacy Claude and GPT aliases are no longer exposed.
             </p>
           </div>
           <span className="text-xs bg-[#FAF2EF] text-[#C25938] px-2.5 py-1 rounded-full font-medium border border-[#EAE5DE]">
@@ -240,7 +405,7 @@ Custom Models to add:
             <tbody className="divide-y divide-[#EAE5DE] text-[#2A2723]">
               <tr className="hover:bg-[#FAF9F5]/70 transition-colors">
                 <td className="py-3 px-4 font-mono-code font-semibold text-[#C25938]">
-                  claude-3-5-sonnet-20241022, gpt-4o
+                  gemini-3.5-flash-lite
                 </td>
                 <td className="py-3 px-4 font-mono-code font-semibold">
                   gemini-2.5-pro
@@ -254,7 +419,7 @@ Custom Models to add:
               </tr>
               <tr className="hover:bg-[#FAF9F5]/70 transition-colors">
                 <td className="py-3 px-4 font-mono-code font-semibold text-[#C25938]">
-                  claude-3-5-haiku-20241022, gpt-4o-mini
+                  gemini-3.1-flash-lite
                 </td>
                 <td className="py-3 px-4 font-mono-code font-semibold">
                   gemini-2.5-flash

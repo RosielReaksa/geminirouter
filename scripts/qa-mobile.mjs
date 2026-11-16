@@ -1,4 +1,4 @@
-import { chromium } from 'file:///D:/projectradom/AntigravityManager/node_modules/playwright/index.mjs';
+import { chromium } from './lib/playwright.mjs';
 
 const browser = await chromium.launch({ channel: 'msedge', headless: true });
 const page = await browser.newPage({

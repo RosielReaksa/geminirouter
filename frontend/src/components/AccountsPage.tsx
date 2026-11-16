@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Users,
   Plus,
@@ -6,16 +6,23 @@ import {
   Power,
   MoreVertical,
   ChevronDown,
-  Terminal,
   Laptop,
   Trash2,
   LayoutList,
   AlertTriangle,
   ExternalLink,
   Zap,
+  Upload,
 } from 'lucide-react';
 import { GoogleAccount } from '../types';
 import { api } from '../services/api';
+import { authApi } from '../services/authApi';
+
+function formatUsageNumber(value: number): string {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}k`;
+  return String(value);
+}
 
 interface AccountsPageProps {
   accounts: GoogleAccount[];
@@ -28,6 +35,8 @@ interface AccountsPageProps {
   onUpdateAccounts?: (accounts: GoogleAccount[]) => void;
   onShowNotification?: (msg: string) => void;
   isRefreshing: boolean;
+  /** True when Google refuses the Antigravity OAuth client (invalid_client). */
+  oauthBlocked?: boolean;
 }
 
 export const AccountsPage: React.FC<AccountsPageProps> = ({
@@ -41,29 +50,126 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
   onUpdateAccounts,
   onShowNotification,
   isRefreshing,
+  oauthBlocked = false,
 }) => {
   const [openDropdownId, setOpenDropdownId] = useState<string | null>(null);
   const [validatingAccountId, setValidatingAccountId] = useState<string | null>(null);
   const [testingAccountId, setTestingAccountId] = useState<string | null>(null);
+  const [isImporting, setIsImporting] = useState(false);
+  const [isPairing, setIsPairing] = useState(false);
+  const [pairCode, setPairCode] = useState<{ code: string; expiresAt: number } | null>(null);
+  const [isDownloadingHelper, setIsDownloadingHelper] = useState(false);
+  const importInputRef = useRef<HTMLInputElement | null>(null);
+
+  // One clock tick for "reset in …" labels and the quota-held check. Reading
+  // Date.now() during render is impure; a state value keeps renders repeatable.
+  const [clockNow, setClockNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setClockNow(Date.now()), 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const handleDownloadHelper = async () => {
+    setIsDownloadingHelper(true);
+    try {
+      const res = await fetch('/api/helper/download', { headers: authApi.headers() });
+      if (res.status === 401) {
+        window.dispatchEvent(new CustomEvent('geminirouter:unauthorized'));
+        return;
+      }
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({} as { message?: string; error?: string }));
+        onShowNotification?.(body.message || body.error || `Helper download failed (HTTP ${res.status})`);
+        return;
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = 'FramecallHelper.exe';
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 30_000);
+    } catch (error: any) {
+      onShowNotification?.(`Helper download failed: ${error?.message || String(error)}`);
+    } finally {
+      setIsDownloadingHelper(false);
+    }
+  };
+
+  const handlePairHelper = async () => {
+    setIsPairing(true);
+    try {
+      const data = await api.createPairCode();
+      if (!data.code) {
+        onShowNotification?.(`Could not create a pairing code: ${data.error || 'unknown error'}`);
+        return;
+      }
+      setPairCode({ code: data.code, expiresAt: data.expiresAt });
+      navigator.clipboard?.writeText(data.code).catch(() => undefined);
+    } catch (error: any) {
+      onShowNotification?.(`Could not create a pairing code: ${error?.message || String(error)}`);
+    } finally {
+      setIsPairing(false);
+    }
+  };
+
+  const handleImportFile = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    if (file.size > 5 * 1024 * 1024) {
+      onShowNotification?.('Import file is larger than 5 MB.');
+      return;
+    }
+    setIsImporting(true);
+    try {
+      const content = await file.text();
+      const res = await api.importAccounts(content, 'merge');
+      if (!res.success) {
+        onShowNotification?.(`Import failed: ${res.message || res.error || 'unknown error'}`);
+        return;
+      }
+      const result = res.result as
+        | { imported?: number; updated?: number; skipped?: number; failed?: number }
+        | undefined;
+      onShowNotification?.(
+        `Import complete: ${result?.imported ?? 0} added, ${result?.updated ?? 0} updated, ${result?.skipped ?? 0} skipped, ${result?.failed ?? 0} failed.`,
+      );
+      const { data } = await api.getAccounts();
+      onUpdateAccounts?.(data);
+    } catch (error: any) {
+      onShowNotification?.(`Import failed: ${error?.message || String(error)}`);
+    } finally {
+      setIsImporting(false);
+    }
+  };
 
   const handleTestAccount = async (accountId: string) => {
     setTestingAccountId(accountId);
     try {
       const res = await fetch(`/api/accounts/${encodeURIComponent(accountId)}/test`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: 'gemini-3.8-flash-low' }),
+        headers: {
+          'Content-Type': 'application/json',
+          ...authApi.headers(),
+        },
+        body: JSON.stringify({ model: 'gemini-3.1-flash-lite' }),
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
+      if (res.status === 401) {
+        window.dispatchEvent(new CustomEvent('geminirouter:unauthorized'));
+      }
       if (data.ok) {
         if (onShowNotification) {
           onShowNotification(`✓ Test passed: Google AI Studio responded in ${data.latencyMs}ms with "${data.sample}". Quotas refreshed.`);
         }
       } else {
         if (onShowNotification) {
-          onShowNotification(`⚠ Test failed: ${data.error || 'Unknown error'}`);
+          onShowNotification(`⚠ Test failed: ${data.message || data.error || 'Unknown error'}`);
         } else {
-          alert(`Test call failed: ${data.error || 'Unknown error'}`);
+          alert(`Test call failed: ${data.message || data.error || 'Unknown error'}`);
         }
       }
 
@@ -97,8 +203,13 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
       if (onShowNotification) {
         onShowNotification('Requesting fresh verification link from Google...');
       }
-      const res = await fetch(`/api/accounts/${encodeURIComponent(accountId)}/validation-url`);
+      const res = await fetch(`/api/accounts/${encodeURIComponent(accountId)}/validation-url`, {
+        headers: authApi.headers(),
+      });
       const data = await res.json();
+      if (res.status === 401) {
+        window.dispatchEvent(new CustomEvent('geminirouter:unauthorized'));
+      }
       if (data.ok && data.url) {
         if (newTab) {
           newTab.location.href = data.url;
@@ -125,28 +236,10 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
     }
   };
 
-  const handleSwitchClient = async (accountId: string, appTarget: 'ide' | 'agy' | 'classic') => {
-    try {
-      const res = await fetch(`/api/accounts/${encodeURIComponent(accountId)}/switch`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ appTarget }),
-      });
-      const data = await res.json();
-      if (data.success) {
-        onRefreshQuotas();
-      } else {
-        alert(data.error || 'Failed to switch client target');
-      }
-    } catch (err: any) {
-      alert('Error switching client: ' + err.message);
-    }
-  };
-
   const formatResetTime = (dateStr?: string) => {
     if (!dateStr) return '';
     try {
-      const diffMs = new Date(dateStr).getTime() - Date.now();
+      const diffMs = new Date(dateStr).getTime() - clockNow;
       if (diffMs <= 0) return 'reset soon';
       const hours = Math.floor(diffMs / (1000 * 60 * 60));
       const mins = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
@@ -164,6 +257,17 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
     return 'text-red-600';
   };
 
+  /**
+   * A window at 0% is held out of rotation until its reset time. Once the
+   * reset passes, the next quota refresh makes the account eligible again.
+   */
+  const isQuotaHeld = (pct: number, resetTime?: string) => {
+    if (pct > 0) return false;
+    if (!resetTime) return true;
+    const resetMs = Date.parse(resetTime);
+    return !Number.isFinite(resetMs) || resetMs > clockNow;
+  };
+
   const getQuotaBarBg = (pct: number) => {
     if (pct >= 75) return 'bg-emerald-500';
     if (pct >= 40) return 'bg-amber-500';
@@ -172,6 +276,29 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
 
   return (
     <div className="space-y-8 animate-in fade-in duration-200">
+      {oauthBlocked && (
+        <div className="bg-rose-50/90 border border-rose-300 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-sm text-rose-900 shadow-sm">
+          <div className="flex items-start gap-3">
+            <AlertTriangle className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
+            <div>
+              <div className="font-semibold">Google is blocking Antigravity sign-in</div>
+              <p className="text-xs leading-relaxed mt-1 text-rose-800">
+                The Antigravity OAuth client was rejected (<span className="font-mono-code">invalid_client</span>),
+                so new accounts cannot be added until this is resolved upstream. Existing accounts keep working.
+                In the meantime, import an export from a machine where Antigravity is still signed in.
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={() => importInputRef.current?.click()}
+            disabled={isImporting}
+            className="shrink-0 px-3.5 py-2 rounded-xl bg-white hover:bg-rose-100 border border-rose-300 font-semibold text-rose-800 text-xs transition-colors disabled:opacity-50"
+          >
+            {isImporting ? 'Importing...' : 'Import accounts file'}
+          </button>
+        </div>
+      )}
+
       {/* Title & Actions Bar */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
@@ -184,11 +311,12 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
           </h2>
           <p className="text-sm text-[#706B65] mt-1 max-w-xl">
             Manage your connected Google accounts and inspect their respective 5-hour and 7-day rate limits.
+            The 24h request/token counts update every 15 seconds; quota snapshots refresh from the core every 5 minutes.
             Requests automatically failover when an account's quota gets exhausted.
           </p>
         </div>
 
-        <div className="flex items-center gap-2.5">
+        <div className="flex items-center gap-2.5 flex-wrap">
           <button
             onClick={onRefreshQuotas}
             disabled={isRefreshing}
@@ -199,14 +327,85 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
           </button>
 
           <button
+            onClick={() => importInputRef.current?.click()}
+            disabled={isImporting}
+            title="Import an account export file from the Antigravity desktop app"
+            className="flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl border border-[#EAE5DE] bg-white hover:bg-[#FAF7F2] text-xs font-medium text-[#504C46] transition-colors shadow-soft disabled:opacity-50"
+          >
+            <Upload className="w-3.5 h-3.5" />
+            <span>{isImporting ? 'Importing...' : 'Import accounts file'}</span>
+          </button>
+
+          <button
+            onClick={handlePairHelper}
+            disabled={isPairing}
+            title="Pair the desktop helper so it can relay sign-ins and import accounts"
+            className="flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl border border-[#EAE5DE] bg-white hover:bg-[#FAF7F2] text-xs font-medium text-[#504C46] transition-colors shadow-soft disabled:opacity-50"
+          >
+            <Laptop className="w-3.5 h-3.5" />
+            <span>{isPairing ? 'Creating code...' : 'Pair desktop helper'}</span>
+          </button>
+          <input
+            ref={importInputRef}
+            type="file"
+            accept="application/json,.json"
+            onChange={handleImportFile}
+            className="hidden"
+          />
+
+          <button
             onClick={onOpenOAuthModal}
-            className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-[#C25938] hover:bg-[#B24E2E] text-white text-xs font-medium transition-all shadow-soft"
+            disabled={oauthBlocked}
+            title={
+              oauthBlocked
+                ? 'Google is rejecting the Antigravity OAuth client. Use "Import accounts file" instead.'
+                : 'Sign in with a Google account that has Antigravity access'
+            }
+            className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-[#C25938] hover:bg-[#B24E2E] text-white text-xs font-medium transition-all shadow-soft disabled:opacity-40 disabled:cursor-not-allowed"
           >
             <Plus className="w-4 h-4" />
-            <span>Add Google Account</span>
+            <span>{oauthBlocked ? 'Sign-in blocked' : 'Add Google Account'}</span>
           </button>
         </div>
       </div>
+
+      {pairCode && (
+        <div className="bg-white rounded-2xl border border-[#EAE5DE] p-5 shadow-soft flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div>
+            <div className="text-[11px] uppercase tracking-wider text-[#C25938] font-semibold">
+              Desktop helper pairing
+            </div>
+            <div className="flex items-center gap-3 mt-2">
+              <span className="font-mono text-3xl tracking-[0.35em] text-[#2A2723]">{pairCode.code}</span>
+              <button
+                onClick={() => navigator.clipboard?.writeText(pairCode.code).catch(() => undefined)}
+                className="px-2.5 py-1.5 rounded-lg border border-[#EAE5DE] bg-white hover:bg-[#F2ECE4] text-[11px] font-medium text-[#504C46]"
+              >
+                Copy
+              </button>
+            </div>
+            <p className="text-xs text-[#706B65] mt-2 max-w-xl">
+              Open the helper, enter this code, and it can relay Google sign-ins and import accounts from
+              this computer. The code is single-use and expires in 5 minutes.
+            </p>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              onClick={handleDownloadHelper}
+              disabled={isDownloadingHelper}
+              className="px-3.5 py-2 rounded-xl border border-[#DDD7CE] bg-white hover:bg-[#F2ECE4] text-xs font-semibold text-[#504C46] transition-colors disabled:opacity-50"
+            >
+              {isDownloadingHelper ? 'Downloading...' : 'Download helper (Windows)'}
+            </button>
+            <button
+              onClick={() => setPairCode(null)}
+              className="px-3.5 py-2 rounded-xl bg-[#F2ECE4] hover:bg-[#EAE1D5] border border-[#DDD7CE] text-xs font-semibold text-[#2A2723] transition-colors"
+            >
+              Done
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Account Cards or Clean Empty State */}
       {accounts.length === 0 ? (
@@ -218,14 +417,25 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
             No Google Accounts Connected
           </h3>
           <p className="text-sm text-[#706B65] mt-1.5 max-w-md mx-auto leading-relaxed">
-            Your pool is clean and empty. Click <strong>Add Google Account</strong> to sign in and begin pooling quotas.
+            {oauthBlocked ? (
+              <>
+                Sign-in is currently blocked upstream. Import an account export from a machine where
+                Antigravity is still signed in.
+              </>
+            ) : (
+              <>
+                Your pool is clean and empty. Click <strong>Add Google Account</strong> to sign in and begin
+                pooling quotas.
+              </>
+            )}
           </p>
           <button
-            onClick={onOpenOAuthModal}
-            className="mt-5 inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-[#C25938] hover:bg-[#B24E2E] text-white text-xs font-semibold transition-all shadow-soft"
+            onClick={oauthBlocked ? () => importInputRef.current?.click() : onOpenOAuthModal}
+            disabled={isImporting}
+            className="mt-5 inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-[#C25938] hover:bg-[#B24E2E] text-white text-xs font-semibold transition-all shadow-soft disabled:opacity-50"
           >
-            <Plus className="w-4 h-4" />
-            <span>Add Google Account</span>
+            {oauthBlocked ? <Upload className="w-4 h-4" /> : <Plus className="w-4 h-4" />}
+            <span>{oauthBlocked ? (isImporting ? 'Importing...' : 'Import accounts file') : 'Add Google Account'}</span>
           </button>
         </div>
       ) : (
@@ -242,7 +452,7 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
               return a.email.localeCompare(b.email);
             });
 
-            return stableList.map((acc, accIndex) => {
+            return stableList.map((acc) => {
               const isDropdownOpen = openDropdownId === acc.id;
 
             const models5h =
@@ -310,6 +520,12 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
                           <span>Verification Required</span>
                         </span>
                       )}
+                      {acc.refreshBlocked && (
+                        <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-rose-50 text-rose-700 border border-rose-300 flex items-center gap-1">
+                          <AlertTriangle className="w-3 h-3 text-rose-600" />
+                          <span>Reauth Required</span>
+                        </span>
+                      )}
                     </div>
 
                     <div className="flex items-center gap-2 text-xs text-[#706B65] mt-1.5 flex-wrap">
@@ -346,6 +562,21 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
                           </span>
                         );
                       })()}
+
+                      {acc.usage24h && (
+                        <>
+                          <span className="text-[#DDD7CE]">·</span>
+                          <span
+                            className="inline-flex items-center gap-1 text-[11px] font-mono-code px-2 py-0.5 rounded bg-[#FAF7F2] border border-[#EAE5DE] text-[#706B65]"
+                            title="Requests and tokens attributed to this account in the last 24 hours"
+                          >
+                            <span>24h:</span>
+                            <span className="font-semibold text-[#4A453E]">{formatUsageNumber(acc.usage24h.requests)} req</span>
+                            <span>·</span>
+                            <span className="font-semibold text-[#4A453E]">{formatUsageNumber(acc.usage24h.tokens)} tokens</span>
+                          </span>
+                        </>
+                      )}
 
                       {acc.lastTestResult && (
                         <>
@@ -442,6 +673,28 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
                 </div>
               </div>
 
+              {/* OAuth refresh blocked: the stored token can no longer be renewed */}
+              {acc.refreshBlocked && (
+                <div className="bg-rose-50/90 border border-rose-300 rounded-xl p-3 mb-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-rose-900 shadow-sm animate-in fade-in">
+                  <div className="flex items-center gap-2.5">
+                    <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+                    <span className="font-medium">
+                      Google rejected this account's token refresh, so it cannot serve traffic. Reconnect it to issue
+                      new credentials — existing data is kept and nothing is deleted.
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      onClick={onOpenOAuthModal}
+                      className="px-3.5 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-semibold transition-colors flex items-center gap-1.5 shadow-sm"
+                    >
+                      <Zap className="w-3.5 h-3.5" />
+                      <span>Reconnect account</span>
+                    </button>
+                  </div>
+                </div>
+              )}
+
               {/* Google Security Checkpoint Alert Bar */}
               {(acc.hasValidationLink || acc.lastTestResult?.requiresValidation) && !acc.lastTestResult?.ok && (
                 <div className="bg-amber-50/90 border border-amber-300 rounded-xl p-3 mb-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-amber-900 shadow-sm animate-in fade-in">
@@ -489,6 +742,14 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({
                               <div className="flex items-center justify-between text-[10px]">
                                 <span className="text-[#706B65] font-medium">{b.displayName}</span>
                                 <div className="flex items-center gap-2">
+                                  {isQuotaHeld(pct, b.resetTime) && (
+                                    <span
+                                      title="Held out of rotation for this quota until it resets"
+                                      className="rounded-full border border-[#EAD9B8] bg-[#FDF6EC] px-1.5 py-[1px] font-mono-code text-[8px] font-semibold uppercase tracking-wider text-[#A9761F]"
+                                    >
+                                      held
+                                    </span>
+                                  )}
                                   {resetStr && <span className="font-mono-code text-[9px] text-[#9E988F]">{resetStr}</span>}
                                   <span className={`font-mono-code font-bold ${getQuotaTextColor(pct)}`}>{pct}%</span>
                                 </div>

@@ -10,7 +10,27 @@ import {
   AlertCircle,
 } from 'lucide-react';
 import { api } from '../services/api';
+import { authApi } from '../services/authApi';
 import { GoogleAccount, OAuthStartResponse } from '../types';
+
+function extractAuthorizationCode(value: string): string {
+  const input = value.trim();
+  if (!input) return '';
+
+  // Hosted OAuth may redirect to the gateway's loopback callback. The user's
+  // browser cannot reach the VPS at 127.0.0.1, but the callback URL still has
+  // the short-lived Google code that can be completed through the dashboard.
+  if (/^(https?:\/\/|127\.0\.0\.1(?::\d+)?\/|localhost(?::\d+)?\/)/i.test(input)) {
+    try {
+      const url = new URL(input.startsWith('http') ? input : `http://${input}`);
+      return url.searchParams.get('code') || '';
+    } catch {
+      return '';
+    }
+  }
+
+  return input;
+}
 
 interface OAuthModalProps {
   isOpen: boolean;
@@ -23,38 +43,54 @@ export const OAuthModal: React.FC<OAuthModalProps> = ({
   onClose,
   onAccountAdded,
 }) => {
+  const isHostedWebsite =
+    typeof window !== 'undefined' && !['localhost', '127.0.0.1'].includes(window.location.hostname);
+  const isMobileDevice =
+    typeof navigator !== 'undefined' && /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
   const [selectedMethod, setSelectedMethod] = useState('antigravity_enterprise');
   const [isStarting, setIsStarting] = useState(false);
   const [isSubmittingCode, setIsSubmittingCode] = useState(false);
   const [authCode, setAuthCode] = useState('');
-  const [showManualCode, setShowManualCode] = useState(false);
+  const [showManualCode, setShowManualCode] = useState(isHostedWebsite);
   const [currentSession, setCurrentSession] = useState<OAuthStartResponse | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
+  const [noticeMsg, setNoticeMsg] = useState<{ tone: 'success' | 'warning'; text: string } | null>(null);
+  const [baselineAccountIds, setBaselineAccountIds] = useState<string[] | null>(null);
+  // Session id of the open modal whose state has been reset. The reset runs
+  // during render when the modal opens, which avoids a setState effect.
+  const [resetForOpen, setResetForOpen] = useState(false);
 
-  // Reset state when modal opens
+  // Reset state when modal opens. Only reset on the closed -> open transition;
+  // while it stays open the caller's input must survive re-renders.
+  if (isOpen && !resetForOpen) {
+    setResetForOpen(true);
+    setAuthCode('');
+    setErrorMsg(null);
+    setSuccessMsg(null);
+    setNoticeMsg(null);
+    setCurrentSession(null);
+    setBaselineAccountIds(null);
+  } else if (!isOpen && resetForOpen) {
+    setResetForOpen(false);
+  }
+
+  // Polling to detect when Google sign-in completes automatically in browser.
+  // Only a genuinely NEW account counts as success: pre-existing accounts must
+  // not make the modal claim the sign-in worked.
   useEffect(() => {
-    if (isOpen) {
-      setAuthCode('');
-      setErrorMsg(null);
-      setSuccessMsg(null);
-      setCurrentSession(null);
-    }
-  }, [isOpen]);
+    if (!isOpen || !currentSession || !baselineAccountIds) return;
 
-  // Polling to detect when Google sign-in completes automatically in browser
-  useEffect(() => {
-    if (!isOpen || !currentSession) return;
-
+    const baseline = new Set(baselineAccountIds);
     const interval = setInterval(async () => {
       try {
         const { data: accounts } = await api.getAccounts();
-        if (Array.isArray(accounts) && accounts.length > 0) {
-          // Check if an account was recently added
-          const newest = accounts[0];
-          setSuccessMsg(`Account ${newest.email} successfully added!`);
+        if (!Array.isArray(accounts)) return;
+        const added = accounts.find((account) => !baseline.has(account.id));
+        if (added) {
+          setSuccessMsg(`Account ${added.email} successfully added!`);
           setTimeout(() => {
-            onAccountAdded(newest);
+            onAccountAdded(added);
             onClose();
           }, 1500);
         }
@@ -64,7 +100,7 @@ export const OAuthModal: React.FC<OAuthModalProps> = ({
     }, 2500);
 
     return () => clearInterval(interval);
-  }, [isOpen, currentSession, onAccountAdded, onClose]);
+  }, [isOpen, currentSession, baselineAccountIds, onAccountAdded, onClose]);
 
   if (!isOpen) return null;
 
@@ -72,12 +108,30 @@ export const OAuthModal: React.FC<OAuthModalProps> = ({
     setIsStarting(true);
     setErrorMsg(null);
     setSuccessMsg(null);
+    setNoticeMsg(null);
 
     try {
+      // Snapshot existing accounts so completion is only reported for a new one.
+      const baselineIds = await api
+        .getAccounts()
+        .then(({ data }) => (Array.isArray(data) ? data.map((account) => account.id) : []))
+        .catch(() => [] as string[]);
+
+      // Antigravity requires its own OAuth client and the private `aicode`
+      // scope, so a plain Google web client is rejected by Google. On a hosted
+      // site the only redirect that client accepts is the loopback relay.
+      const useLocalRelay = isHostedWebsite;
+
       const res = await fetch('/api/oauth/start', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ oauthClientKey: selectedMethod }),
+        headers: {
+          'Content-Type': 'application/json',
+          ...authApi.headers(),
+        },
+        body: JSON.stringify({
+          oauthClientKey: selectedMethod,
+          ...(useLocalRelay ? { callbackMode: 'local-relay' } : {}),
+        }),
       });
 
       const data = await res.json();
@@ -86,6 +140,7 @@ export const OAuthModal: React.FC<OAuthModalProps> = ({
         return;
       }
 
+      setBaselineAccountIds(baselineIds);
       setCurrentSession(data);
 
       // Open Google login page directly in a new window/tab
@@ -97,35 +152,77 @@ export const OAuthModal: React.FC<OAuthModalProps> = ({
     }
   };
 
+  const handlePasteFromClipboard = async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (!text.trim()) {
+        setErrorMsg('Your clipboard is empty. Copy the full address-bar URL first.');
+        return;
+      }
+      setAuthCode(text.trim());
+      setErrorMsg(null);
+    } catch {
+      setErrorMsg('Clipboard access was blocked — paste into the field manually.');
+    }
+  };
+
   const handleManualCodeSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const code = authCode.trim();
+    const code = extractAuthorizationCode(authCode);
     if (!code) {
-      setErrorMsg('Please paste the code from your browser.');
+      setErrorMsg('Paste the Google authorization code or the full callback URL from your browser address bar.');
       return;
     }
 
     setIsSubmittingCode(true);
     setErrorMsg(null);
+    setNoticeMsg(null);
 
     try {
       const sessionId = currentSession?.sessionId || 'current';
       const res = await fetch('/api/oauth/complete', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...authApi.headers(),
+        },
         body: JSON.stringify({ sessionId, code }),
       });
 
       const data = await res.json();
       if (!res.ok || data.success === false) {
+        if (data.alreadyConnected) {
+          setNoticeMsg({
+            tone: 'success',
+            text:
+              data.message ||
+              `This Google account${data.email ? ` (${data.email})` : ''} is already connected. No new account was added.`,
+          });
+          return;
+        }
+        if (data.code === 'account_not_added') {
+          setNoticeMsg({
+            tone: 'warning',
+            text:
+              data.message ||
+              'No new account was added. If this account is already in the Accounts list, it is already connected. Otherwise, start the sign-in again with a fresh callback URL.',
+          });
+          return;
+        }
         setErrorMsg(data.message || data.error || 'Failed to verify authorization code.');
         return;
       }
 
-      setSuccessMsg('Account successfully verified and added!');
-      // Fetch fresh accounts to update parent
+      setNoticeMsg(null);
+      setSuccessMsg(data.email ? `Account ${data.email} connected!` : 'Account successfully verified and added!');
+      // Fetch fresh accounts and prefer the one the server confirmed.
       const { data: accounts } = await api.getAccounts();
-      if (accounts.length > 0) {
+      const confirmed = data.email
+        ? accounts.find((account) => account.email.toLowerCase() === String(data.email).toLowerCase())
+        : undefined;
+      if (confirmed) {
+        onAccountAdded(confirmed);
+      } else if (accounts.length > 0) {
         onAccountAdded(accounts[0]);
       }
       setTimeout(() => {
@@ -139,16 +236,27 @@ export const OAuthModal: React.FC<OAuthModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-in fade-in duration-150">
-      <div className="w-full max-w-[500px] bg-white rounded-2xl border border-[#EAE5DE] shadow-modal overflow-hidden text-[#2A2723]">
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto p-4 bg-black/60 backdrop-blur-xs animate-in fade-in duration-150"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Add Google Account"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <div className="w-full max-w-[500px] max-h-[calc(100dvh-2rem)] bg-white rounded-2xl border border-[#EAE5DE] shadow-modal overflow-hidden text-[#2A2723] flex flex-col">
         {/* Header */}
-        <div className="flex items-start justify-between p-6 pb-4 border-b border-[#EAE5DE]">
+        <div className="flex shrink-0 items-start justify-between p-6 pb-4 border-b border-[#EAE5DE]">
           <div>
             <h3 className="font-serif-editorial text-2xl font-bold text-[#2A2723]">
               Add Google Account
             </h3>
             <p className="text-xs text-[#706B65] mt-1">
-              Choose a sign-in method, then sign in to Google in your browser. Your account will be added automatically.
+              Sign in with the Google account you use for Antigravity. This adds that account’s Antigravity authorization to the gateway.
+            </p>
+            <p className="text-[11px] text-[#9E988F] mt-1">
+              Already connected? Use <strong className="text-[#706B65]">Reconnect</strong> on the account card instead of adding it again.
             </p>
           </div>
           <button
@@ -160,7 +268,7 @@ export const OAuthModal: React.FC<OAuthModalProps> = ({
         </div>
 
         {/* Content Body */}
-        <div className="p-6 space-y-5">
+        <div className="p-6 space-y-5 overflow-y-auto overscroll-contain min-h-0 flex-1">
           {/* Sign-in Method Dropdown */}
           <div className="space-y-1.5">
             <label className="text-xs font-semibold text-[#504C46]">
@@ -172,11 +280,27 @@ export const OAuthModal: React.FC<OAuthModalProps> = ({
                 onChange={(e) => setSelectedMethod(e.target.value)}
                 className="w-full appearance-none px-3.5 py-2.5 rounded-xl border border-[#EAE5DE] bg-white text-xs text-[#2A2723] focus:outline-none focus:border-[#C25938] transition-colors pr-8 font-medium cursor-pointer"
               >
-                <option value="antigravity_enterprise">Antigravity Enterprise</option>
+                <option value="antigravity_enterprise">
+                  {isHostedWebsite
+                    ? 'Antigravity account (Google sign-in)'
+                    : 'Antigravity account (Google sign-in)'}
+                </option>
               </select>
               <ChevronDown className="w-4 h-4 text-[#706B65] absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
             </div>
           </div>
+
+          {isHostedWebsite && (
+            <div className="rounded-xl border border-[#EAE5DE] bg-[#FAF7F2] p-3.5">
+              <p className="text-[11px] leading-relaxed text-[#706B65]">
+                <strong className="text-[#504C46]">No download needed.</strong> Google sends you to
+                <span className="font-mono-code"> 127.0.0.1:41209 </span>, which only exists on this device — so the page
+                will say “can't be reached”. That is expected. Leave it open and copy the
+                <em> entire address-bar URL </em>(it contains <span className="font-mono-code">code=…</span>) into the box
+                below.
+              </p>
+            </div>
+          )}
 
           {/* Error Message banner */}
           {errorMsg && (
@@ -191,6 +315,23 @@ export const OAuthModal: React.FC<OAuthModalProps> = ({
             <div className="p-3 rounded-xl bg-[#EEF5F1] border border-[#D3E4DB] text-xs text-[#4E7B62] flex items-center gap-2 font-medium">
               <CheckCircle2 className="w-4 h-4 shrink-0" />
               <span>{successMsg}</span>
+            </div>
+          )}
+
+          {noticeMsg && (
+            <div
+              className={`p-3 rounded-xl border text-xs flex items-start gap-2 ${
+                noticeMsg.tone === 'success'
+                  ? 'bg-[#EEF5F1] border-[#D3E4DB] text-[#4E7B62]'
+                  : 'bg-[#FFF8E7] border-[#F0E0B8] text-[#8A621F]'
+              }`}
+            >
+              {noticeMsg.tone === 'success' ? (
+                <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
+              ) : (
+                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+              )}
+              <div className="leading-relaxed">{noticeMsg.text}</div>
             </div>
           )}
 
@@ -210,11 +351,15 @@ export const OAuthModal: React.FC<OAuthModalProps> = ({
               <ExternalLink className="w-3.5 h-3.5 text-[#9E988F]" />
             </button>
             <p className="text-[11px] text-[#9E988F] text-center mt-2 leading-relaxed">
-              Complete sign-in in your browser. This window will update when it finishes.
+              {!isHostedWebsite
+                ? 'Complete sign-in in your browser. This window will update when it finishes.'
+                : isMobileDevice
+                  ? 'After signing in, copy the full URL from the failed page and paste it below.'
+                  : 'After signing in, if the page fails to load, copy its URL and paste it below. The helper is optional.'}
             </p>
           </div>
 
-          {/* Collapsible: Enter a code manually */}
+          {/* Finish sign-in: paste the callback URL. No helper required. */}
           <div className="pt-2 border-t border-[#EAE5DE]">
             <button
               type="button"
@@ -226,24 +371,41 @@ export const OAuthModal: React.FC<OAuthModalProps> = ({
               ) : (
                 <ChevronRight className="w-3.5 h-3.5" />
               )}
-              <span>Enter a code manually</span>
+              <span>{isHostedWebsite ? 'Finish sign-in (paste the URL)' : 'Enter a code manually'}</span>
             </button>
 
             {showManualCode && (
               <form onSubmit={handleManualCodeSubmit} className="mt-3 space-y-3">
+                {isHostedWebsite && (
+                  <ol className="text-[11px] text-[#706B65] leading-relaxed list-decimal pl-4 space-y-1">
+                    <li>Click <strong className="text-[#504C46]">Open Login Page</strong> and sign in with the Antigravity account.</li>
+                    <li>When the page fails with “can't be reached”, tap the address bar and copy the whole URL.</li>
+                    <li>Paste it below and click <strong className="text-[#504C46]">Verify &amp; Add</strong>.</li>
+                  </ol>
+                )}
                 <div className="space-y-1">
                   <label className="text-[11px] font-medium text-[#706B65]">
-                    Authorization Code
+                    Authorization code or callback URL
                   </label>
-                  <input
-                    type="text"
-                    value={authCode}
-                    onChange={(e) => setAuthCode(e.target.value)}
-                    placeholder="Paste the code starting with 4/..."
-                    className="w-full px-3 py-2 rounded-xl border border-[#EAE5DE] bg-white text-xs font-mono-code text-[#2A2723] focus:outline-none focus:border-[#C25938] transition-colors"
-                  />
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={authCode}
+                      onChange={(e) => setAuthCode(e.target.value)}
+                      autoFocus={isHostedWebsite}
+                      placeholder="Paste the full URL or the code (4/…)"
+                      className="flex-1 min-w-0 px-3 py-2 rounded-xl border border-[#EAE5DE] bg-white text-xs font-mono-code text-[#2A2723] focus:outline-none focus:border-[#C25938] transition-colors"
+                    />
+                    <button
+                      type="button"
+                      onClick={handlePasteFromClipboard}
+                      className="shrink-0 px-3 py-2 rounded-xl border border-[#DDD7CE] bg-white hover:bg-[#F2ECE4] text-xs font-semibold text-[#504C46] transition-colors"
+                    >
+                      Paste
+                    </button>
+                  </div>
                   <p className="text-[10px] text-[#9E988F]">
-                    If automatic sign-in does not finish, paste the code from the browser here.
+                    A full URL is fine — only its <span className="font-mono-code">code</span> parameter is used.
                   </p>
                 </div>
 
@@ -262,10 +424,18 @@ export const OAuthModal: React.FC<OAuthModalProps> = ({
               </form>
             )}
           </div>
+
+          {isHostedWebsite && (
+            <p className="text-[10px] text-[#9E988F] leading-relaxed">
+              Prefer not to copy the URL? Get the Framecall Helper from
+              <strong className="text-[#504C46]"> Accounts → Pair desktop helper </strong>
+              and keep it open during sign-in — it relays the callback automatically.
+            </p>
+          )}
         </div>
 
         {/* Footer */}
-        <div className="p-4 bg-[#FAF7F2] border-t border-[#EAE5DE] flex justify-end">
+        <div className="p-4 bg-[#FAF7F2] border-t border-[#EAE5DE] flex shrink-0 justify-end">
           <button
             onClick={onClose}
             className="px-4 py-2 rounded-xl border border-[#EAE5DE] bg-white hover:bg-[#F2ECE4] text-xs font-medium text-[#504C46] transition-colors shadow-soft"

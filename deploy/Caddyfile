@@ -23,13 +23,76 @@
     }
 
     # =========================================================================
-    # 1. API Endpoints: /v1/* & /v1beta/*
+    # 1. Long media and image generation: /v1/audio/*, /v1/media/*, /v1/images/*
+    # These reach the bridge (port 3000). Media is streamed and chunked; image
+    # generation is forwarded to the core through the normal lease path.
+    # =========================================================================
+    @media {
+        path /v1/audio/* /v1/media/* /v1/images/*
+    }
+
+    handle @media {
+        reverse_proxy 127.0.0.1:3000 {
+            header_up Host {upstream_hostport}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+
+            transport http {
+                response_header_timeout 7200s
+                read_timeout 7200s
+            }
+        }
+    }
+
+    # =========================================================================
+    # 2. API Endpoints: /v1/* & /v1beta/*
     # Open for AI coding tools (Claude Code, Cursor, Codex, SDKs).
     # Protected by Bearer API Key checked against {$API_KEY} if basic header filter desired,
     # or passed through directly to geminirouter backend for validation & metering.
     # =========================================================================
+    # Gemini-native clients (the dubbing service) use /v1beta/models/... and go
+    # through the bridge, so leases, quota checks and failover apply to them.
+    @v1beta {
+        path /v1beta/*
+    }
+
+    handle @v1beta {
+        reverse_proxy 127.0.0.1:3000 {
+            header_up Host {upstream_hostport}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+
+            transport http {
+                response_header_timeout 600s
+                read_timeout 600s
+            }
+        }
+    }
+
+    # The model listing is answered by the bridge so retired aliases (for
+    # example gemini-3.8-flash-tiered) never appear in a public response.
+    @models {
+        path /v1/models
+    }
+
+    handle @models {
+        reverse_proxy 127.0.0.1:3000 {
+            header_up Host {upstream_hostport}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+
+            transport http {
+                response_header_timeout 60s
+                read_timeout 60s
+            }
+        }
+    }
+
     @api {
-        path /v1/* /v1beta/*
+        path /v1/*
     }
 
     # If you wish to enforce API key check directly at Caddy level, uncomment below:
@@ -39,8 +102,11 @@
     # }
     # respond @unauthorized "Unauthorized: Invalid API Key" 401
 
+    # All OpenAI-compatible traffic goes through the bridge so request model
+    # ids are canonicalised (retired gemini-3.8 aliases are rewritten) and the
+    # dashboard traffic records match what the gateway exposes.
     handle @api {
-        reverse_proxy 127.0.0.1:8045 {
+        reverse_proxy 127.0.0.1:3000 {
             header_up Host {upstream_hostport}
             header_up X-Real-IP {remote_host}
             header_up X-Forwarded-For {remote_host}
@@ -55,7 +121,7 @@
     }
 
     # =========================================================================
-    # 2. Web Management Dashboard & RPC API
+    # 3. Web Management Dashboard & RPC API
     # Protected by HTTP Basic Auth so only you can access the admin dashboard.
     # =========================================================================
     @dashboard {
@@ -79,6 +145,12 @@
             # WebSocket support for live log streaming / RPC
             header_up Upgrade {>Upgrade}
             header_up Connection {>Connection}
+
+            # Large Playground uploads can take a long time to process.
+            transport http {
+                response_header_timeout 7200s
+                read_timeout 7200s
+            }
         }
     }
 }

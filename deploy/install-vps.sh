@@ -71,7 +71,8 @@ apt-get install -y --no-install-recommends \
   debian-archive-keyring \
   apt-transport-https \
   openssl \
-  procps
+  procps \
+  ffmpeg
 
 echo -e "${CYAN}[2/7] Installing Node.js 24 (LTS) & pnpm...${NC}"
 if ! command -v node >/dev/null 2>&1 || [ "$(node -v | cut -d'.' -f1 | tr -d 'v')" -lt 22 ]; then
@@ -108,12 +109,28 @@ fi
 
 cd "$INSTALL_DIR"
 
-if [ -f "package.json" ]; then
-  echo "Installing project dependencies..."
-  pnpm install --frozen-lockfile || pnpm install
-  echo "Building production bundles..."
-  pnpm run build:core || true
-  pnpm run build || true
+if [ -f "server/package.json" ]; then
+  echo "Installing bridge dependencies..."
+  pnpm --dir server install --frozen-lockfile || pnpm --dir server install
+  echo "Building bridge..."
+  pnpm --dir server build || true
+fi
+
+if [ -f "frontend/package.json" ]; then
+  echo "Installing frontend dependencies..."
+  pnpm --dir frontend install --frozen-lockfile || pnpm --dir frontend install
+  echo "Building frontend..."
+  pnpm --dir frontend build || true
+fi
+
+# The AntigravityManager core is an external dependency and is not part of this repository.
+CORE_MAIN_PATH="${CORE_MAIN_PATH:-$INSTALL_DIR/core/dist/core/main.cjs}"
+if [ -f "$CORE_MAIN_PATH" ]; then
+  echo -e "${GREEN}✓ Core bundle found at $CORE_MAIN_PATH${NC}"
+else
+  echo -e "${YELLOW}! Core bundle not found at $CORE_MAIN_PATH${NC}"
+  echo -e "${YELLOW}  Install the AntigravityManager core separately, or set CORE_MAIN_PATH${NC}"
+  echo -e "${YELLOW}  in $INSTALL_DIR/.env before starting geminirouter-core.service.${NC}"
 fi
 
 # Ensure ecosystem.config.js is copied to INSTALL_DIR
@@ -135,7 +152,6 @@ cat <<EOF > "$INSTALL_DIR/.env"
 NODE_ENV=production
 CORE_PORT=8045
 WEB_PORT=3000
-PORT=8045
 DOMAIN=${USER_DOMAIN}
 GEMINIROUTER_API_KEY=${MASTER_API_KEY}
 DASHBOARD_USER=${USER_ADMIN}
@@ -166,9 +182,49 @@ ${USER_DOMAIN} {
         -Server
     }
 
+    # Audio uploads (10-20 minute windows) go to the bridge, which streams and
+    # transcodes them before calling the core.
+    @media {
+        path /v1/audio/* /v1/media/* /v1/images/*
+    }
+
+    handle @media {
+        reverse_proxy 127.0.0.1:3000 {
+            header_up Host {upstream_hostport}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+
+            transport http {
+                response_header_timeout 7200s
+                read_timeout 7200s
+            }
+        }
+    }
+
+    # Gemini-native dubbing clients use /v1beta/models/... through the bridge
+    # so leases, quota checks and failover apply to them.
+    @v1beta {
+        path /v1beta/*
+    }
+
+    handle @v1beta {
+        reverse_proxy 127.0.0.1:3000 {
+            header_up Host {upstream_hostport}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+
+            transport http {
+                response_header_timeout 600s
+                read_timeout 600s
+            }
+        }
+    }
+
     # API endpoints (OpenAI / Anthropic compatible)
     @api {
-        path /v1/* /v1beta/*
+        path /v1/*
     }
 
     handle @api {
@@ -202,6 +258,11 @@ ${USER_DOMAIN} {
             header_up X-Forwarded-Proto {scheme}
             header_up Upgrade {>Upgrade}
             header_up Connection {>Connection}
+
+            transport http {
+                response_header_timeout 7200s
+                read_timeout 7200s
+            }
         }
     }
 }
@@ -214,13 +275,16 @@ chmod 600 "$INSTALL_DIR/.env"
 
 echo -e "${CYAN}[6/7] Configuring systemd services...${NC}"
 cp "$SCRIPT_DIR/geminirouter-core.service" /etc/systemd/system/geminirouter-core.service
-cp "$SCRIPT_DIR/geminirouter.service" /etc/systemd/system/geminirouter.service
+cp "$SCRIPT_DIR/geminirouter-bridge.service" /etc/systemd/system/geminirouter-bridge.service
+cp "$SCRIPT_DIR/geminirouter-core-creds.service" /etc/systemd/system/geminirouter-core-creds.service
+cp "$SCRIPT_DIR/geminirouter-core-creds.timer" /etc/systemd/system/geminirouter-core-creds.timer
 
 systemctl daemon-reload
 systemctl enable geminirouter-core.service
-systemctl enable geminirouter.service
+systemctl enable geminirouter-bridge.service
+systemctl enable --now geminirouter-core-creds.timer
 systemctl restart geminirouter-core.service || true
-systemctl restart geminirouter.service || true
+systemctl restart geminirouter-bridge.service || true
 systemctl restart caddy
 
 echo -e "${CYAN}[7/7] Verifying services status...${NC}"
@@ -262,9 +326,9 @@ echo -e "     client = OpenAI(base_url=\"https://${USER_DOMAIN}/v1\", api_key=\"
 echo ""
 echo -e "${BOLD}4. Management Commands:${NC}"
 echo -e "   Check Core Status:      ${CYAN}systemctl status geminirouter-core${NC}"
-echo -e "   Check Web Status:       ${CYAN}systemctl status geminirouter${NC}"
-echo -e "   View Live Logs:         ${CYAN}journalctl -u geminirouter-core -u geminirouter -f${NC}"
-echo -e "   Restart Services:       ${CYAN}systemctl restart geminirouter-core geminirouter${NC}"
+echo -e "   Check Web Status:       ${CYAN}systemctl status geminirouter-bridge${NC}"
+echo -e "   View Live Logs:         ${CYAN}journalctl -u geminirouter-core -u geminirouter-bridge -f${NC}"
+echo -e "   Restart Services:       ${CYAN}systemctl restart geminirouter-core geminirouter-bridge${NC}"
 echo -e "   (Optional PM2 control): ${CYAN}cd /opt/geminirouter && pm2 start ecosystem.config.js${NC}"
 echo ""
 echo -e "${GREEN}Configuration saved to: /opt/geminirouter/.env${NC}"

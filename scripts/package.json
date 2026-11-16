@@ -1,0 +1,11 @@
+{
+  "name": "@geminirouter/scripts",
+  "private": true,
+  "version": "0.0.0",
+  "license": "UNLICENSED",
+  "type": "module",
+  "description": "Development and QA tooling for geminirouter (not part of production deployment)",
+  "devDependencies": {
+    "playwright": "^1.49.0"
+  }
+}

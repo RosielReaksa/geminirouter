@@ -9,9 +9,40 @@
 
 **geminirouter** turns multiple personal or workspace Google accounts into your own private **OpenRouter** or **Anthropic Claude** endpoint. Instead of paying hefty third-party fees or getting rate-limited during heavy coding sessions, geminirouter automatically pools multiple accounts, balancing traffic via atomic concurrency leases, automatically rotating accounts on quota depletion, and serving standard `/v1/chat/completions` and `/v1/models` endpoints to any AI coding assistant or tool.
 
+The API can also forward audio and video inputs to supported models. A separate
+dubbing website can send media to `/v1/chat/completions` and receive model text
+such as a transcript or translation. For 10–20 minute windows, use
+`POST /v1/audio/transcriptions`: the caller sends the user's own prompt with the
+audio, and the model returns that answer. The website does not need to set a
+task or target language. The endpoint accepts up to 1 hour per request; for
+longer recordings the website should send 10-20 minute windows for faster
+responses. For Chinese→Khmer timed dubbing, `POST /v1/audio/dubbing` chunks the
+recording, enforces the JSON segment contract, and returns absolute-time
+segments with gender, timbre and speaker role.
+See the [audio/video API guide](docs/MEDIA_API.md) for request examples, size
+limits, and current output limitations.
+
+Image generation is available at `POST /v1/images/generations` using
+`gemini-3.1-flash-image`; the Playground renders the generated image and offers
+a download button. See the [image API guide](docs/IMAGE_API.md).
+
+Per-account egress is available through Webshare: pin each pooled account to its
+own IP from the Proxy page. The bridge assigns the proxies and the core applies
+them per account, so quota accounting, cooldown and failover keep working. See
+the [proxy guide](docs/PROXY.md).
+
+Google AI Studio keys can be pooled for `gemini-3.1-flash-lite` and
+`gemini-3.5-flash-lite` from the Gemini API page. The public website exposes only
+those two models; every other Gemini model stays on the account pool. See the
+[Gemini API guide](docs/GEMINI_API.md).
+
+For latency, streaming, model speed, and timeout guidance, see the
+[call performance guide](docs/PERFORMANCE.md).
+
 ### Key Highlights
 - **100% Native & Lightweight**: Zero Docker overhead. Runs directly via standard Node.js (v22/v24), managed with systemd or PM2, consuming less than 150MB of RAM.
 - **OpenAI & Anthropic Compatible**: Drop-in base URL replacement for Claude Code, Codex CLI, Cursor, Aider, OpenCode, LibreChat, and standard OpenAI SDKs.
+- **Multimodal API Input**: OpenAI-compatible audio and video content blocks are forwarded to the core; media support depends on the selected model.
 - **Smart Concurrency Balancer**:
   - Atomic in-flight lease tracking (`acquireLease` / `releaseLease`).
   - Model-scoped rate-limit cooldowns (60s–300s TTL).
@@ -64,6 +95,11 @@
 
 ---
 
+Audio uploads (`/v1/audio/*` and `/v1/media/*`) are routed to the bridge
+(port 3000) instead of the core. The bridge streams a 10–20 minute window to
+disk, transcodes it with FFmpeg, and calls the core through the normal lease,
+quota, and account-failover path.
+
 ## 🚀 Quick Start: VPS Automated Deployment
 
 For Ubuntu 22.04 / 24.04 or Debian 11 / 12 servers, an automated native installer is provided.
@@ -90,7 +126,7 @@ The script will interactively:
 3. Automatically install Node.js 24 LTS, pnpm, and Caddy.
 4. Set up `/opt/geminirouter` with a dedicated system user.
 5. Generate a secure Master API Key (`sk-live-...`).
-6. Configure and start systemd background services (`geminirouter-core.service` and `geminirouter.service`).
+6. Configure and start systemd background services (`geminirouter-core.service` and `geminirouter-bridge.service`).
 7. Obtain a Let's Encrypt SSL certificate automatically.
 
 Once finished, the script displays your complete connection details and configuration snippets.
@@ -101,22 +137,33 @@ Once finished, the script displays your complete connection details and configur
 
 If you prefer to configure your server manually using Node.js, systemd, or PM2:
 
-### Step 1: Install Node.js 24 and pnpm
+### Step 1: Install Node.js 24, pnpm, and FFmpeg
 ```bash
 curl -fsSL https://deb.nodesource.com/setup_24.x | bash -
-apt-get install -y nodejs
+apt-get install -y nodejs ffmpeg
 corepack enable
 ```
+
+FFmpeg is required for the long-audio transcription endpoint
+(`/v1/audio/transcriptions`); the installer adds it automatically.
 
 ### Step 2: Prepare Application Directory
 ```bash
 useradd -m -s /bin/bash geminirouter
 mkdir -p /opt/geminirouter
-cp -r . /opt/geminirouter/
+cp -r frontend server deploy /opt/geminirouter/
 cd /opt/geminirouter
-pnpm install --frozen-lockfile
-pnpm run build:core
-pnpm run build
+pnpm --dir server install --frozen-lockfile && pnpm --dir server build
+pnpm --dir frontend install --frozen-lockfile && pnpm --dir frontend build
+```
+
+The AntigravityManager core is **not included** in this repository. Install it separately
+into `/opt/geminirouter/core` (or any path) and point the services at it:
+
+```bash
+# in /opt/geminirouter/.env
+CORE_HOME=/opt/geminirouter/core
+CORE_MAIN_PATH=/opt/geminirouter/core/dist/core/main.cjs
 ```
 
 ### Step 3: Configure Environment Variables
@@ -126,21 +173,27 @@ cp deploy/.env.example /opt/geminirouter/.env
 nano /opt/geminirouter/.env
 ```
 
+The `.env` file is read by **both** systemd units through `EnvironmentFile=`,
+which overrides `Environment=` in the unit file. That is why it must not set
+`PORT`: the bridge binds `WEB_PORT=3000` and the core binds `PORT=8045`, each
+declared in its own unit. Setting `PORT` in the shared file would move the
+bridge onto the core's port.
+
 ### Step 4: Run via systemd Services
 Install the provided systemd service units:
 ```bash
 cp deploy/geminirouter-core.service /etc/systemd/system/
-cp deploy/geminirouter.service /etc/systemd/system/
+cp deploy/geminirouter-bridge.service /etc/systemd/system/
 
 systemctl daemon-reload
 systemctl enable --now geminirouter-core.service
-systemctl enable --now geminirouter.service
+systemctl enable --now geminirouter-bridge.service
 ```
 
 Check status:
 ```bash
 systemctl status geminirouter-core
-systemctl status geminirouter
+systemctl status geminirouter-bridge
 ```
 
 ### Alternative: Run via PM2
@@ -190,6 +243,56 @@ nginx -t && systemctl reload nginx
    - Follow the OAuth authentication flow.
    - You can connect multiple Google accounts. Each account adds independent quota capacity to your cluster.
 4. The system will continuously monitor quotas and automatically route incoming prompts across active accounts with minimal concurrency and zero rate-limit collisions.
+
+### Framecall Helper (desktop)
+
+A single static Go binary (`helper/`) that pairs with the deployment and can:
+
+- **relay** the Antigravity loopback redirect (`127.0.0.1:41209`) to the dashboard,
+  so sign-in finishes without copying URLs;
+- **import** an Antigravity account export file.
+
+Pairing is code-based: the dashboard mints a one-time 6-digit code, the helper exchanges it
+for a bearer token that is scoped to `/api/accounts/import` only. Tokens are stored hashed,
+and can be revoked from the dashboard.
+
+```bash
+cd helper && ./build.ps1          # builds windows/macos/linux binaries into helper/dist
+./framecall-helper.exe            # opens the local helper page and starts the relay
+./framecall-helper.exe --pair 123456
+./framecall-helper.exe --import accounts.json
+```
+
+### Importing accounts from the Antigravity app
+
+If you already use the official Antigravity desktop app, export its accounts and use
+**Import accounts file** on the Accounts page. The bridge stages the file and calls the
+core's `accountFileImport` (strategies: `merge`, `overwrite`, `skip-existing`); tokens that
+still refresh are kept, and nothing is deleted.
+
+Accounts whose OAuth refresh is blocked show a **Reauth Required** badge and a
+**Reconnect account** action. Reconnecting keeps the account row and quotas — only the
+credentials are renewed.
+
+### Hosted sign-in and the `aicode` scope
+
+Antigravity accounts require the private `https://www.googleapis.com/auth/aicode` scope, which only
+Antigravity's own OAuth client is allowed to request. A self-registered Google **Web application**
+client is rejected by Google with `Error 400: invalid_scope`, so the built-in Antigravity client is
+the only working option.
+
+That client only accepts the loopback redirect `http://127.0.0.1:41209/oauth-callback`, which is
+resolved on **the device running the browser**:
+
+- **Desktop (Windows):** run the bundled sign-in helper (`/FramecallSignInHelper.zip`) so the
+  loopback redirect is forwarded to `https://<your-domain>/oauth/callback`.
+- **Phone / macOS / Linux:** nothing can listen on the device's loopback, so after Google sign-in the
+  page fails to load. Copy the full URL (it contains `code=…`) and paste it into the dashboard's
+  **Enter a code manually** field. Accounts are server-side, so adding them once from a PC is enough.
+
+`ANTIGRAVITY_OAUTH_CLIENTS` / `ANTIGRAVITY_OAUTH_CLIENT_KEY` are still honoured by the core for
+advanced setups, and `OAUTH_CALLBACK_URL` overrides the hosted callback URL, but neither bypasses
+the `aicode` scope restriction.
 
 ---
 
@@ -308,18 +411,35 @@ To ensure your private router remains exclusively yours:
 | Task | Command |
 |---|---|
 | View Core Logs | `journalctl -u geminirouter-core -f` |
-| View Web Dashboard Logs | `journalctl -u geminirouter -f` |
-| Restart All Services | `systemctl restart geminirouter-core geminirouter caddy` |
-| Stop All Services | `systemctl stop geminirouter-core geminirouter` |
-| Check Memory & PID | `systemctl status geminirouter-core geminirouter` |
+| View Web Dashboard Logs | `journalctl -u geminirouter-bridge -f` |
+| Restart All Services | `systemctl restart geminirouter-core geminirouter-bridge caddy` |
+| Stop All Services | `systemctl stop geminirouter-core geminirouter-bridge` |
+| Check Memory & PID | `systemctl status geminirouter-core geminirouter-bridge` |
+| Liveness probe | `curl -fsS https://$DOMAIN/api/health` (public, 200 = serving) |
+| Check media config | `journalctl -u geminirouter-bridge -n 30 \| grep MEDIA_` |
 | (Optional) PM2 Status | `pm2 status` |
+| Check core OAuth credential drift | `systemctl start geminirouter-core-creds && journalctl -u geminirouter-core-creds -n 20` |
+| Update the external core | `sudo ./deploy/update-core.sh --bundle <main.cjs>` (auto-rollback) |
+
+The core's OAuth client credentials are public upstream, so they can be rotated by Google.
+See [docs/CORE-CREDENTIALS.md](./docs/CORE-CREDENTIALS.md) for detection and the update runbook, and
+[docs/CLIENT-BLOCKED-RECOVERY.md](./docs/CLIENT-BLOCKED-RECOVERY.md) for what to do when Google blocks
+new authorizations, revokes the client, or rate-limits your server.
 
 ---
 
 ## 📄 License & Attribution
-The geminirouter dashboard and bridge server (this repository) are MIT licensed,
-created for private, personal, and self-hosted developer use.
 
-This project is a companion UI for the [AntigravityManager](https://github.com/Draculabo/AntigravityManager)
-core (not included in this repository), which is licensed **CC BY-NC-SA 4.0** — non-commercial
-use, with attribution. Respect that license when using or modifying the core.
+**Copyright © 2026 Framecall. All Rights Reserved.**
+
+The geminirouter web dashboard, marketing site, bridge server, deployment tooling, and
+documentation in this repository are **proprietary software** owned by Framecall. No license
+is granted to use, copy, modify, or distribute them except as expressly permitted in writing.
+See [LICENSE](./LICENSE) for the full terms.
+
+**Third-party core (not included).** This repository does not contain AntigravityManager source
+code. The [AntigravityManager](https://github.com/Draculabo/AntigravityManager) core is an external
+runtime dependency, separately licensed by Draculabo under **CC BY-NC-SA 4.0**
+(Attribution-NonCommercial-ShareAlike). It is not covered by the Framecall license and may not be
+used commercially. Any fork or patch of the core remains under CC BY-NC-SA 4.0.
+See [NOTICE](./NOTICE) for the full scope breakdown and attribution.

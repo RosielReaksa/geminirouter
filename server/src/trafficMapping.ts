@@ -1,0 +1,83 @@
+import type { GoogleAccount, TrafficRecord } from './store.js';
+import { canonicalModelId } from './modelIds.js';
+
+const DEFAULT_STALE_IN_PROGRESS_MS = 300_000;
+
+/**
+ * Merge bridge-local records (AI Studio key calls) into the core audit stream.
+ *
+ * The core never sees key-pool calls because the bridge sends those to Google
+ * directly, so without this merge they disappear from the dashboard whenever
+ * the core is reachable. Newest first, de-duplicated by record id.
+ */
+export function mergeTrafficRecords(
+  coreRecords: TrafficRecord[] | null,
+  localRecords: TrafficRecord[],
+): TrafficRecord[] {
+  const newestFirst = (a: TrafficRecord, b: TrafficRecord) =>
+    (Date.parse(b.timestamp) || 0) - (Date.parse(a.timestamp) || 0);
+
+  if (!coreRecords) return [...localRecords].sort(newestFirst);
+
+  const seen = new Set<string>();
+  const merged: TrafficRecord[] = [];
+  for (const record of [
+    ...coreRecords,
+    ...localRecords.filter((entry) => entry.provider === 'gemini-api'),
+  ]) {
+    if (seen.has(record.id)) continue;
+    seen.add(record.id);
+    merged.push(record);
+  }
+  return merged.sort(newestFirst);
+}
+
+/**
+ * Map the core's audit rows onto the dashboard's traffic records.
+ *
+ * The core reports the model it actually ran, which can still be a retired
+ * alias (`gemini-3.8-flash-tiered`) even when the client asked for the
+ * canonical id. Both the requested and routed names are canonicalised so the
+ * dashboard never shows an id the gateway no longer exposes.
+ */
+export function mapCoreTrafficItems(
+  items: any[],
+  accounts: GoogleAccount[],
+  staleInProgressMs: number = DEFAULT_STALE_IN_PROGRESS_MS,
+): TrafficRecord[] {
+  const emailsByAccountId = new Map(accounts.map((account) => [account.id, account.email]));
+
+  return items.map((item: any) => {
+    const routedModel = item.mappedModel || item.physicalModel || item.model || 'unknown';
+    const promptTokens = item.inputTokens ?? 0;
+    const completionTokens = item.outputTokens ?? 0;
+    const cachedTokens = item.cachedTokens ?? item.cached_tokens ?? 0;
+    const reasoningTokens = item.reasoningTokens ?? item.reasoning_tokens ?? 0;
+    const timestampMs =
+      typeof item.timestamp === 'number' ? item.timestamp : Date.parse(item.timestamp);
+    const stale =
+      item.outcome === 'in_progress' &&
+      Number.isFinite(timestampMs) &&
+      Date.now() - timestampMs > staleInProgressMs;
+
+    return {
+      id: item.id,
+      timestamp: new Date(timestampMs).toISOString(),
+      clientName: item.clientName || item.userAgent || item.protocol || 'HTTP Client',
+      clientIp: item.clientIp || '127.0.0.1',
+      modelRequested: canonicalModelId(item.model || routedModel),
+      modelRouted: canonicalModelId(routedModel),
+      backingAccountEmail:
+        emailsByAccountId.get(item.attributedAccountId) || item.attributedAccountId || 'unknown',
+      accountId: item.attributedAccountId || undefined,
+      status: stale ? 0 : item.status ?? 0,
+      outcome: stale ? 'aborted' : item.outcome ?? undefined,
+      latencyMs: item.durationMs ?? 0,
+      promptTokens,
+      completionTokens,
+      cachedTokens: cachedTokens > 0 ? cachedTokens : undefined,
+      reasoningTokens: reasoningTokens > 0 ? reasoningTokens : undefined,
+      totalTokens: promptTokens + completionTokens,
+    };
+  });
+}

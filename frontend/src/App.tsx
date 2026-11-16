@@ -1,15 +1,20 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Sidebar, NavTab } from './components/Sidebar';
 import { OverviewPage } from './components/OverviewPage';
 import { AccountsPage } from './components/AccountsPage';
 import { ModelsPage } from './components/ModelsPage';
+import { PlaygroundPage } from './components/PlaygroundPage';
 import { GatewayPage } from './components/GatewayPage';
 import { TrafficPage } from './components/TrafficPage';
 import { SettingsPage } from './components/SettingsPage';
 import { OAuthModal } from './components/OAuthModal';
+import { LoadingScreen } from './components/LoadingScreen';
+import { UsagePage } from './components/UsagePage';
+import { ProxyPage } from './components/ProxyPage';
+import { GeminiApiPage } from './components/GeminiApiPage';
 import { api } from './services/api';
 import { authApi } from './services/authApi';
-import { navigate } from './router';
+import { navigate, usePathname } from './router';
 import {
   GatewayStatus,
   GoogleAccount,
@@ -25,9 +30,46 @@ import {
 
 /** The authenticated dashboard application (served at /app). */
 export const DashboardApp: React.FC = () => {
-  const [currentTab, setCurrentTab] = useState<NavTab>('overview');
+  const pathname = usePathname();
+  const tabSegment = pathname.split('/')[2] as NavTab | undefined;
+  const currentTab: NavTab = tabSegment && [
+    'overview', 'accounts', 'models', 'playground', 'gateway', 'traffic', 'usage', 'proxy', 'gemini', 'settings',
+  ].includes(tabSegment) ? tabSegment : 'overview';
+  const previousTab = useRef(currentTab);
+  const [isPageSwitchLoading, setIsPageSwitchLoading] = useState(false);
+  const pageName = currentTab === 'accounts' ? 'Accounts & Quotas'
+    : currentTab === 'models' ? 'Available Models'
+    : currentTab === 'playground' ? 'Playground'
+    : currentTab === 'gateway' ? 'API Gateway & Routing'
+    : currentTab === 'traffic' ? 'Traffic Monitor'
+    : currentTab === 'usage' ? 'Model Usage'
+    : currentTab === 'proxy' ? 'Proxy Configuration'
+    : currentTab === 'gemini' ? 'Gemini API'
+    : currentTab === 'settings' ? 'Settings'
+    : 'Overview';
+  const trafficQuery = new URLSearchParams(window.location.search);
+  const hasSelectedTrafficRange = currentTab === 'traffic'
+    && trafficQuery.has('from')
+    && trafficQuery.has('to')
+    && Number.isFinite(Number(trafficQuery.get('from')))
+    && Number.isFinite(Number(trafficQuery.get('to')))
+    && Number(trafficQuery.get('to')) > Number(trafficQuery.get('from'));
+  const navigateToTab = (tab: NavTab) => {
+    navigate(tab === 'overview' ? '/app' : `/app/${tab}`);
+  };
   const [isOAuthModalOpen, setIsOAuthModalOpen] = useState(false);
   const [isLiveApi, setIsLiveApi] = useState(false);
+  const [isInitialLoading, setIsInitialLoading] = useState(true);
+  // Keep the Playground mounted after its first visit so uploads, progress and
+  // results survive switching to another dashboard page. Deriving this from the
+  // current tab plus a latch avoids a setState effect on every tab change.
+  const [playgroundVisited, setPlaygroundVisited] = useState(currentTab === 'playground');
+  const [visitedTab, setVisitedTab] = useState(currentTab);
+  if (visitedTab !== currentTab) {
+    setVisitedTab(currentTab);
+    if (currentTab === 'playground') setPlaygroundVisited(true);
+  }
+  const playgroundEverOpened = playgroundVisited || currentTab === 'playground';
 
   // Core Data States
   const [status, setStatus] = useState<GatewayStatus>(INITIAL_MOCK_STATUS);
@@ -38,53 +80,146 @@ export const DashboardApp: React.FC = () => {
   // Action loaders
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [notification, setNotification] = useState<string | null>(null);
+  const notificationTimer = useRef<number | null>(null);
 
   const showNotification = (msg: string) => {
     setNotification(msg);
-    setTimeout(() => setNotification(null), 3000);
-  };
-
-  // Initial load
-  const loadInitialData = async () => {
-    try {
-      const [statusRes, accRes, configRes, trafficRes] = await Promise.all([
-        api.getStatus(),
-        api.getAccounts(),
-        api.getConfig(),
-        api.getTraffic(),
-      ]);
-
-      setStatus(statusRes.data);
-      setAccounts(accRes.data);
-      setConfig(configRes.data);
-      setTraffic(trafficRes.data);
-      setIsLiveApi(statusRes.isLiveApi);
-    } catch (err) {
-      console.error('Data load error:', err);
+    if (notificationTimer.current !== null) {
+      window.clearTimeout(notificationTimer.current);
     }
+    notificationTimer.current = window.setTimeout(() => {
+      notificationTimer.current = null;
+      setNotification(null);
+    }, 3000);
   };
 
+  // Initial load is cancellable so quick route changes and StrictMode cleanup
+  // do not update an unmounted dashboard.
   useEffect(() => {
-    loadInitialData();
-    // Poll status & traffic every 15 seconds
-    const interval = setInterval(() => {
-      api.getStatus().then((res) => {
-        setStatus(res.data);
-        setIsLiveApi(res.isLiveApi);
-      });
-      api.getTraffic().then((res) => {
-        setTraffic(res.data);
-      });
-    }, 15000);
-
-    return () => clearInterval(interval);
+    let active = true;
+    const loadInitialData = async () => {
+      try {
+        const [statusRes, accRes, configRes, trafficRes] = await Promise.all([
+          api.getStatus(),
+          api.getAccounts(),
+          api.getConfig(),
+          api.getTraffic(),
+        ]);
+        if (!active) return;
+        setStatus(statusRes.data);
+        setAccounts(accRes.data);
+        setConfig(configRes.data);
+        setTraffic(trafficRes.data);
+        setIsLiveApi(statusRes.isLiveApi);
+      } catch (err) {
+        if (active) console.error('Data load error:', err);
+      } finally {
+        if (active) setIsInitialLoading(false);
+      }
+    };
+    void loadInitialData();
+    return () => { active = false; };
   }, []);
+
+  // Refresh without overlapping requests, and pause polling while the browser
+  // tab is hidden so background tabs do not keep waking the gateway.
+  useEffect(() => {
+    let active = true;
+    let polling = false;
+    let timer: number | null = null;
+
+    const scheduleNext = () => {
+      if (active && document.visibilityState === 'visible') {
+        timer = window.setTimeout(() => void refresh(), 15000);
+      }
+    };
+
+    const refresh = async () => {
+      if (!active || polling) return;
+      if (document.visibilityState !== 'visible') return;
+
+      polling = true;
+      try {
+        const [statusRes, accRes, trafficRes] = await Promise.all([
+          api.getStatus(),
+          api.getAccounts(),
+          api.getTraffic(),
+        ]);
+        if (!active) return;
+        setStatus(statusRes.data);
+        setAccounts(accRes.data);
+        setIsLiveApi(statusRes.isLiveApi);
+        setTraffic(trafficRes.data);
+      } catch (err) {
+        if (active) console.warn('Dashboard refresh failed:', err);
+      } finally {
+        polling = false;
+        scheduleNext();
+      }
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState !== 'visible') {
+        if (timer !== null) window.clearTimeout(timer);
+        timer = null;
+        return;
+      }
+      if (timer !== null) window.clearTimeout(timer);
+      timer = null;
+      void refresh();
+    };
+
+    if (document.visibilityState === 'visible') {
+      timer = window.setTimeout(() => void refresh(), 15000);
+    }
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      active = false;
+      if (timer !== null) window.clearTimeout(timer);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, []);
+
+  useEffect(() => () => {
+    if (notificationTimer.current !== null) {
+      window.clearTimeout(notificationTimer.current);
+      notificationTimer.current = null;
+    }
+  }, []);
+
+  // Show the mascot when a tab that needs fresh data is entered. The state
+  // writes are deferred to a microtask: a synchronous setState inside an effect
+  // cascades an extra render, and the mask only needs to appear before paint.
+  const selfLoadingTab = ['overview', 'models', 'playground', 'usage'].includes(currentTab) || hasSelectedTrafficRange;
+  useEffect(() => {
+    if (previousTab.current === currentTab) return;
+    previousTab.current = currentTab;
+
+    if (!selfLoadingTab) {
+      void Promise.resolve().then(() => setIsPageSwitchLoading(false));
+      return;
+    }
+
+    void Promise.resolve().then(() => setIsPageSwitchLoading(true));
+    // Reveal the page's own skeleton if a slow API call is still running.
+    // The whole app should never stay blocked behind the mascot.
+    const failsafe = window.setTimeout(() => setIsPageSwitchLoading(false), 8000);
+    return () => window.clearTimeout(failsafe);
+  }, [currentTab, selfLoadingTab]);
+
+  const handlePageReady = (tab: NavTab) => {
+    const segment = window.location.pathname.split('/')[2] as NavTab | undefined;
+    const activeTab: NavTab = segment && [
+      'overview', 'accounts', 'models', 'playground', 'gateway', 'traffic', 'usage', 'proxy', 'gemini', 'settings',
+    ].includes(segment) ? segment : 'overview';
+    if (activeTab === tab) setIsPageSwitchLoading(false);
+  };
 
   const handleRefreshQuotas = async () => {
     setIsRefreshing(true);
     try {
       const { data, isLiveApi: live } = await api.refreshAccounts();
-      if (data && Array.isArray(data) && data.length > 0) {
+      if (Array.isArray(data)) {
         setAccounts(data);
       }
       setIsLiveApi(live);
@@ -108,9 +243,13 @@ export const DashboardApp: React.FC = () => {
   };
 
   const handleDeleteAccount = async (id: string) => {
-    const updated = await api.deleteAccount(id);
-    setAccounts(updated);
-    showNotification('Account removed from rotation pool.');
+    try {
+      const updated = await api.deleteAccount(id);
+      setAccounts(updated);
+      showNotification('Account removed from rotation pool.');
+    } catch (err) {
+      showNotification(err instanceof Error ? err.message : 'Failed to remove account.');
+    }
   };
 
   const handleSetDefaultAccount = async (id: string) => {
@@ -124,12 +263,19 @@ export const DashboardApp: React.FC = () => {
     showNotification(`Added ${newAccount.email} to quota pool.`);
   };
 
+  if (isInitialLoading) {
+    return <LoadingScreen detail="Connecting your accounts and models…" />;
+  }
+
   return (
     <div className="min-h-screen bg-[#FBF9F5] flex flex-col md:flex-row text-[#2A2723]">
+      {isPageSwitchLoading && (
+        <LoadingScreen title={`Opening ${pageName}`} detail="Getting this page ready…" />
+      )}
       {/* Sidebar Navigation */}
       <Sidebar
         currentTab={currentTab}
-        onSelectTab={setCurrentTab}
+        onSelectTab={navigateToTab}
         isRunning={status.isRunning}
         isLiveApi={isLiveApi}
         activeAccountsCount={accounts.filter((a) => a.status === 'active').length}
@@ -144,33 +290,41 @@ export const DashboardApp: React.FC = () => {
       {/* Main Content Pane */}
       <main className="flex-1 flex flex-col min-w-0">
         {/* Top Floating App Bar */}
-        <header className="h-16 border-b border-[#EAE5DE] px-6 sm:px-10 flex items-center justify-between bg-white/70 backdrop-blur-sm sticky top-0 z-20">
-          <div className="flex items-center gap-3">
-            <span className="font-serif-editorial text-xl font-bold text-[#2A2723] capitalize">
+        <header className="h-16 border-b border-[#EAE5DE] px-4 sm:px-10 flex items-center justify-between bg-white/70 backdrop-blur-sm md:sticky md:top-0 md:z-20">
+          <div className="flex min-w-0 items-center gap-2 sm:gap-3">
+            <span key={currentTab} className="truncate whitespace-nowrap font-serif-editorial text-base font-bold text-[#2A2723] capitalize dashboard-title-enter sm:text-xl">
               {currentTab === 'overview'
                 ? 'Overview'
                 : currentTab === 'accounts'
                 ? 'Accounts & Quotas'
                 : currentTab === 'models'
                 ? 'Available Models'
+                : currentTab === 'playground'
+                ? 'Playground'
                 : currentTab === 'gateway'
                 ? 'API Gateway & Routing'
                 : currentTab === 'traffic'
                 ? 'Traffic Monitor'
+                : currentTab === 'usage'
+                ? 'Model Usage'
+                : currentTab === 'proxy'
+                ? 'Proxy Configuration'
+                : currentTab === 'gemini'
+                ? 'Gemini API'
                 : 'Settings'}
             </span>
-            <span className="text-stone-300">/</span>
-            <span className="text-xs text-[#706B65]">geminirouter</span>
+            <span className="hidden text-stone-300 sm:inline">/</span>
+            <span className="hidden text-xs text-[#706B65] sm:inline">geminirouter</span>
           </div>
 
-          <div className="flex items-center gap-3">
+          <div className="flex shrink-0 items-center gap-2 sm:gap-3">
             {notification && (
               <div className="text-xs px-3 py-1.5 rounded-xl bg-[#FAF2EF] text-[#C25938] border border-[#F2DDD5] font-medium animate-in fade-in">
                 {notification}
               </div>
             )}
 
-            <div className="flex items-center gap-2 text-xs font-mono-code text-[#706B65] bg-[#FAF7F2] border border-[#EAE5DE] px-3 py-1.5 rounded-xl">
+            <div className="flex items-center gap-1.5 text-[10px] font-mono-code text-[#706B65] bg-[#FAF7F2] border border-[#EAE5DE] px-2 py-1.5 rounded-xl sm:gap-2 sm:px-3 sm:text-xs">
               <span className={`w-2 h-2 rounded-full ${status.isRunning ? 'bg-emerald-500 animate-pulse' : 'bg-stone-300'}`}></span>
               <span>127.0.0.1:{status.port || config.port}</span>
             </div>
@@ -178,16 +332,28 @@ export const DashboardApp: React.FC = () => {
         </header>
 
         {/* Tab Page Container */}
-        <div className="p-6 sm:p-10 max-w-6xl w-full mx-auto pb-20">
+        <div
+          className={`p-6 sm:p-10 w-full mx-auto pb-20 ${
+            currentTab === 'traffic' ? 'max-w-7xl' : 'max-w-6xl'
+          }`}
+        >
+          <div className="dashboard-page-enter">
           {currentTab === 'overview' && (
             <OverviewPage
               status={status}
               accounts={accounts}
               traffic={traffic}
-              onNavigateToAccounts={() => setCurrentTab('accounts')}
-              onNavigateToGateway={() => setCurrentTab('gateway')}
-              onNavigateToModels={() => setCurrentTab('models')}
-              onNavigateToTraffic={() => setCurrentTab('traffic')}
+              onReady={() => handlePageReady('overview')}
+              onNavigateToAccounts={() => navigateToTab('accounts')}
+              onNavigateToGateway={() => navigateToTab('gateway')}
+              onNavigateToModels={() => navigateToTab('models')}
+              onNavigateToTraffic={(range) => {
+                if (range) {
+                  navigate(`/app/traffic?from=${range.from}&to=${range.to}`);
+                } else {
+                  navigateToTab('traffic');
+                }
+              }}
             />
           )}
 
@@ -203,14 +369,27 @@ export const DashboardApp: React.FC = () => {
               onUpdateAccounts={setAccounts}
               onShowNotification={showNotification}
               isRefreshing={isRefreshing}
+              oauthBlocked={status?.coreCredentials?.clientHealth?.state === 'blocked'}
             />
           )}
 
           {currentTab === 'models' && (
             <ModelsPage
-              gatewayOnline={status.isRunning}
-              onNavigateToGateway={() => setCurrentTab('gateway')}
+              onReady={() => handlePageReady('models')}
+              onNavigateToGateway={() => navigateToTab('gateway')}
             />
+          )}
+
+          {(currentTab === 'playground' || playgroundEverOpened) && (
+            <div
+              className={currentTab === 'playground' ? '' : 'hidden'}
+              aria-hidden={currentTab !== 'playground'}
+            >
+              <PlaygroundPage
+                onReady={() => handlePageReady('playground')}
+                isActive={currentTab === 'playground'}
+              />
+            </div>
           )}
 
           {currentTab === 'gateway' && (
@@ -220,7 +399,21 @@ export const DashboardApp: React.FC = () => {
             />
           )}
 
-          {currentTab === 'traffic' && <TrafficPage traffic={traffic} />}
+          {currentTab === 'traffic' && (
+            <TrafficPage traffic={traffic} onReady={() => handlePageReady('traffic')} />
+          )}
+
+          {currentTab === 'usage' && (
+            <UsagePage onReady={() => handlePageReady('usage')} />
+          )}
+
+          {currentTab === 'proxy' && (
+            <ProxyPage onReady={() => handlePageReady('proxy')} />
+          )}
+
+          {currentTab === 'gemini' && (
+            <GeminiApiPage onReady={() => handlePageReady('gemini')} />
+          )}
 
           {currentTab === 'settings' && (
             <SettingsPage
@@ -228,6 +421,7 @@ export const DashboardApp: React.FC = () => {
               onUpdateConfig={handleUpdateConfig}
             />
           )}
+          </div>
         </div>
       </main>
 

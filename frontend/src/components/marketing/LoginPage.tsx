@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { ArrowRight, Lock, ShieldCheck, AlertCircle } from 'lucide-react';
-import { navigate, Link } from '../../router';
+import { navigate } from '../../router';
+import { Link } from '../../RouterLink';
 import { Wordmark } from '../marketing/Chrome';
 import { authApi } from '../../services/authApi';
 

@@ -5,6 +5,17 @@ interface LegalPageProps {
   kind: 'privacy' | 'terms';
 }
 
+/**
+ * "Last updated" is resolved once per bundle instead of on every render. The
+ * date is a build-time constant; calling the clock during render is impure and
+ * would make the heading's output unstable across re-renders.
+ */
+const LAST_UPDATED = new Date().toLocaleDateString('en-US', {
+  year: 'numeric',
+  month: 'long',
+  day: 'numeric',
+});
+
 const PrivacyBody: React.FC = () => (
   <>
     <p>
@@ -110,7 +121,7 @@ export const LegalPage: React.FC<LegalPageProps> = ({ kind }) => {
               {isPrivacy ? 'How data is handled.' : 'Terms of use.'}
             </h1>
             <p className="mt-4 text-[13px] text-[#A39C92] font-mono-code">
-              Last updated {new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}
+              Last updated {LAST_UPDATED}
             </p>
           </Reveal>
         </div>

@@ -26,9 +26,12 @@ export interface CoreHandshakeResponse {
 
 export class CoreClient {
   private endpoint: string;
+  private timeoutMs: number;
 
   constructor(endpoint?: string) {
     this.endpoint = endpoint || getLocalCoreEndpoint();
+    const configured = Number.parseInt(process.env.CORE_RPC_TIMEOUT_MS || '', 10);
+    this.timeoutMs = Number.isFinite(configured) && configured > 0 ? configured : 8000;
   }
 
   getEndpoint(): string {
@@ -45,7 +48,7 @@ export class CoreClient {
       socketPath,
       baseURL: 'http://localhost',
       httpAgent: false,
-      timeout: 4000,
+      timeout: this.timeoutMs,
       maxRedirects: 0,
       proxy: false,
       ...config,
@@ -124,8 +127,19 @@ export class CoreClient {
     return res.status >= 200 && res.status < 300;
   }
 
+  /**
+   * Start an OAuth login on the core.
+   *
+   * Since core v0.30.0 the request schema is a z.strictObject({ diagnosticId,
+   * oauthClientKey? }) — the core self-hosts the OAuth callback on its own
+   * loopback listener and derives the redirect URI itself. Any extra field
+   * (the old redirectUri) makes the strict schema reject the whole request
+   * with "Invalid OAuth login request", so redirectUri is accepted for
+   * caller compatibility but deliberately not sent.
+   */
   async startOAuth(
     oauthClientKey?: string,
+    _redirectUri?: string,
   ): Promise<
     | { ok: true; sessionId: string; authorizationUrl: string }
     | { ok: false; status: number; error: string }
@@ -166,26 +180,31 @@ export class CoreClient {
 
   async getOAuthStatus(sessionId: string): Promise<any> {
     try {
-      const res = await this.rawRequest<any>({
+      return await this.rawRequest<any>({
         method: 'GET',
         url: `/v1/oauth/status/${encodeURIComponent(sessionId)}`,
       });
-      return res.status || null;
     } catch {
       return null;
     }
   }
 
-  async completeOAuth(sessionId: string, code: string): Promise<boolean> {
+  async completeOAuth(
+    sessionId: string,
+    code: string,
+  ): Promise<{ ok: boolean; data: any }> {
     try {
       const res = await this.rawRequest<any>({
         method: 'POST',
         url: `/v1/oauth/complete/${encodeURIComponent(sessionId)}`,
         data: { code },
       });
-      return !!res && res.ok === true;
-    } catch {
-      return false;
+      return { ok: !!res && res.ok === true, data: res };
+    } catch (error: any) {
+      return {
+        ok: false,
+        data: error?.response?.data ?? { message: error?.message || String(error) },
+      };
     }
   }
 

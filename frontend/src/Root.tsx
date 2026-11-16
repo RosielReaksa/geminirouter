@@ -5,10 +5,12 @@ import { LandingPage } from './components/marketing/LandingPage';
 import { ModelsPage } from './components/marketing/ModelsPage';
 import { PricingPage } from './components/marketing/PricingPage';
 import { DocsPage } from './components/marketing/DocsPage';
+import { HowItWorksPage } from './components/marketing/HowItWorksPage';
 import { HelpPage } from './components/marketing/HelpPage';
 import { LegalPage } from './components/marketing/LegalPage';
 import { LoginPage } from './components/marketing/LoginPage';
 import { NotFoundPage } from './components/marketing/NotFoundPage';
+import { LoadingScreen } from './components/LoadingScreen';
 import DashboardApp from './App';
 import { authApi } from './services/authApi';
 
@@ -27,6 +29,7 @@ const PublicRoutes: React.FC<{ pathname: string }> = ({ pathname }) => {
   const page = (() => {
     if (pathname === '/' || pathname === '') return <LandingPage />;
     if (pathname === '/models') return <ModelsPage />;
+    if (pathname === '/how-it-works') return <HowItWorksPage />;
     if (pathname === '/pricing') return <PricingPage />;
     if (pathname === '/docs') return <DocsPage />;
     if (pathname === '/help') return <HelpPage />;
@@ -91,14 +94,7 @@ export const Root: React.FC = () => {
 
   if (pathname.startsWith('/app')) {
     if (auth === 'checking') {
-      return (
-        <div className="mkt-body min-h-screen flex items-center justify-center">
-          <div className="flex items-center gap-2.5 text-[13px] text-[#7A736A]">
-            <span className="w-2 h-2 rounded-full bg-[#C25938] animate-pulse" />
-            Verifying session…
-          </div>
-        </div>
-      );
+      return <LoadingScreen title="Checking your session" detail="Warming up your private gateway…" />;
     }
     if (auth === 'anon') {
       // The redirect effect will move us to /login; render nothing meanwhile.

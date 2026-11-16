@@ -1,0 +1,39 @@
+NOTICE
+======
+
+This repository contains works under more than one license.
+
+1. FIRST-PARTY CODE
+-------------------
+The original code authored by Framecall -- including frontend/, server/,
+deploy/, docs/, scripts/, and root-level files -- is proprietary and
+licensed under the terms in the LICENSE file. All Rights Reserved.
+
+2. EXTERNAL CORE DEPENDENCY (NOT INCLUDED)
+------------------------------------------
+This repository does NOT contain AntigravityManager source code. That core
+is an external runtime dependency, installed and run separately, and is NOT
+covered by the Framecall LICENSE.
+
+  Name:    AntigravityManager
+  Author:  Draculabo
+  Source:  https://github.com/Draculabo/AntigravityManager
+  License: Creative Commons Attribution-NonCommercial-ShareAlike 4.0
+           International (CC BY-NC-SA 4.0)
+  License text: https://creativecommons.org/licenses/by-nc-sa/4.0/legalcode
+
+Because the core is not distributed with this repository, the Framecall
+conditions above apply only to Framecall's own code. If you install, modify,
+or redistribute the core, you do so under CC BY-NC-SA 4.0 and must comply
+with that license independently.
+
+NonCommercial notice: the core may not be used for commercial purposes as
+defined by CC BY-NC-SA 4.0.
+
+Attribution: this project interoperates with AntigravityManager by
+Draculabo. Respect that author's license when using or modifying the core.
+
+3. RUNTIME DEPENDENCIES
+-----------------------
+Third-party npm packages and system binaries retain their own licenses.
+See the package.json files in frontend/ and server/ for dependency names.

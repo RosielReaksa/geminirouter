@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily check for Antigravity core OAuth credential drift
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=24h
+Persistent=true
+Unit=geminirouter-core-creds.service
+
+[Install]
+WantedBy=timers.target

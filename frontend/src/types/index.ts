@@ -74,8 +74,11 @@ export interface GoogleAccount {
   quotas: ModelQuota[];
   isDefaultRouting: boolean;
   totalRequests24h: number;
+  usage24h?: { requests: number; tokens: number };
   hasValidationLink?: boolean;
   statusReason?: string;
+  coreStatus?: string;
+  refreshBlocked?: boolean;
   lastTestResult?: AccountTestResult;
 }
 
@@ -107,6 +110,11 @@ export interface GatewayStatus {
   totalAccountsCount: number;
   requestsLast24h: number;
   tokensLast24h: number;
+  requestsLast12h?: number;
+  errorsLast12h?: number;
+  errorsLast24h?: number;
+  requestVolume12h?: number[];
+  requestVolume12hWindowEnd?: string;
   averageLatencyMs: number | null;
   successRate: number | null; // percentage, e.g. 99.4
   activeBackingAccountEmail?: string | null;
@@ -135,6 +143,20 @@ export interface GatewayStatus {
   };
   version: string;
   healthy: boolean;
+  accountsNeedingReauth?: number;
+  coreCredentials?: {
+    checkedAt?: string;
+    drift?: boolean;
+    deployed?: { clientId?: string; fingerprint?: string };
+    upstream?: { clientId?: string; fingerprint?: string };
+    clientHealth?: {
+      checkedAt?: string;
+      state?: 'ok' | 'blocked' | 'unknown';
+      detail?: string;
+      httpStatus?: number;
+      errorCode?: string;
+    };
+  } | null;
 }
 
 export interface TrafficRecord {
@@ -145,12 +167,211 @@ export interface TrafficRecord {
   modelRequested: string; // e.g. "gemini-2.5-pro", "gemini-2.5-flash"
   modelRouted: string;
   backingAccountEmail: string;
+  /** Core account id that served the call. */
+  accountId?: string;
   status: number; // 200, 429, 500, etc.
   latencyMs: number;
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
   cachedTokens?: number;
+  /** completed | in_progress | auth_failed | internal_error */
+  outcome?: string;
+  /** Public IP this call left from (proxy or gateway host). */
+  egressIp?: string;
+  /** ISO 3166-1 alpha-2 country for `egressIp`. */
+  egressCountry?: string | null;
+  /** proxy = account's Webshare IP, direct = gateway host. */
+  egressVia?: 'proxy' | 'direct';
+  /** Which provider served the call. Undefined means the OAuth core pool. */
+  provider?: 'core' | 'gemini-api';
+  /** Named gateway client key that made the call. */
+  gatewayKeyId?: string;
+  gatewayKeyName?: string;
+}
+
+export interface CacheFamilyStats {
+  family: 'gemini' | 'claude' | 'gpt';
+  label: string;
+  requests: number;
+  inputTokens: number;
+  cachedTokens: number;
+  outputTokens: number;
+  reasoningTokens: number;
+  requestsWithCache: number;
+  hitRate: number;
+}
+
+export interface CacheStats {
+  available: boolean;
+  totalRequests: number;
+  totalInputTokens: number;
+  totalCachedTokens: number;
+  totalOutputTokens: number;
+  totalReasoningTokens: number;
+  requestsWithCache: number;
+  overallHitRate: number;
+  byModel: Array<{
+    model: string;
+    family: 'gemini' | 'claude' | 'gpt';
+    requests: number;
+    inputTokens: number;
+    cachedTokens: number;
+    outputTokens: number;
+    reasoningTokens: number;
+    requestsWithCache: number;
+    hitRate: number;
+  }>;
+  byFamily: CacheFamilyStats[];
+}
+
+export interface GeminiApiLimits {
+  rpm: number;
+  tpm: number;
+  rpd: number;
+}
+
+export type GeminiApiCooldownReason = 'daily' | 'rate' | 'error';
+
+export interface GeminiApiBucketUsage {
+  rpm: number;
+  tpm: number;
+  rpd: number;
+  limitRpm: number;
+  limitTpm: number;
+  limitRpd: number;
+  active: number;
+  cooldownUntil: number | null;
+  cooldownReason: GeminiApiCooldownReason | null;
+}
+
+export interface GeminiApiUsage {
+  requestsToday: number;
+  tokensToday: number;
+  rpm: number;
+  tpm: number;
+  active: number;
+  cooldownUntil: number | null;
+  cooldownReason: GeminiApiCooldownReason | null;
+  lastUsedAt?: string;
+}
+
+export interface GeminiApiKey {
+  id: string;
+  label: string;
+  maskedKey: string;
+  enabled: boolean;
+  createdAt: string;
+  lastUsedAt?: string;
+  usage: GeminiApiUsage;
+  models: Record<string, GeminiApiBucketUsage>;
+  /** Egress proxy assigned to this key, or null for direct. */
+  proxy?: { address: string; port: number; country: string | null } | null;
+}
+
+export interface GeminiApiProxyState {
+  enabled: boolean;
+  available: number;
+  hasApiKey: boolean;
+  assigned: number;
+  keysPerProxy: number;
+}
+
+export interface GeminiApiQueue {
+  depth: number;
+  active: number;
+  maxWaitMs: number;
+  maxConcurrentPerKey: number;
+  maxQueueSize: number;
+}
+
+export type GeminiApiSharedRouting = 'balanced' | 'keys' | 'accounts';
+
+export interface GeminiApiConfig {
+  models: string[];
+  limits: GeminiApiLimits;
+  queue: GeminiApiQueue;
+  proxy: GeminiApiProxyState;
+  keys: GeminiApiKey[];
+  /** Provider choice for the two shared flash-lite models. */
+  sharedRouting: GeminiApiSharedRouting;
+  added?: number;
+  skipped?: number;
+}
+
+export interface GeminiApiTestResult {
+  ok: boolean;
+  status?: number;
+  latencyMs: number;
+  sample?: string | null;
+  proxy?: { address: string; port: number; country: string | null } | null;
+  error?: string;
+}
+
+export interface ProxySyncResult {
+  ok: boolean;
+  /** Assignments that differed from the last successful push. */
+  changed: number;
+  applied: number;
+  failed: number;
+  errors: string[];
+  /** null when nothing changed and no reload was needed. */
+  reloaded: boolean | null;
+}
+
+export interface ProxyConfig {
+  enabled: boolean;
+  /** True when a Webshare API key is stored server-side. */
+  hasApiKey: boolean;
+  proxyCount: number;
+  accountCount: number;
+  lastFetchedAt: number;
+  fetchIntervalMs: number;
+  /** Last inventory refresh failure, cleared by the next successful refresh. */
+  lastError: string | null;
+  /** Present on POST /api/proxy/config: result of pushing assignments to the core. */
+  sync?: ProxySyncResult;
+  /** Present on POST /api/proxy/config when the save could not fully apply. */
+  error?: string;
+}
+
+export interface ProxyRefreshResult {
+  ok: boolean;
+  proxyCount: number;
+  changed?: number;
+  applied?: number;
+  failed?: number;
+  errors?: string[];
+  reloaded?: boolean | null;
+  error?: string;
+}
+
+export type ProxyHealthStatus = 'assigned' | 'cooling' | 'retired' | 'available';
+
+export interface ProxyListSummary {
+  enabled: boolean;
+  proxies: Array<{
+    address: string;
+    port: number;
+    country: string;
+    assignedTo: string | null;
+    status: ProxyHealthStatus;
+    /** Epoch ms when a cooling proxy becomes assignable again. */
+    quarantineUntil: number | null;
+  }>;
+}
+
+export interface GatewayApiKey {
+  id: string;
+  name: string;
+  maskedKey: string;
+  createdAt: string;
+  lastUsedAt?: string;
+}
+
+export interface GatewayApiKeysResponse {
+  masterKey: string;
+  keys: GatewayApiKey[];
 }
 
 export interface GatewayConfig {
@@ -187,6 +408,10 @@ export interface OAuthCompleteResponse {
   success: boolean;
   account?: GoogleAccount;
   error?: string;
+  message?: string;
+  email?: string;
+  alreadyConnected?: boolean;
+  code?: string;
 }
 
 export interface ModelInfo {
@@ -197,6 +422,44 @@ export interface ModelInfo {
   contextLength: number;
   maxOutputTokens: number;
   live: boolean;
+  availability?: ModelTestResult & { checkedAt: string };
+  availabilityHistory?: ModelAvailabilityHistory;
+}
+
+export interface ModelAvailabilityHistory {
+  windowStart: string;
+  windowEnd: string;
+  bucketMs: number;
+  buckets: Array<{
+    state: 'ok' | 'partial' | 'error' | 'empty';
+    requests: number;
+    successes: number;
+    failures: number;
+  }>;
+  totalRequests: number;
+  successfulRequests: number;
+  failedRequests: number;
+  availabilityPercent: number | null;
+}
+
+export type TrafficVolumeRange = '12h' | '24h' | '7d';
+
+export interface TrafficVolumeBucket {
+  from: string;
+  to: string;
+  requests: number;
+  errors: number;
+}
+
+export interface TrafficVolumeResponse {
+  range: TrafficVolumeRange;
+  available: boolean;
+  windowStart: string;
+  windowEnd: string;
+  bucketMs: number;
+  buckets: TrafficVolumeBucket[];
+  totalRequests: number;
+  totalErrors: number;
 }
 
 export interface ModelsResponse {
@@ -209,8 +472,38 @@ export interface ModelsResponse {
 export interface ModelTestResult {
   ok: boolean;
   model: string;
+  status?: 'working' | 'temporarily_unavailable' | 'expired' | 'needs_verification';
+  checkedAccounts?: number;
+  workingAccounts?: number;
   latencyMs: number;
   sample?: string;
   httpStatus?: number | null;
   error?: string;
+}
+
+export interface PlaygroundMedia {
+  kind: 'audio' | 'video';
+  mimeType: string;
+  format: string;
+  dataBase64: string;
+  filename: string;
+  sizeBytes: number;
+}
+
+export interface PlaygroundResult {
+  ok: boolean;
+  model: string;
+  response?: string;
+  latencyMs: number;
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    total_tokens?: number;
+  };
+  media?: { kind: 'audio' | 'video'; filename: string; sizeBytes: number };
+  chunks?: number;
+  timings?: { transcode_ms?: number; model_ms?: number; total_ms?: number };
+  note?: string;
+  error?: string;
+  httpStatus?: number | null;
 }
