@@ -243,15 +243,24 @@ const result = await response.json();
 console.log(result.transcript, result.translation);`}
               />
               <h3 className="mkt-display text-[20px] text-[#191714] mt-8 mb-2">
-                Timed dubbing · Chinese → Khmer
+                Timed dubbing · any language
               </h3>
               <p className="text-[14px] leading-relaxed text-[#4A453E]">
                 <code className="px-1.5 py-0.5 rounded bg-[#F0EBE3] text-[12.5px] font-mono-code text-[#A8462A]">
                   POST /v1/audio/dubbing
                 </code>{' '}
                 splits the recording, transcribes and translates each part, and returns dialogue
-                segments with absolute timestamps and a Khmer line for each one. It uses the same
-                upload path as transcriptions, so keep it on your server. The alias{' '}
+                segments with absolute timestamps and a dubbing line for each one.{' '}
+                <code className="px-1.5 py-0.5 rounded bg-[#F0EBE3] text-[12.5px] font-mono-code text-[#A8462A]">
+                  target_language
+                </code>{' '}
+                selects the dubbing language (any ISO code or language name; default{' '}
+                <code className="px-1.5 py-0.5 rounded bg-[#F0EBE3] text-[12.5px] font-mono-code text-[#A8462A]">
+                  km
+                </code>
+                ). The line is written only in that language — source-language words are not left
+                in it. It uses the same upload path as transcriptions, so keep it on your server.
+                The alias{' '}
                 <code className="px-1.5 py-0.5 rounded bg-[#F0EBE3] text-[12.5px] font-mono-code text-[#A8462A]">
                   /v1/media/dubbing
                 </code>{' '}
@@ -262,7 +271,7 @@ console.log(result.transcript, result.translation);`}
                 code={`const form = new FormData();
 form.append("file", new Blob([await fs.readFile(audioPath)]), "episode.mp3");
 form.append("source_language", "zh");
-form.append("target_language", "km");
+form.append("target_language", "en"); // any ISO code; default km
 form.append("response_format", "array"); // "json" adds chunk + usage metadata
 
 const response = await fetch("${origin}/v1/audio/dubbing", {
@@ -287,17 +296,20 @@ for (const line of segments) {
     "speaker_gender": "female",
     "vocal_timbre": "clear, friendly, welcoming voice",
     "character_role": "narrator",
-    "original_transcript": "Hello and welcome to Duber.",
-    "khmer_dubbing": "សួស្តី និងសូមស្វាគមន៍មកកាន់ Duber។"
+    "original_transcript": "你好，欢迎来到 Duber。",
+    "khmer_dubbing": "Hello and welcome to Duber."
   }
 ]`}
               />
               <div className="rounded-xl border border-[#E4DED4] bg-[#FBF9F5] p-4 text-[12.5px] leading-relaxed text-[#7A736A] space-y-2">
                 <p>
                   Defaults are <code>source_language=zh</code>, <code>target_language=km</code>,
-                  and a 5-minute chunk. Override them with <code>chunk_seconds</code> (up to 1800)
-                  and <code>model</code>; a caller <code>prompt</code> replaces the built-in
-                  instructions, but the JSON timing contract is always appended. Output budget
+                  and a 5-minute chunk. <code>target_language</code> accepts any ISO code or
+                  language name (<code>en</code>, <code>th</code>, <code>ja</code>, <code>es</code>,{' '}
+                  <code>ar</code>, …); the dub line is written only in that language. Override the
+                  defaults with <code>chunk_seconds</code> (up to 1800) and <code>model</code>; a
+                  caller <code>prompt</code> replaces the built-in instructions, but the JSON timing
+                  contract is always appended. Output budget
                   follows the chunk length: 2 min → 8,192 tokens, 5 min → 24,576, 10 min+ → 65,535.
                   Reasoning models such as <code>gemini-3.8-flash-high</code> use 120-second chunks;
                   the <code>-lite</code> models use 60-second chunks. Both get a 40,960-token floor
@@ -305,8 +317,8 @@ for (const line of segments) {
                 </p>
                 <p>
                   Timestamps are <code>MM:SS.S</code> and already shifted to the recording start,
-                  so chunk offsets can be used directly. Khmer politeness particles are kept per
-                  speaker: male <span className="text-[#4A453E] font-medium">បាទ</span>, female{' '}
+                  so chunk offsets can be used directly. For Khmer, politeness particles are kept
+                  per speaker: male <span className="text-[#4A453E] font-medium">បាទ</span>, female{' '}
                   <span className="text-[#4A453E] font-medium">ចាស</span>. Each chunk&apos;s audible
                   speech is measured; an empty or implausibly short script is retried once and then
                   rejected with a JSON <code>partial_script</code> error instead of silently dropping
@@ -356,7 +368,8 @@ const translatedDialogue = result.choices?.[0]?.message?.content;`}
                 </p>
                 <p>
                   Chat completions return text such as a transcript or translation.
-                  <code> /v1/audio/dubbing</code> returns the timed Khmer lines directly. Turning
+                  <code> /v1/audio/dubbing</code> returns the timed dubbing lines in the target
+                  language directly. Turning
                   those lines into audible speech and muxing them back into the video still happens
                   in the dubbing app.
                 </p>

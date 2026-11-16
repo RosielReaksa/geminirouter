@@ -297,15 +297,21 @@ configs route `/v1/audio/*` to `127.0.0.1:3000` (bridge) and everything else
 under `/v1` to the core. If you use a custom reverse proxy, add the same rule and
 raise the request-body and response timeouts for this path.
 
-## Timed dubbing endpoint (Chinese → Khmer by default)
+## Timed dubbing endpoint (any target language, Khmer by default)
 
 `POST /v1/audio/dubbing` is the server-side dubbing pipeline. It accepts the
 same multipart, raw-binary, and JSON/base64 uploads as the transcription route,
 splits the recording into safe chunks, and runs **two Gemini-native
 `:generateContent` calls per chunk** — a multimodal transcription pass and a
-text-only Khmer adaptation pass (see *Two-pass dubbing* below). The returned
-timed segments are shifted from chunk-local time onto the absolute recording
-timeline.
+text-only adaptation pass in the target language (see *Two-pass dubbing*
+below). The returned timed segments are shifted from chunk-local time onto the
+absolute recording timeline.
+
+`target_language` selects the dubbing language. The adaptation prompt, output
+contract, JSON schema description, retry text, speaking-rate budget and
+per-cue character ceiling are all chosen from that language, and the validator
+requires the target script while rejecting source-language letters. The output
+field name stays `khmer_dubbing` for compatibility with existing callers.
 
 The endpoint returns the **text script only**. TTS, duration fitting, stem
 mixing, video muxing and finished-media storage belong to the dubbing product
@@ -322,14 +328,15 @@ The route reuses the transcription upload parsers: multipart `file`,
 `Content-Type: audio/*` raw body with query metadata, or JSON with
 `audio_base64`. Options:
 
-- `prompt` — optional replacement for the **Khmer adaptation** instruction.
+- `prompt` — optional replacement for the **adaptation** instruction.
   Transcription always uses the built-in precision-transcription prompt; this
-  field customises how the transcript is written in Khmer. The output contract
-  and the transcript payload are always appended.
-- `glossary` — optional glossary text. It is appended to the Khmer adaptation
+  field customises how the transcript is written in the target language. The
+  output contract and the transcript payload are always appended.
+- `glossary` — optional glossary text. It is appended to the adaptation
   prompt so names and fixed terms are translated consistently across chunks.
 - `source_language` — default `zh`.
-- `target_language` — default `km`.
+- `target_language` — default `km`. Any ISO code or language name (`en`, `th`,
+  `ja`, `es`, `ar`, …). The dub line is written only in that language.
 - `model` — defaults to `MEDIA_DEFAULT_MODEL` or `gemini-3.5-flash-lite`.
 - `chunk_seconds` — 60–1800 seconds; default `300` (five minutes). The server
   also shrinks it automatically if a chunk would exceed the core's audio limit.
@@ -373,7 +380,7 @@ Each chunk is answered by two sequential calls instead of one:
 | Pass | Input | Instruction | Temperature | Output |
 |---|---|---|---|---|
 | 1. Transcription | chunk audio (`audio/mp3`) | `TRANSCRIPT_SYSTEM_PROMPT` — verbatim, one short clause per cue (1.0–2.2 s), tight non-overlapping timestamps, speaker gender/timbre/role | `0.1` | transcript array (no Khmer) |
-| 2. Khmer adaptation | transcript JSON only | `KHMER_DUB_SYSTEM_PROMPT` — 5.5 Khmer syllables/sec, spoken Khmer, glossary/continuity | `0.25` | same array plus `khmer_dubbing` |
+| 2. Language adaptation | transcript JSON only | Khmer uses `KHMER_DUB_SYSTEM_PROMPT` (5.5 syllables/sec); other targets use the language-aware prompt (target script only, per-language rate budget, glossary/continuity) | `0.25` | same array plus `khmer_dubbing` |
 
 The split exists because one call was doing four jobs at once and losing some
 of them: long 3–4 s cues overflowed the TTS window, and forcing translation
@@ -552,8 +559,8 @@ synthesizer never receives an unusable line:
 | Limit | Value | Behaviour |
 |---|---|---|
 | Cue duration | 4.0 s | Longer cues are split into equal pieces along the original window. |
-| Khmer text length | 70 characters | A fragment over the limit fails the chunk. |
-| Script | Khmer only | Latin, CJK, Thai and Arabic numerals fail the chunk. |
+| Text length | Khmer 70; Latin/Cyrillic 100; CJK/Japanese/Korean 60; Thai/Lao/Myanmar/Arabic/Hebrew/Devanagari-family 80; unknown 90 | A fragment over the limit fails the chunk. |
+| Script | Target language only | Khmer keeps its strict rule. Other targets require at least one target-script letter and reject source-script letters; unknown targets fall back to non-empty. |
 
 Cue length is measured on `khmer_dubbing` only; `original_transcript` keeps the
 verbatim source line. Splitting preserves the parent window: the fragments of a

@@ -28,6 +28,7 @@ import {
   geminiApiBaseUrl,
 } from './geminiApiPool.js';
 import { handleGeminiApiNativeRequest, handleGeminiApiRequest } from './geminiApiProxy.js';
+import { handleGeminiApiResponsesRequest } from './responsesProxy.js';
 import {
   canonicalModelId,
   canonicalizeModelEntries,
@@ -617,6 +618,16 @@ export async function createServer(): Promise<{
 
     const handledByApiKeys = await handleGeminiApiRequest(request, reply, apiKeyOptions);
     if (handledByApiKeys) return;
+
+    // Responses-API clients (ZCode's `openai-responses` provider) get the same
+    // key-pool path as chat; anything untranslatable falls through to the
+    // account pool unchanged.
+    const handledByResponsesKeys = await handleGeminiApiResponsesRequest(
+      request,
+      reply,
+      apiKeyOptions,
+    );
+    if (handledByResponsesKeys) return;
 
     // The dubbing pipeline calls the Gemini-native route, not the
     // OpenAI-compatible one. Without this branch that traffic could never use
