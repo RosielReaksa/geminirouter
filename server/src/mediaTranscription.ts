@@ -3816,7 +3816,7 @@ async function requestModelJson(input: {
 
   let schemaEnabled = true;
   let lastError: MediaError | null = null;
-  let keyFallbackTried = false;
+  let accountFallbackTried = false;
   const attempts = input.config.maxRetries + 1;
 
   for (let attempt = 0; attempt < attempts; attempt++) {
@@ -3833,23 +3833,28 @@ async function requestModelJson(input: {
     };
 
     try {
+      // Keys first. The AI Studio key pool fails over key-to-key in
+      // milliseconds; the OAuth account pool's 429 path retries internally for
+      // a minute before surfacing, so it must be the fallback, not the default.
+      // The native handler honours x-geminirouter-routing for one request, and
+      // ignores it for a model the key pool does not serve (account-only ids).
       let response = await fetchUpstreamWithKeys(
         url,
         payload,
         input.deps.getGatewayApiKeys(),
         input.signal,
         input.config.chunkTimeoutMs,
+        { 'x-geminirouter-routing': 'keys' },
       );
 
       if (
         !response.ok &&
-        !keyFallbackTried &&
+        !accountFallbackTried &&
         (response.status === 429 || response.status === 503)
       ) {
-        // Every OAuth account is unavailable or over quota. Retry the exact
-        // same Gemini request on the AI Studio key pool when one is configured;
-        // the native handler honours x-geminirouter-routing for one request.
-        keyFallbackTried = true;
+        // The key pool is exhausted. Fall back to the OAuth account pool for
+        // this one request; the next attempt starts on keys again.
+        accountFallbackTried = true;
         await response.body?.cancel().catch(() => undefined);
         response = await fetchUpstreamWithKeys(
           url,
@@ -3857,7 +3862,6 @@ async function requestModelJson(input: {
           input.deps.getGatewayApiKeys(),
           input.signal,
           input.config.chunkTimeoutMs,
-          { 'x-geminirouter-routing': 'keys' },
         );
       }
 
