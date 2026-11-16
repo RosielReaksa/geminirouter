@@ -23,6 +23,8 @@ export interface PublicModel {
   provider: string;
   contextLength: number;
   maxOutputTokens: number;
+  /** chat models have context/output limits; speech and image models do not. */
+  kind?: 'chat' | 'tts' | 'image';
 }
 
 export interface PublicModelsResponse {

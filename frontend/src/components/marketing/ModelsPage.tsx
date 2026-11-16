@@ -9,6 +9,8 @@ const providerTone = (provider: string): { bg: string; text: string; border: str
     return { bg: 'bg-[#F5E7E0]', text: 'text-[#A8462A]', border: 'border-[#EBD3C7]' };
   if (provider.includes('OpenAI'))
     return { bg: 'bg-[#EEF5F1]', text: 'text-[#2F5241]', border: 'border-[#D8E3DB]' };
+  if (provider.includes('Edge') || provider.includes('Speech'))
+    return { bg: 'bg-[#F3EEF8]', text: 'text-[#6B4A8C]', border: 'border-[#E4D9EF]' };
   return { bg: 'bg-[#EDF0F7]', text: 'text-[#3B4A6B]', border: 'border-[#DCE2EF]' };
 };
 
@@ -16,6 +18,7 @@ const shortProvider = (p: string): string => {
   if (p.includes('Claude')) return 'Anthropic';
   if (p.includes('OpenAI')) return 'OpenAI';
   if (p.includes('Gemini')) return 'Google';
+  if (p.includes('Edge') || p.includes('Speech')) return 'Speech';
   return p;
 };
 
@@ -172,8 +175,19 @@ export const ModelsPage: React.FC = () => {
                             </span>
                           </div>
                           <div className="mt-3 pt-3 border-t border-[#F0EBE3] flex items-center justify-between text-[11px] text-[#A39C92] font-mono-code">
-                            <span>{formatContext(m.contextLength)}</span>
-                            <span>{m.maxOutputTokens ? `${Math.round(m.maxOutputTokens / 1000)}K out` : '—'}</span>
+                            {m.kind === 'tts' ? (
+                              <>
+                                <span>speech output</span>
+                                <span>100+ voices</span>
+                              </>
+                            ) : (
+                              <>
+                                <span>{formatContext(m.contextLength)}</span>
+                                <span>
+                                  {m.maxOutputTokens ? `${Math.round(m.maxOutputTokens / 1000)}K out` : '—'}
+                                </span>
+                              </>
+                            )}
                           </div>
                         </div>
                       </Reveal>

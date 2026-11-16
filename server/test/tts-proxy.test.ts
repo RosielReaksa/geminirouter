@@ -206,6 +206,16 @@ test('GET /v1/audio/voices lists the catalogue', async () => {
   assert.equal(body.voices[0].id, 'en-US-JennyNeural');
 });
 
+test('the TTS model is advertised in the public catalog', async () => {
+  const res = await fetch(`http://127.0.0.1:${bridgePort}/api/public/models`);
+  assert.equal(res.status, 200);
+  const body: any = await res.json();
+  const tts = body.models.find((m: any) => m.id === 'tts-1');
+  assert.ok(tts, 'tts-1 should be listed');
+  assert.equal(tts.kind, 'tts');
+  assert.equal(tts.provider, 'Edge TTS');
+});
+
 test('the TTS route is served by the bridge, not the account pool', async () => {
   calls.length = 0;
   const res = await speech({ input: 'route check', voice: 'nova', language: 'en' });

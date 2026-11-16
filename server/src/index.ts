@@ -691,6 +691,17 @@ export async function createServer(): Promise<{
             }
           }
         }
+        // Speech is served by the bridge's internal TTS service, not the core.
+        for (const entry of PUBLIC_TTS_MODELS) {
+          if (!models.some((model: any) => model?.id === entry.id)) {
+            models.push({
+              id: entry.id,
+              object: 'model',
+              created: Math.floor(Date.now() / 1000),
+              owned_by: 'edge-tts',
+            });
+          }
+        }
         return reply.code(upstream.status).send({
           ...data,
           data: models,
@@ -799,6 +810,24 @@ export async function createServer(): Promise<{
     };
   });
 
+  // Speech models advertised by the public catalog. Rendered by the internal
+  // Edge TTS service, so these are listed only while that service is healthy.
+  const PUBLIC_TTS_MODELS: Array<{
+    id: string;
+    name: string;
+    provider: string;
+    contextLength: number;
+    maxOutputTokens: number;
+  }> = [
+    {
+      id: 'tts-1',
+      name: 'TTS-1 · Edge neural voices',
+      provider: 'Edge TTS',
+      contextLength: 0,
+      maxOutputTokens: 0,
+    },
+  ];
+
   app.get('/api/public/models', async () => {
     // The public site lists every Gemini model the gateway can serve right now:
     // the AI Studio key-pool families plus the account-pool models verified with
@@ -810,6 +839,7 @@ export async function createServer(): Promise<{
       provider: string;
       contextLength: number;
       maxOutputTokens: number;
+      kind: 'chat' | 'tts' | 'image';
     }> = [];
     for (const id of [...GEMINI_API_MODELS, ...ACCOUNT_POOL_PUBLIC_MODELS]) {
       if (seen.has(id)) continue;
@@ -821,8 +851,18 @@ export async function createServer(): Promise<{
         provider: 'Google Gemini',
         contextLength: meta?.contextLength || 1048576,
         maxOutputTokens: meta?.maxOutputTokens || 65535,
+        kind: 'chat',
       });
     }
+
+    // Speech is served by the internal TTS service. Advertised like any other
+    // route: a caller gets a clear 502 if the renderer is down.
+    for (const entry of PUBLIC_TTS_MODELS) {
+      if (seen.has(entry.id)) continue;
+      seen.add(entry.id);
+      models.push({ ...entry, kind: 'tts' });
+    }
+
     const accountsUsable = store
       .getAccounts()
       .some((account) => account.status !== 'error');

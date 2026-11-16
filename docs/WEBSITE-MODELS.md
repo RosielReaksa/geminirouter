@@ -3,17 +3,26 @@
 Which model ids the dashboard, the Playground and the public marketing site
 offer, and how each list is built.
 
-## Three surfaces, all Gemini-only
+## Surfaces
 
 | Surface | Source | Purpose |
 |---|---|---|
-| `GET /v1/models` | Core list, canonicalised, filtered to Gemini | Public API contract. The bridge appends the AI Studio key-pool models. |
+| `GET /v1/models` | Core list, canonicalised, filtered to Gemini, plus the key-pool models and `tts-1` | Public API contract. |
 | `GET /api/models` | Core list merged with `VERIFIED_WEBSITE_MODEL_IDS`, dead ids hidden | Dashboard and Playground. |
-| `GET /api/public/models` | `GEMINI_API_MODELS` + `ACCOUNT_POOL_PUBLIC_MODELS` | Marketing model table. |
+| `GET /api/public/models` | `GEMINI_API_MODELS` + `ACCOUNT_POOL_PUBLIC_MODELS` + `PUBLIC_TTS_MODELS` | Marketing model table and landing marquee. |
 
-Anthropic and OpenAI-compatible ids are never offered on any surface; the
+Anthropic and OpenAI-compatible chat ids are never offered on any surface; the
 bridge rejects them at the `/v1` gate and the playground/test endpoints reject
 them explicitly.
+
+## Speech
+
+`PUBLIC_TTS_MODELS` (`server/src/index.ts`) advertises `tts-1` — "TTS-1 · Edge
+neural voices" from provider `Edge TTS` — on `/v1/models` and
+`/api/public/models`. It is served by the internal `tts-server`, not the core,
+so it carries `kind: 'tts'` and no context/output limits; the marketing page
+renders it under a **Speech** group with `speech output` / `100+ voices` instead
+of a context window. See [TTS_API.md](./TTS_API.md).
 
 ## The two backends and their model lists
 
