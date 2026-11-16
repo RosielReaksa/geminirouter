@@ -176,6 +176,8 @@ export interface AudioProbe {
   durationSeconds: number;
   formatName?: string;
   codec?: string;
+  /** True when the file carries a video stream (Gemini can then see speakers). */
+  hasVideo: boolean;
 }
 
 export interface AudioChunk {
@@ -185,6 +187,8 @@ export interface AudioChunk {
   endSeconds: number;
   durationSeconds: number;
   sizeBytes: number;
+  /** 'video/mp4' when the chunk keeps the picture for Gemini, else 'audio/mp3'. */
+  mimeType: string;
 }
 
 interface ChunkResult {
@@ -1521,8 +1525,6 @@ export async function probeAudio(filePath: string, config: MediaConfig, signal: 
     [
       '-v',
       'error',
-      '-select_streams',
-      'a:0',
       '-show_entries',
       'stream=codec_type,codec_name,duration',
       '-show_entries',
@@ -1553,10 +1555,15 @@ export async function probeAudio(filePath: string, config: MediaConfig, signal: 
     throw new MediaError(422, 'unknown_duration', 'Could not determine the duration of the uploaded media.');
   }
 
+  const hasVideo = Array.isArray(parsed.streams)
+    ? parsed.streams.some((stream: any) => stream?.codec_type === 'video')
+    : false;
+
   return {
     durationSeconds,
     formatName: typeof parsed.format?.format_name === 'string' ? parsed.format.format_name : undefined,
     codec: typeof audioStream.codec_name === 'string' ? audioStream.codec_name : undefined,
+    hasVideo,
   };
 }
 
@@ -1567,83 +1574,150 @@ export async function splitAudio(
   chunkSeconds: number,
   config: MediaConfig,
   signal: AbortSignal,
+  videoNative = false,
 ): Promise<AudioChunk[]> {
   const chunkDir = path.join(tempDir, 'chunks');
   fs.mkdirSync(chunkDir, { recursive: true });
+
+  // Video-native chunks keep the picture so Gemini can see who is on screen
+  // while it listens; audio-only chunks stay the default for audio uploads.
+  const mediaExt = videoNative ? 'mp4' : 'mp3';
+  const chunkPattern = videoNative ? 'chunk-%04d.mp4' : 'chunk-%04d.mp3';
+  const maxChunkBytes = videoNative ? 13 * 1024 * 1024 : 14.5 * 1024 * 1024;
 
   let effectiveSeconds = chunkSeconds;
   let files: string[] = [];
 
   for (let attempt = 0; attempt < 3; attempt++) {
     for (const existing of fs.readdirSync(chunkDir)) {
-      if (/^chunk-\d+\.mp3$/i.test(existing)) {
+      if (/^chunk-\d+\.(mp3|mp4)$/i.test(existing)) {
         fs.rmSync(path.join(chunkDir, existing), { force: true });
       }
     }
 
     if (durationSeconds <= effectiveSeconds + 1) {
-      const output = path.join(chunkDir, 'chunk-0000.mp3');
+      const output = path.join(chunkDir, `chunk-0000.${mediaExt}`);
       await runProcess(
         config.ffmpegPath,
-        [
-          '-hide_banner',
-          '-loglevel',
-          'error',
-          '-y',
-          '-i',
-          sourcePath,
-          '-vn',
-          '-map',
-          '0:a:0',
-          '-ac',
-          '1',
-          '-ar',
-          '16000',
-          '-b:a',
-          config.audioBitrate,
-          '-write_xing',
-          '0',
-          output,
-        ],
+        videoNative
+          ? [
+              '-hide_banner',
+              '-loglevel',
+              'error',
+              '-y',
+              '-i',
+              sourcePath,
+              '-map',
+              '0:v:0',
+              '-map',
+              '0:a:0',
+              '-vf',
+              'scale=-2:480',
+              '-c:v',
+              'libx264',
+              '-preset',
+              'veryfast',
+              '-crf',
+              '30',
+              '-c:a',
+              'aac',
+              '-b:a',
+              '48k',
+              output,
+            ]
+          : [
+              '-hide_banner',
+              '-loglevel',
+              'error',
+              '-y',
+              '-i',
+              sourcePath,
+              '-vn',
+              '-map',
+              '0:a:0',
+              '-ac',
+              '1',
+              '-ar',
+              '16000',
+              '-b:a',
+              config.audioBitrate,
+              '-write_xing',
+              '0',
+              output,
+            ],
         AbortSignal.any([signal, AbortSignal.timeout(config.transcodeTimeoutMs)]),
       );
       files = [output];
     } else {
       await runProcess(
         config.ffmpegPath,
-        [
-          '-hide_banner',
-          '-loglevel',
-          'error',
-          '-y',
-          '-i',
-          sourcePath,
-          '-vn',
-          '-map',
-          '0:a:0',
-          '-ac',
-          '1',
-          '-ar',
-          '16000',
-          '-b:a',
-          config.audioBitrate,
-          '-write_xing',
-          '0',
-          '-f',
-          'segment',
-          '-segment_format',
-          'mp3',
-          '-segment_time',
-          String(effectiveSeconds),
-          '-reset_timestamps',
-          '1',
-          path.join(chunkDir, 'chunk-%04d.mp3'),
-        ],
+        videoNative
+          ? [
+              '-hide_banner',
+              '-loglevel',
+              'error',
+              '-y',
+              '-i',
+              sourcePath,
+              '-map',
+              '0:v:0',
+              '-map',
+              '0:a:0',
+              '-vf',
+              'scale=-2:480',
+              '-c:v',
+              'libx264',
+              '-preset',
+              'veryfast',
+              '-crf',
+              '30',
+              '-c:a',
+              'aac',
+              '-b:a',
+              '48k',
+              '-f',
+              'segment',
+              '-segment_format',
+              'mp4',
+              '-segment_time',
+              String(effectiveSeconds),
+              '-reset_timestamps',
+              '1',
+              path.join(chunkDir, 'chunk-%04d.mp4'),
+            ]
+          : [
+              '-hide_banner',
+              '-loglevel',
+              'error',
+              '-y',
+              '-i',
+              sourcePath,
+              '-vn',
+              '-map',
+              '0:a:0',
+              '-ac',
+              '1',
+              '-ar',
+              '16000',
+              '-b:a',
+              config.audioBitrate,
+              '-write_xing',
+              '0',
+              '-f',
+              'segment',
+              '-segment_format',
+              'mp3',
+              '-segment_time',
+              String(effectiveSeconds),
+              '-reset_timestamps',
+              '1',
+              path.join(chunkDir, 'chunk-%04d.mp3'),
+            ],
         AbortSignal.any([signal, AbortSignal.timeout(config.transcodeTimeoutMs)]),
       );
       files = fs
         .readdirSync(chunkDir)
-        .filter((name) => /^chunk-\d+\.mp3$/i.test(name))
+        .filter((name) => name.toLowerCase().startsWith('chunk-') && name.toLowerCase().endsWith('.' + mediaExt))
         .sort((a, b) => a.localeCompare(b))
         .map((name) => path.join(chunkDir, name));
     }
@@ -1656,7 +1730,7 @@ export async function splitAudio(
     if (files.length === 0) {
       throw new MediaError(500, 'chunking_failed', 'FFmpeg did not produce any audio chunks.');
     }
-    const tooLarge = files.some((file) => fs.statSync(file).size > 14.5 * 1024 * 1024);
+    const tooLarge = files.some((file) => fs.statSync(file).size > maxChunkBytes);
     if (!tooLarge) break;
     effectiveSeconds = Math.max(60, Math.floor(effectiveSeconds / 2));
     if (attempt === 2) {
@@ -1699,6 +1773,7 @@ export async function splitAudio(
       endSeconds,
       durationSeconds: chunk.durationSeconds,
       sizeBytes: chunk.sizeBytes,
+      mimeType: videoNative ? 'video/mp4' : 'audio/mp3',
     });
     cursor = startSeconds + chunk.durationSeconds;
   }
@@ -3475,14 +3550,28 @@ async function handleAudioDubbing(
       );
     }
 
+    // Video uploads go to Gemini with the picture attached so it can see who
+    // is speaking while it listens; audio uploads keep the audio-only path.
+    // MEDIA_DUB_VIDEO_NATIVE=0 forces the audio-only path everywhere.
+    const videoNative =
+      probe.hasVideo &&
+      process.env.MEDIA_DUB_VIDEO_NATIVE !== '0';
+    const chunkSecondsForSplit = videoNative
+      ? Math.min(
+          effectiveChunkSeconds,
+          Number(process.env.MEDIA_DUB_VIDEO_CHUNK_SECONDS) || 120,
+        )
+      : effectiveChunkSeconds;
+
     const transcodeStarted = Date.now();
     const chunks = await splitAudio(
       resolved.filePath,
       resolved.tempDir,
       probe.durationSeconds,
-      effectiveChunkSeconds,
+      chunkSecondsForSplit,
       config,
       controller.signal,
+      videoNative,
     );
     const transcodeMs = Date.now() - transcodeStarted;
 
@@ -3796,6 +3885,7 @@ async function requestModelJson(input: {
   phase: DubbingPhase;
   prompt: string;
   audioBase64?: string;
+  mediaMime?: string;
   temperature: number;
   maxOutputTokens: number;
   schema: Record<string, unknown>;
@@ -3811,7 +3901,9 @@ async function requestModelJson(input: {
   )}:generateContent`;
   const parts: Array<Record<string, unknown>> = [{ text: input.prompt }];
   if (input.audioBase64) {
-    parts.push({ inline_data: { mime_type: 'audio/mp3', data: input.audioBase64 } });
+    parts.push({
+      inline_data: { mime_type: input.mediaMime ?? 'audio/mp3', data: input.audioBase64 },
+    });
   }
 
   let schemaEnabled = true;
@@ -4052,6 +4144,7 @@ async function transcribeChunk(
   log: FastifyRequest['log'],
 ): Promise<TranscriptChunkCall> {
   const audioBase64 = fs.readFileSync(chunk.filePath).toString('base64');
+  const mediaMime = chunk.mimeType ?? 'audio/mp3';
   const temperature = dubbingPhaseTemperature(options, 'transcript');
   let activePrompt = prompt;
   let retried = false;
@@ -4062,6 +4155,7 @@ async function transcribeChunk(
       phase: 'transcription',
       prompt: activePrompt,
       audioBase64,
+      mediaMime,
       temperature,
       maxOutputTokens,
       schema: TRANSCRIPT_RESPONSE_SCHEMA,

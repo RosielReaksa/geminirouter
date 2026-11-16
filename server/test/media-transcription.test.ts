@@ -1476,6 +1476,55 @@ test('two-pass prompts carry their own contract, continuity and payload', () => 
 });
 
 test(
+  'dubbing route sends video uploads to Gemini with the picture attached',
+  { skip: !hasFfmpeg },
+  async () => {
+    geminiRequests.length = 0;
+    modelRequests.length = 0;
+    modelAuthHeaders.length = 0;
+    const videoOut = path.join(os.tmpdir(), `dub-test-${Date.now()}-${Math.random().toString(16).slice(2)}.mp4`);
+
+    const generated = spawnSync(
+      'ffmpeg',
+      [
+        '-hide_banner', '-loglevel', 'error', '-y',
+        '-f', 'lavfi', '-i', 'testsrc=size=160x120:duration=2:rate=10',
+        '-f', 'lavfi', '-i', 'sine=frequency=440:duration=2',
+        '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p',
+        '-c:a', 'aac', '-shortest',
+        '-f', 'mp4', videoOut,
+      ],
+      { stdio: 'ignore' },
+    );
+    assert.equal(generated.status, 0, 'ffmpeg must render the test video');
+    const mp4 = fs.readFileSync(videoOut);
+    assert.ok(mp4.length > 0);
+
+    const form = new FormData();
+    form.append('file', new Blob([mp4], { type: 'video/mp4' }), 'episode.mp4');
+    form.append('model', 'gemini-3.5-flash-lite');
+    form.append('chunk_seconds', '60');
+    form.append('mode', 'fast');
+    form.append('source_language', 'zh');
+    form.append('target_language', 'km');
+
+    const response = await fetch(`http://127.0.0.1:${bridgePort}/v1/audio/dubbing`, {
+      method: 'POST',
+      headers: authHeaders(),
+      body: form,
+    });
+
+    const rawBody = await response.text();
+    assert.equal(response.status, 200, rawBody);
+    const firstGemini = geminiRequests[0];
+    const parts = firstGemini.contents[0].parts;
+    const media = parts.find((part: any) => part.inline_data);
+    assert.equal(media.inline_data.mime_type, 'video/mp4', 'the picture must reach Gemini, not just the audio');
+    assert.ok(Buffer.from(media.inline_data.data, 'base64').length > 0);
+  },
+);
+
+test(
   'dubbing route chunks audio, applies token caps and offsets timestamps',
   { skip: !hasFfmpeg },
   async () => {
