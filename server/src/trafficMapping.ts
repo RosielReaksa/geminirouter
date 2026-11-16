@@ -21,10 +21,14 @@ export function mergeTrafficRecords(
 
   const seen = new Set<string>();
   const merged: TrafficRecord[] = [];
-  for (const record of [
-    ...coreRecords,
-    ...localRecords.filter((entry) => entry.provider === 'gemini-api'),
-  ]) {
+  // Bridge-local records that never reach the core audit must be merged in:
+  // AI Studio key calls (`gemini-api`) and TTS calls (`tts`) both bypass the
+  // core. Local rows attributed to the core pool are duplicates of the audit
+  // stream and stay excluded.
+  const localOnly = localRecords.filter(
+    (entry) => entry.provider === 'gemini-api' || entry.provider === 'tts',
+  );
+  for (const record of [...coreRecords, ...localOnly]) {
     if (seen.has(record.id)) continue;
     seen.add(record.id);
     merged.push(record);

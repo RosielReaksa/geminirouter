@@ -184,10 +184,16 @@ export interface TrafficRecord {
   /** proxy = account's Webshare IP, direct = gateway host. */
   egressVia?: 'proxy' | 'direct';
   /** Which provider served the call. Undefined means the OAuth core pool. */
-  provider?: 'core' | 'gemini-api';
+  provider?: 'core' | 'gemini-api' | 'tts';
   /** Named gateway client key that made the call. */
   gatewayKeyId?: string;
   gatewayKeyName?: string;
+  /** TTS: the Edge voice that spoke. */
+  voice?: string;
+  /** TTS: characters synthesized (the meter). */
+  inputCharacters?: number;
+  /** TTS: audio duration in seconds, when the engine reported it. */
+  outputSeconds?: number;
 }
 
 export interface CacheFamilyStats {

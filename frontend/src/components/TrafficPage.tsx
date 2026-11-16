@@ -8,6 +8,7 @@ import {
   Loader2,
   X,
   KeyRound,
+  Volume2,
 } from 'lucide-react';
 import { TrafficRecord } from '../types';
 import { api } from '../services/api';
@@ -44,6 +45,9 @@ const shortAccountLabel = (value: string): string => {
 const servedByLabel = (record: TrafficRecord): string => {
   if (record.provider === 'gemini-api') {
     return record.backingAccountEmail.replace(/^Gemini API\s*[·•-]\s*/i, '');
+  }
+  if (record.provider === 'tts') {
+    return record.voice || 'Edge TTS';
   }
   return shortAccountLabel(record.backingAccountEmail);
 };
@@ -98,6 +102,7 @@ const EgressCell: React.FC<{ record: TrafficRecord }> = ({ record }) => {
 export const TrafficPage: React.FC<TrafficPageProps> = ({ traffic, onReady }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | '200' | 'error'>('all');
+  const [providerFilter, setProviderFilter] = useState<'all' | 'chat' | 'tts'>('all');
   const [timeRange, setTimeRange] = useState<TrafficTimeRange | null>(readTrafficTimeRange);
   const [rangeTraffic, setRangeTraffic] = useState<TrafficRecord[]>([]);
   const [rangeLoading, setRangeLoading] = useState(() => Boolean(readTrafficTimeRange()));
@@ -185,6 +190,7 @@ export const TrafficPage: React.FC<TrafficPageProps> = ({ traffic, onReady }) =>
       t.modelRequested.toLowerCase().includes(searchTerm.toLowerCase()) ||
       t.modelRouted.toLowerCase().includes(searchTerm.toLowerCase()) ||
       t.backingAccountEmail.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      (t.voice || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
       (t.gatewayKeyName || '').toLowerCase().includes(searchTerm.toLowerCase());
 
     const matchesStatus =
@@ -194,7 +200,14 @@ export const TrafficPage: React.FC<TrafficPageProps> = ({ traffic, onReady }) =>
         ? t.status === 200
         : t.status >= 400;
 
-    return matchesSearch && matchesStatus;
+    const matchesProvider =
+      providerFilter === 'all'
+        ? true
+        : providerFilter === 'tts'
+        ? t.provider === 'tts'
+        : t.provider !== 'tts';
+
+    return matchesSearch && matchesStatus && matchesProvider;
   }).sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp));
   const rangeErrorCount = rangeTraffic.filter((record) => record.status >= 400).length;
   const rangeModelCount = new Set(rangeTraffic.map((record) => record.modelRequested)).size;
@@ -295,6 +308,21 @@ export const TrafficPage: React.FC<TrafficPageProps> = ({ traffic, onReady }) =>
               {filter === 'all' ? 'All Codes' : filter === '200' ? '200 Success' : 'Errors'}
             </button>
           ))}
+
+          <span className="text-xs text-[#706B65] font-medium hidden sm:inline">Route:</span>
+          {(['all', 'chat', 'tts'] as const).map((filter) => (
+            <button
+              key={filter}
+              onClick={() => setProviderFilter(filter)}
+              className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+                providerFilter === filter
+                  ? 'bg-[#191714] text-white'
+                  : 'bg-[#FAF7F2] border border-[#EAE5DE] text-[#706B65] hover:text-[#2A2723]'
+              }`}
+            >
+              {filter === 'all' ? 'All Routes' : filter === 'chat' ? 'Chat & Media' : 'Speech'}
+            </button>
+          ))}
         </div>
       </div>
 
@@ -332,6 +360,7 @@ export const TrafficPage: React.FC<TrafficPageProps> = ({ traffic, onReady }) =>
               ) : (
                 filteredTraffic.map((t) => {
                   const date = new Date(t.timestamp);
+                  const isTts = t.provider === 'tts';
                   const isPending = t.outcome === 'in_progress';
                   const requestStartedAt = Date.parse(t.timestamp);
                   const elapsedMs = isPending && Number.isFinite(requestStartedAt)
@@ -369,13 +398,24 @@ export const TrafficPage: React.FC<TrafficPageProps> = ({ traffic, onReady }) =>
                       </td>
                       <td className="py-3.5 px-3 whitespace-nowrap">
                         <div className="flex flex-col">
-                          <span className="font-mono-code font-semibold text-[#2A2723]">
-                            {t.modelRouted}
+                          <span className="inline-flex items-center gap-1.5 font-mono-code font-semibold text-[#2A2723]">
+                            {isTts ? t.modelRequested : t.modelRouted}
+                            {isTts && (
+                              <span className="rounded-full border border-[#E4D9EF] bg-[#F3EEF8] px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-[#6B4A8C]">
+                                speech
+                              </span>
+                            )}
                           </span>
-                          {t.modelRequested !== t.modelRouted && (
+                          {isTts ? (
                             <span className="text-[10px] text-[#9E988F] font-mono-code">
-                              from {t.modelRequested}
+                              edge-tts · {t.voice || 'voice'}
                             </span>
+                          ) : (
+                            t.modelRequested !== t.modelRouted && (
+                              <span className="text-[10px] text-[#9E988F] font-mono-code">
+                                from {t.modelRequested}
+                              </span>
+                            )
                           )}
                         </div>
                       </td>
@@ -428,6 +468,15 @@ export const TrafficPage: React.FC<TrafficPageProps> = ({ traffic, onReady }) =>
                       <td className="py-3.5 px-3 font-mono-code text-[#504C46] whitespace-nowrap">
                         {isPending ? (
                           <span className="text-[#9E988F]">Not recorded</span>
+                        ) : isTts ? (
+                          <div className="flex items-center gap-1.5">
+                            <span>{(t.inputCharacters ?? t.promptTokens).toLocaleString()} chars</span>
+                            {t.outputSeconds ? (
+                              <span className="text-[10px] text-[#9E988F]">
+                                {t.outputSeconds.toFixed(1)}s audio
+                              </span>
+                            ) : null}
+                          </div>
                         ) : (
                           <div className="flex items-center gap-1">
                             <span>{t.totalTokens.toLocaleString()}</span>
@@ -459,6 +508,14 @@ export const TrafficPage: React.FC<TrafficPageProps> = ({ traffic, onReady }) =>
                             {t.provider === 'gemini-api' && (
                               <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-[#F2DDD5] bg-[#FAF2EF] px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-[#C25938]">
                                 <KeyRound className="h-2.5 w-2.5" /> key
+                              </span>
+                            )}
+                            {isTts && (
+                              <span
+                                className="inline-flex shrink-0 items-center gap-1 rounded-full border border-[#E4D9EF] bg-[#F3EEF8] px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-[#6B4A8C]"
+                                title="Spoken by the internal Edge TTS service"
+                              >
+                                <Volume2 className="h-2.5 w-2.5" /> tts
                               </span>
                             )}
                             <span className="truncate font-mono-code">

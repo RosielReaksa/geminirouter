@@ -127,6 +127,29 @@ test('AI Studio key calls are merged into core traffic, newest first', () => {
   );
 });
 
+test('TTS calls are merged into core traffic instead of being dropped', () => {
+  const core = [trafficRecord('core-1', '2026-11-16T10:00:00.000Z', 'core')];
+  const local = [
+    {
+      ...trafficRecord('tts-1', '2026-11-16T10:05:00.000Z', 'tts'),
+      modelRequested: 'tts-1',
+      modelRouted: 'edge-tts',
+      backingAccountEmail: 'TTS · Edge',
+      voice: 'en-US-JennyNeural',
+      inputCharacters: 32,
+      outputSeconds: 2.9,
+    },
+    trafficRecord('key-1', '2026-11-16T10:04:00.000Z', 'gemini-api'),
+  ];
+
+  const merged = mergeTrafficRecords(core, local);
+  assert.deepEqual(
+    merged.map((record) => record.id),
+    ['tts-1', 'key-1', 'core-1'],
+    'speech traffic must appear on the Traffic page',
+  );
+});
+
 test('merging de-duplicates by id and keeps working without a core', () => {
   const core = [trafficRecord('same', '2026-11-06T10:00:00.000Z', 'core')];
   const local = [
