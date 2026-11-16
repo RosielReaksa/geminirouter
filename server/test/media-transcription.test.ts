@@ -25,6 +25,9 @@ import {
   TRANSCRIPT_OUTPUT_CONTRACT,
   TRANSCRIPT_TEMPERATURE,
   buildChunkPrompt,
+  buildDubCueRetryPrompt,
+  buildGenericDubOutputContract,
+  buildGenericDubSystemPrompt,
   buildKhmerDubPrompt,
   buildTranscriptPrompt,
   buildDubbingResponse,
@@ -32,14 +35,18 @@ import {
   dubbingChunkSecondsForModel,
   dubbingCoverageVerdict,
   dubbingCoveredSeconds,
+  dubbingLanguagePlan,
   dubbingMaxOutputTokens,
+  dubbingResponseSchema,
   dubbingSpeechSecondsFromSilences,
   enforceDubbingCueCeilings,
   estimatedDubbingMs,
   formatDubbingTimestamp,
   geminiResponseAnswer,
   isKhmerDubLine,
+  isTargetDubLine,
   stripNonKhmerLetters,
+  stripForeignLetters,
   isModelFailureText,
   isLiteDubbingModel,
   isReasoningDubbingModel,
@@ -2175,3 +2182,344 @@ test('dubbing requires an API key', async () => {
   assert.equal(response.status, 401);
   assert.equal(geminiRequests.length, before);
 });
+
+// ---------- multi-language dubbing ----------
+
+test('dubbingLanguagePlan keeps Khmer exact and describes other targets', () => {
+  const khmer = dubbingLanguagePlan('km', 'zh');
+  assert.equal(khmer.isKhmer, true);
+  assert.equal(khmer.label, 'Khmer');
+  assert.equal(khmer.maxChars, DUBBING_MAX_KHMER_CHARS);
+  assert.equal(khmer.budgetUnit, 'syllables');
+  assert.equal(khmer.scriptRe?.test('សួស្តី'), true);
+
+  const english = dubbingLanguagePlan('en', 'zh');
+  assert.equal(english.isKhmer, false);
+  assert.equal(english.label, 'English');
+  assert.equal(english.sourceLabel, 'Chinese');
+  assert.equal(english.maxChars, 100);
+  assert.equal(english.budgetUnit, 'characters');
+  assert.equal(english.scriptRe?.test('Hello'), true);
+  // Chinese letters are the source script and must be rejected in an English line.
+  assert.equal(english.sourceScriptRe?.test('你'), true);
+
+  const thai = dubbingLanguagePlan('th', 'zh');
+  assert.equal(thai.label, 'Thai');
+  assert.equal(thai.scriptRe?.test('สวัสดี'), true);
+  assert.equal(thai.maxChars, 80);
+
+  const japanese = dubbingLanguagePlan('ja', 'zh');
+  assert.equal(japanese.scriptRe?.test('こんにちは'), true);
+  // Kanji-only Japanese cues are legitimate even with a Chinese source, and the
+  // shared Han block must not be treated as "source letters" to strip.
+  assert.equal(japanese.scriptRe?.test('了解'), true);
+  assert.equal(japanese.sourceScriptRe, null);
+
+  const arabic = dubbingLanguagePlan('ar', 'zh');
+  assert.equal(arabic.scriptRe?.test('مرحبا'), true);
+
+  const unknown = dubbingLanguagePlan('xx', 'zh');
+  assert.equal(unknown.isKhmer, false);
+  assert.equal(unknown.scriptRe, null, 'an unknown code must not guess a script');
+
+  // Absent target defaults to Khmer.
+  assert.equal(dubbingLanguagePlan(undefined, undefined).isKhmer, true);
+});
+
+test('isTargetDubLine enforces the requested language and rejects source leaks', () => {
+  const en = dubbingLanguagePlan('en', 'zh');
+  assert.equal(isTargetDubLine('Hello there, sister.', en), true);
+  assert.equal(isTargetDubLine('សួស្តី', en), false, 'Khmer is not English');
+  assert.equal(isTargetDubLine('你好', en), false, 'untranslated source text is rejected');
+  assert.equal(isTargetDubLine('Hello 你好', en), false, 'a mixed line is rejected');
+  assert.equal(isTargetDubLine('', en), false);
+  assert.equal(isTargetDubLine('123', en), false, 'no target-script letter');
+
+  const th = dubbingLanguagePlan('th', 'zh');
+  assert.equal(isTargetDubLine('สวัสดีครับ', th), true);
+  assert.equal(isTargetDubLine('你好', th), false);
+
+  const km = dubbingLanguagePlan('km', 'zh');
+  assert.equal(isTargetDubLine('សួស្តី', km), true);
+  assert.equal(isTargetDubLine('Hello', km), false);
+});
+
+test('stripForeignLetters removes only the source script for non-Khmer targets', () => {
+  const en = dubbingLanguagePlan('en', 'zh');
+  assert.equal(stripForeignLetters('Hello 你好 world', en), 'Hello world');
+  assert.equal(stripForeignLetters('Hello world', en), 'Hello world');
+  // Khmer keeps its historical repair behaviour.
+  const km = dubbingLanguagePlan('km', 'zh');
+  assert.equal(stripForeignLetters('សួស្តី\u102F\u1036', km), 'សួស្តី');
+});
+
+test('enforceDubbingCueCeilings uses the target language ceiling', () => {
+  const english = normalizeDubbingSegment(
+    { start: '00:00.0', end: '00:02.0', khmer_dubbing: 'Hello there, sister.' },
+    { startSeconds: 0, endSeconds: 5 },
+  );
+  assert.ok(english);
+
+  const enPlan = dubbingLanguagePlan('en', 'zh');
+  const kept = enforceDubbingCueCeilings([english], enPlan);
+  assert.deepEqual(kept.violations, []);
+  assert.equal(kept.droppedCues, 0);
+  assert.equal(kept.segments.length, 1);
+
+  // The same English line is untranslated under the Khmer default.
+  const asKhmer = enforceDubbingCueCeilings([english]);
+  assert.equal(asKhmer.droppedCues, 1);
+  assert.equal(asKhmer.segments.length, 0);
+
+  // A Latin line longer than the English ceiling is still split, not dropped.
+  const long = normalizeDubbingSegment(
+    {
+      start: '00:00.0',
+      end: '00:04.0',
+      khmer_dubbing:
+        'This is a much longer English dubbing line that exceeds the ceiling.',
+    },
+    { startSeconds: 0, endSeconds: 5 },
+  );
+  assert.ok(long);
+  const split = enforceDubbingCueCeilings([long], enPlan);
+  assert.equal(split.droppedCues, 0);
+  assert.ok(split.segments.length >= 1);
+  for (const cue of split.segments) {
+    assert.ok(cue.khmer_dubbing.length <= enPlan.maxChars);
+  }
+});
+
+test('non-Khmer prompts, contracts, schemas and retry text name the target language', () => {
+  const en = dubbingLanguagePlan('en', 'zh');
+  const system = buildGenericDubSystemPrompt(en);
+  assert.match(system, /professional English audiovisual translator/);
+  assert.match(system, /Write ONLY in English/);
+  assert.match(system, /Never leave Chinese words/);
+  assert.match(system, /NO MIXING/);
+  assert.doesNotMatch(system, /Khmer/);
+
+  const contract = buildGenericDubOutputContract(en);
+  assert.match(contract, /concise spoken English line/);
+  assert.match(contract, /"khmer_dubbing"/, 'the output key is unchanged for compatibility');
+
+  const retry = buildDubCueRetryPrompt(en);
+  assert.match(retry, /written ONLY in English/);
+  assert.doesNotMatch(retry, /Khmer script/);
+
+  const schema: any = dubbingResponseSchema(en);
+  assert.match(schema.items.properties.khmer_dubbing.description, /English/);
+
+  // Khmer keeps its exact historical schema description and retry text.
+  const km = dubbingLanguagePlan('km', 'zh');
+  assert.equal(
+    dubbingResponseSchema(km).items.properties.khmer_dubbing.description,
+    'Natural spoken Khmer dubbing line.',
+  );
+  assert.match(buildDubCueRetryPrompt(km), /70 Khmer characters/);
+});
+
+test('buildKhmerDubPrompt follows target_language', () => {
+  const cues = [
+    {
+      start: '00:00.0',
+      end: '00:02.0',
+      speaker_gender: 'female',
+      vocal_timbre: 'young',
+      character_role: 'sister',
+      original_transcript: '你好',
+    },
+  ];
+  const english = buildKhmerDubPrompt({
+    index: 0,
+    count: 1,
+    targetLanguage: 'en',
+    sourceLanguage: 'zh',
+    cues,
+  });
+  assert.match(english, /Write ONLY in English/);
+  assert.match(english, /concise spoken English line/);
+  assert.doesNotMatch(english, /5\.5 syllables\/sec/);
+
+  const khmer = buildKhmerDubPrompt({ index: 0, count: 1, cues });
+  assert.match(khmer, /5\.5 syllables\/sec/);
+  assert.match(khmer, /Khmer/);
+});
+
+test(
+  'dubbing route uses the requested target language for prompt and schema',
+  { skip: !hasFfmpeg },
+  async () => {
+    geminiRequests.length = 0;
+    modelRequests.length = 0;
+    scriptedDubbingReplies.length = 0;
+    scriptedKhmerReplies.length = 0;
+
+    const cue = {
+      start: '00:00.5',
+      end: '00:03.0',
+      speaker_gender: 'female',
+      vocal_timbre: 'young and bright',
+      character_role: 'younger sister',
+      original_transcript: '小梨说第 1 段',
+    };
+    scriptedDubbingReplies.push({ text: JSON.stringify([cue]) });
+    scriptedKhmerReplies.push({
+      text: JSON.stringify([{ ...cue, khmer_dubbing: 'Hello there, sister.' }]),
+    });
+
+    const form = new FormData();
+    form.append('file', new Blob([makeWav(3)], { type: 'audio/wav' }), 'dubbing.wav');
+    form.append('model', 'gemini-3.5-flash-lite');
+    form.append('chunk_seconds', '60');
+    form.append('concurrency', '1');
+    form.append('source_language', 'zh');
+    form.append('target_language', 'en');
+    form.append('response_format', 'json');
+
+    const response = await fetch(`http://127.0.0.1:${bridgePort}/v1/audio/dubbing`, {
+      method: 'POST',
+      headers: authHeaders(),
+      body: form,
+    });
+
+    const rawBody = await response.text();
+    assert.equal(response.status, 200, rawBody);
+    const body: any = JSON.parse(rawBody);
+    assert.equal(body.target_language, 'English');
+    assert.equal(body.segments.length, 1);
+    assert.equal(body.segments[0].khmer_dubbing, 'Hello there, sister.');
+
+    // Call 2 is the text-only dubbing pass.
+    const call2 = geminiRequests[1];
+    assert.ok(call2, 'expected a second model call');
+    const prompt = call2.contents[0].parts[0].text || '';
+    assert.match(prompt, /Write ONLY in English/);
+    assert.match(prompt, /Never leave Chinese words/);
+    assert.doesNotMatch(prompt, /Khmer/);
+
+    const schema: any = call2.generationConfig.responseSchema;
+    assert.match(schema.items.properties.khmer_dubbing.description, /English/);
+  },
+);
+
+
+test(
+  'a non-Khmer dub retries once when Call 2 returns unusable cues',
+  { skip: !hasFfmpeg },
+  async () => {
+    geminiRequests.length = 0;
+    scriptedDubbingReplies.length = 0;
+    scriptedKhmerReplies.length = 0;
+
+    // Call 2 answers in the source script: no Latin letters, so the cue is
+    // dropped for an English target and the retry path must fire.
+    scriptedKhmerReplies.push({
+      text: JSON.stringify([
+        {
+          start: '00:00.0',
+          end: '00:02.0',
+          speaker_gender: 'female',
+          character_role: 'boss',
+          original_transcript: '第一句台词',
+          khmer_dubbing: '这是中文，不是英文',
+        },
+      ]),
+    });
+    // The retry answer is proper English.
+    scriptedKhmerReplies.push({
+      text: JSON.stringify([
+        {
+          start: '00:00.0',
+          end: '00:02.0',
+          speaker_gender: 'female',
+          character_role: 'boss',
+          original_transcript: '第一句台词',
+          khmer_dubbing: 'This is the English line.',
+        },
+      ]),
+    });
+
+    const form = new FormData();
+    form.append('file', new Blob([makeToneWav(3)], { type: 'audio/wav' }), 'retry-en.wav');
+    form.append('model', 'gemini-3.5-flash-lite');
+    form.append('chunk_seconds', '60');
+    form.append('source_language', 'zh');
+    form.append('target_language', 'en');
+
+    const response = await fetch(`http://127.0.0.1:${bridgePort}/v1/audio/dubbing`, {
+      method: 'POST',
+      headers: authHeaders(),
+      body: form,
+    });
+
+    const rawBody = await response.text();
+    assert.equal(response.status, 200, rawBody);
+    const body: any = JSON.parse(rawBody);
+    assert.equal(body.target_language, 'English');
+    assert.match(body.segments[0].khmer_dubbing, /English line/);
+
+    // One transcription call plus two adaptation calls (the retry).
+    assert.equal(geminiRequests.length, 3);
+    const retryRequest = geminiRequests[2];
+    const retryText =
+      retryRequest?.contents?.[0]?.parts?.find((part: any) => typeof part?.text === 'string')
+        ?.text ?? '';
+    assert.match(retryText, /RETRY - UNUSABLE CUES/);
+    assert.match(retryText, /English/);
+  },
+);
+
+test(
+  'a Khmer dub does not get the cue-quality retry (historical behaviour)',
+  { skip: !hasFfmpeg },
+  async () => {
+    geminiRequests.length = 0;
+    scriptedDubbingReplies.length = 0;
+    scriptedKhmerReplies.length = 0;
+
+    scriptedKhmerReplies.push({
+      text: JSON.stringify([
+        {
+          start: '00:00.0',
+          end: '00:02.0',
+          speaker_gender: 'male',
+          character_role: 'boss',
+          original_transcript: '첫 번째 대사',
+          khmer_dubbing: '',
+        },
+      ]),
+    });
+
+    const form = new FormData();
+    form.append('file', new Blob([makeToneWav(3)], { type: 'audio/wav' }), 'no-retry-km.wav');
+    form.append('model', 'gemini-3.5-flash-lite');
+    form.append('chunk_seconds', '60');
+    form.append('target_language', 'km');
+
+    const response = await fetch(`http://127.0.0.1:${bridgePort}/v1/audio/dubbing`, {
+      method: 'POST',
+      headers: authHeaders(),
+      body: form,
+    });
+
+    const rawBody = await response.text();
+    assert.equal(response.status, 502, rawBody);
+    // Exactly one transcription call and one adaptation call: no retry.
+    assert.equal(geminiRequests.length, 2);
+  },
+);
+
+test(
+  'Japanese keeps kanji-only cues when the source is Chinese',
+  { skip: !hasFfmpeg },
+  async () => {
+    const plan = dubbingLanguagePlan('ja', 'zh');
+    assert.equal(isTargetDubLine('了解', plan), true);
+    assert.equal(stripForeignLetters('了解', plan), '了解');
+    assert.equal(isTargetDubLine('東京都です', plan), true);
+    assert.equal(stripForeignLetters('東京都です', plan), '東京都です');
+    // Kana still works, and Chinese sentences are not stripped into emptiness.
+    assert.equal(isTargetDubLine('こんにちは', plan), true);
+  },
+);

@@ -423,6 +423,194 @@ export function languageLabel(value: string | undefined): string | undefined {
   );
 }
 
+// --- Dubbing target-language plans -----------------------------------------
+//
+// Dubbing used to be Khmer-only: the prompt, the output contract, the retry
+// text and the validator all assumed Khmer script. These tables describe the
+// target language so every stage can pick the right script, speaking-rate
+// budget and per-cue ceiling. Khmer keeps its exact historical values.
+
+const DUBBING_SCRIPT_RANGES: Record<string, RegExp> = {
+  khmer: /[\u1780-\u17FF]/,
+  thai: /[\u0E00-\u0E7F]/,
+  lao: /[\u0E80-\u0EFF]/,
+  myanmar: /[\u1000-\u109F]/,
+  arabic: /[\u0600-\u06FF]/,
+  hebrew: /[\u0590-\u05FF]/,
+  devanagari: /[\u0900-\u097F]/,
+  bengali: /[\u0980-\u09FF]/,
+  tamil: /[\u0B80-\u0BFF]/,
+  telugu: /[\u0C00-\u0C7F]/,
+  sinhala: /[\u0D80-\u0DFF]/,
+  cyrillic: /[\u0400-\u04FF]/,
+  greek: /[\u0370-\u03FF]/,
+  latin: /\p{Script=Latin}/u,
+  cjk: /[\u4E00-\u9FFF\u3400-\u4DBF]/,
+  japanese: /[\u3040-\u30FF\u4E00-\u9FFF]/,
+  korean: /[\uAC00-\uD7AF\u1100-\u11FF]/,
+  georgian: /[\u10A0-\u10FF]/,
+  armenian: /[\u0530-\u058F]/,
+};
+
+/** Languages whose default script is not Latin. */
+const DUBBING_NON_LATIN_SCRIPTS: Record<string, string> = {
+  ar: 'arabic',
+  bn: 'bengali',
+  el: 'greek',
+  he: 'hebrew',
+  hi: 'devanagari',
+  hy: 'armenian',
+  ja: 'japanese',
+  ka: 'georgian',
+  km: 'khmer',
+  ko: 'korean',
+  lo: 'lao',
+  my: 'myanmar',
+  si: 'sinhala',
+  ta: 'tamil',
+  te: 'telugu',
+  th: 'thai',
+  zh: 'cjk',
+  bg: 'cyrillic',
+  ru: 'cyrillic',
+  sr: 'cyrillic',
+  uk: 'cyrillic',
+};
+
+/** Letters/sec the synthesizer can speak, used for the prompt's rate budget. */
+const DUBBING_CHARS_PER_SECOND: Record<string, number> = {
+  arabic: 12,
+  armenian: 10,
+  bengali: 9,
+  cjk: 5,
+  cyrillic: 13,
+  devanagari: 9,
+  georgian: 10,
+  greek: 13,
+  hebrew: 12,
+  japanese: 5,
+  korean: 6,
+  lao: 7,
+  latin: 14,
+  myanmar: 7,
+  sinhala: 9,
+  tamil: 9,
+  telugu: 9,
+  thai: 7,
+};
+const DUBBING_DEFAULT_CHARS_PER_SECOND = 12;
+
+/**
+ * Hard per-cue character ceiling per script. Khmer keeps its measured 70; the
+ * other values are generous safety caps, with the speaking-rate budget in the
+ * prompt doing the real shaping.
+ */
+const DUBBING_MAX_CHARS: Record<string, number> = {
+  arabic: 80,
+  armenian: 80,
+  bengali: 80,
+  cjk: 60,
+  cyrillic: 100,
+  devanagari: 80,
+  georgian: 80,
+  greek: 100,
+  hebrew: 80,
+  japanese: 60,
+  korean: 60,
+  khmer: DUBBING_MAX_KHMER_CHARS,
+  lao: 80,
+  latin: 100,
+  myanmar: 80,
+  sinhala: 80,
+  tamil: 80,
+  telugu: 80,
+  thai: 80,
+};
+const DUBBING_DEFAULT_MAX_CHARS = 90;
+
+export interface DubbingLanguagePlan {
+  /** Normalized target code, lower-case. */
+  code: string;
+  /** Display name, e.g. "English". */
+  label: string;
+  isKhmer: boolean;
+  /** Source-language display name, when known. */
+  sourceLabel?: string;
+  /** Prompt rate budget. Khmer is in syllables, everything else characters. */
+  charsPerSecond: number;
+  maxChars: number;
+  /** Matches a letter of the target script; null when the script is unknown. */
+  scriptRe: RegExp | null;
+  /**
+   * Matches a letter of the source script, but only when that script differs
+   * from the target. Used to reject untranslated source text in a dub line.
+   */
+  sourceScriptRe: RegExp | null;
+  budgetUnit: 'syllables' | 'characters';
+}
+
+/**
+ * Describe the dubbing target language.
+ *
+ * Defaults to Khmer so every existing caller (and the Khmer tests) keeps the
+ * exact historical behaviour. Unknown codes get a generic plan with no script
+ * enforcement rather than a wrong-script guess.
+ */
+export function dubbingLanguagePlan(
+  targetLanguage?: string,
+  sourceLanguage?: string,
+): DubbingLanguagePlan {
+  const code = (targetLanguage || 'km').trim().toLowerCase().replace(/_/g, '-');
+  const base = code.split('-')[0];
+  const label = languageLabel(code) || targetLanguage || 'Khmer';
+  const isKhmer = base === 'km' || /khmer/i.test(label);
+
+  const known = isKhmer || Boolean(LANGUAGE_NAMES[code] || LANGUAGE_NAMES[base]);
+  const scriptName = isKhmer
+    ? 'khmer'
+    : known
+      ? (DUBBING_NON_LATIN_SCRIPTS[code] ??
+        DUBBING_NON_LATIN_SCRIPTS[base] ??
+        'latin')
+      : '';
+
+  const scriptRe = scriptName ? (DUBBING_SCRIPT_RANGES[scriptName] ?? null) : null;
+
+  const sourceCode = (sourceLanguage || '').trim().toLowerCase().replace(/_/g, '-');
+  const sourceBase = sourceCode.split('-')[0];
+  const sourceLabel = languageLabel(sourceCode);
+  const sourceScriptName = DUBBING_NON_LATIN_SCRIPTS[sourceCode] ??
+    DUBBING_NON_LATIN_SCRIPTS[sourceBase] ??
+    (sourceCode ? 'latin' : '');
+  // Japanese and Chinese share the Han/Kanji block. Treating CJK as "source
+  // letters" for a Japanese dub would delete legitimate kanji from every cue
+  // (了解 would become empty and be dropped), so source-script rejection is
+  // suppressed when the two scripts overlap.
+  const SHARED_SCRIPT_PAIRS = new Set(['cjk:japanese', 'japanese:cjk']);
+  const sourceScriptRe =
+    sourceScriptName &&
+    sourceScriptName !== scriptName &&
+    !SHARED_SCRIPT_PAIRS.has(`${sourceScriptName}:${scriptName}`)
+      ? (DUBBING_SCRIPT_RANGES[sourceScriptName] ?? null)
+      : null;
+
+  return {
+    code,
+    label,
+    isKhmer,
+    sourceLabel,
+    charsPerSecond: isKhmer
+      ? 5.5
+      : (DUBBING_CHARS_PER_SECOND[scriptName] ?? DUBBING_DEFAULT_CHARS_PER_SECOND),
+    maxChars: isKhmer
+      ? DUBBING_MAX_KHMER_CHARS
+      : (DUBBING_MAX_CHARS[scriptName] ?? DUBBING_DEFAULT_MAX_CHARS),
+    scriptRe,
+    sourceScriptRe,
+    budgetUnit: isKhmer ? 'syllables' : 'characters',
+  };
+}
+
 /** Convenience list for clients; the endpoint itself accepts any language. */
 export function knownLanguages(): Array<{ code: string; name: string }> {
   const seen = new Set<string>();
@@ -2038,6 +2226,94 @@ export const DUBBING_RESPONSE_SCHEMA = {
   },
 };
 
+/**
+ * Non-Khmer Call-2 system prompt. The rules mirror the Khmer prompt's shape
+ * (budget, spoken register, continuity, 1-to-1 alignment) but the script rule
+ * becomes "target language only, never leave source-language words", which is
+ * the mixing the old Khmer-only prompt produced.
+ */
+export function buildGenericDubSystemPrompt(plan: DubbingLanguagePlan): string {
+  const source = plan.sourceLabel ?? 'the source language';
+  const rate = plan.charsPerSecond;
+  const budget = (seconds: number) => Math.max(1, Math.round(rate * seconds));
+  return `You are a professional ${plan.label} audiovisual translator and dubbing director.
+You will receive a JSON array of timed, verbatim dialogue cues from a continuous story. Add a natural, spoken ${plan.label} dubbing line ("khmer_dubbing") to every object while preserving all existing fields and timestamps untouched.
+
+Strict TTS Budget (HIGHEST PRIORITY):
+- A cut-off audio line ruins the dub.
+- Budget strictly ${rate} ${plan.budgetUnit} per second of (end - start):
+  * 1.0s -> max ${budget(1)} ${plan.budgetUnit}
+  * 1.5s -> max ${budget(1.5)} ${plan.budgetUnit}
+  * 2.0s -> max ${budget(2)} ${plan.budgetUnit}
+  * 2.5s -> max ${budget(2.5)} ${plan.budgetUnit}
+- Count the ${plan.budgetUnit} before finalizing each line. If over budget, compress the phrasing immediately: drop redundant pronouns, subjects already obvious from context, greetings, repeated words, and filler connectors while keeping the core action and emotion.
+
+${plan.label} Dubbing & Story Rules:
+- COLLOQUIAL SPOKEN ${plan.label.toUpperCase()}: Write natural, punchy spoken ${plan.label} used in modern movie/donghua dubbing—never stiff literary or word-for-word translation.
+- TARGET LANGUAGE ONLY - NO MIXING: Write ONLY in ${plan.label}. Never leave ${source} words or phrases untranslated in the line. Translate every proper noun, title, place, sect, item and technique into natural ${plan.label}; do not copy the source script.
+- CONTINUITY & GLOSSARY: Track who is speaking to whom, their relationship, and emotional tone across the whole array. Reuse the exact same ${plan.label} renderings for every character name, title, sect, place, item, and technique.
+- NUMBERS & SCRIPT: Keep numbers in the form ${plan.label} writes them, and do not switch script mid-line.
+- 1-TO-1 ARRAY ALIGNMENT: Return the exact same number of objects in the exact same order. Never merge, drop, or alter "start" and "end" timestamps.`;
+}
+
+/** Language-neutral Call-2 output contract. The field name stays `khmer_dubbing`. */
+export function buildGenericDubOutputContract(plan: DubbingLanguagePlan): string {
+  return `OUTPUT CONTRACT
+Return ONLY a valid JSON array with the exact same length and order as the input array. Do not wrap in Markdown fences or add comments.
+Every element must contain these exact fields:
+{
+  "start": "MM:SS.S",
+  "end": "MM:SS.S",
+  "speaker_gender": "male" or "female",
+  "vocal_timbre": "short voice and emotion description",
+  "character_role": "consistent speaker identifier",
+  "original_transcript": "unchanged original transcript from input",
+  "khmer_dubbing": "concise spoken ${plan.label} line fitting the TTS budget"
+}`;
+}
+
+/** Call-2 system prompt for the plan's language (Khmer keeps its own text). */
+export function dubbingSystemPrompt(plan: DubbingLanguagePlan): string {
+  return plan.isKhmer ? KHMER_DUB_SYSTEM_PROMPT : buildGenericDubSystemPrompt(plan);
+}
+
+/** Call-2 output contract for the plan's language. */
+export function dubbingOutputContract(plan: DubbingLanguagePlan): string {
+  return plan.isKhmer ? KHMER_DUB_OUTPUT_CONTRACT : buildGenericDubOutputContract(plan);
+}
+
+/** Unusable-cue retry text, restated in the target language. */
+export function buildDubCueRetryPrompt(plan: DubbingLanguagePlan): string {
+  if (plan.isKhmer) return DUBBING_CUE_RETRY_PROMPT;
+  return `RETRY - UNUSABLE CUES
+Your previous answer contained cues that a speech synthesizer cannot perform.
+- Every cue must carry a non-empty "khmer_dubbing" line written ONLY in ${plan.label}. Never leave it empty and never copy the source text into it.
+- Every cue must be at most ${DUBBING_MAX_CUE_SECONDS.toFixed(1)} seconds long. Split a long line into several short cues instead of one long one.
+- Every "khmer_dubbing" line must be at most ${plan.maxChars} characters.
+Return the whole script again with every utterance present and no empty or oversized cues.`;
+}
+
+/** Call-2 JSON schema. Khmer keeps the original description verbatim. */
+export function dubbingResponseSchema(plan: DubbingLanguagePlan): any {
+  if (plan.isKhmer) return DUBBING_RESPONSE_SCHEMA;
+  const properties = {
+    ...DUBBING_SEGMENT_PROPERTIES,
+    khmer_dubbing: {
+      type: 'STRING',
+      description: `Natural spoken ${plan.label} dubbing line.`,
+    },
+  };
+  return {
+    type: 'ARRAY',
+    items: {
+      type: 'OBJECT',
+      properties,
+      required: Object.keys(properties),
+      propertyOrdering: Object.keys(properties),
+    },
+  };
+}
+
 const TRANSCRIPT_SEGMENT_PROPERTIES = {
   start: { type: 'STRING', description: 'Utterance start as MM:SS.S from the start of this audio part.' },
   end: { type: 'STRING', description: 'Utterance end as MM:SS.S from the start of this audio part.' },
@@ -2490,6 +2766,47 @@ export function stripNonKhmerLetters(text: string): string {
 }
 
 /**
+ * True when a dub line is valid for the requested target language.
+ *
+ * Khmer keeps the historical strict rule (Khmer letters and nothing else).
+ * Other languages require at least one letter of the target script and reject
+ * letters of the *source* script, which is what leaks in when the model answers
+ * in the wrong language. Unknown scripts fall back to "non-empty".
+ */
+export function isTargetDubLine(text: string, plan: DubbingLanguagePlan): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  if (plan.isKhmer) {
+    if (!KHMER_LETTER_RE.test(trimmed)) return false;
+    return !NON_KHMER_LETTER_RE.test(trimmed);
+  }
+  if (plan.scriptRe && !plan.scriptRe.test(trimmed)) return false;
+  if (plan.sourceScriptRe && plan.sourceScriptRe.test(trimmed)) return false;
+  return true;
+}
+
+/**
+ * Remove text the synthesizer cannot speak for the target language.
+ *
+ * Khmer keeps `stripNonKhmerLetters` exactly. For other languages only the
+ * source script is stripped (plus invisible separators), so a legitimate
+ * proper noun in a third script survives while untranslated source text is
+ * removed.
+ */
+export function stripForeignLetters(text: string, plan: DubbingLanguagePlan): string {
+  if (plan.isKhmer) return stripNonKhmerLetters(text);
+  return [...text]
+    .filter((character) => {
+      if (['\u200B', '\u200C', '\u200D', '\uFEFF'].includes(character)) return false;
+      if (plan.sourceScriptRe?.test(character)) return false;
+      return true;
+    })
+    .join('')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
+/**
  * Split one dub line into `parts` fragments. Khmer separates phrases with
  * spaces, so words are used when there are enough of them; otherwise the line
  * is cut by character count, which is the only option for unspaced Khmer.
@@ -2610,17 +2927,21 @@ export interface DubbingCueCeilingResult {
  */
 export function enforceDubbingCueCeilings(
   segments: DubbingSegmentInternal[],
+  plan: DubbingLanguagePlan = dubbingLanguagePlan(),
 ): DubbingCueCeilingResult {
   const out: DubbingSegmentInternal[] = [];
   const violations: string[] = [];
   let droppedCues = 0;
+  const maxChars = plan.maxChars;
+  const ceilingLabel = plan.isKhmer ? 'Khmer characters' : `${plan.label} characters`;
 
   for (const segment of segments) {
-    // Clean every cue: stray foreign letters and invisible separators are
-    // removed before validation. A cue that still has no Khmer fails; one that
-    // merely carried three Latin characters is repaired and kept.
-    const sourceText = stripNonKhmerLetters(segment.khmer_dubbing);
-    if (!isKhmerDubLine(sourceText)) {
+    // Clean every cue: stray source-language letters and invisible separators
+    // are removed before validation. A cue that still has no target-language
+    // text fails; one that merely carried three foreign characters is repaired
+    // and kept.
+    const sourceText = stripForeignLetters(segment.khmer_dubbing, plan);
+    if (!isTargetDubLine(sourceText, plan)) {
       // The model left this cue untranslated. Drop it and count it; failing the
       // chunk here used to trigger a slow fallback and lose every other line.
       droppedCues += 1;
@@ -2635,7 +2956,7 @@ export function enforceDubbingCueCeilings(
 
     const textLength = codePointLength(sourceText);
     const byTime = Math.ceil(duration / DUBBING_MAX_CUE_SECONDS);
-    const byChars = Math.ceil(textLength / DUBBING_MAX_KHMER_CHARS);
+    const byChars = Math.ceil(textLength / maxChars);
     // A fragment needs at least a few graphemes to be worth an utterance. For a
     // 10 s window holding only one short phrase, splitting would produce
     // one-word cues, so the window is not divided further.
@@ -2644,7 +2965,7 @@ export function enforceDubbingCueCeilings(
 
     const buildTexts = (count: number): string[] =>
       (count > 1 ? splitKhmerPieces(sourceText, count) : [sourceText])
-        .flatMap((text) => splitToCharLimit(text, DUBBING_MAX_KHMER_CHARS));
+        .flatMap((text) => splitToCharLimit(text, maxChars));
 
     let texts = buildTexts(parts);
     let weights = texts.map((text) => Math.max(1, codePointLength(text)));
@@ -2670,9 +2991,9 @@ export function enforceDubbingCueCeilings(
       const text = texts[index];
       const characters = codePointLength(text);
 
-      if (characters > DUBBING_MAX_KHMER_CHARS) {
+      if (characters > maxChars) {
         violations.push(
-          `cue at ${formatDubbingTimestamp(cursor)} has ${characters} Khmer characters (limit ${DUBBING_MAX_KHMER_CHARS})`,
+          `cue at ${formatDubbingTimestamp(cursor)} has ${characters} ${ceilingLabel} (limit ${maxChars})`,
         );
       }
       // A long window with almost no text is not a TTS risk: the synthesizer
@@ -2920,7 +3241,8 @@ export function buildTranscriptPrompt(options: {
 }
 
 /**
- * Call 2 prompt: text-only Khmer adaptation. The transcript array is embedded
+ * Call 2 prompt: text-only adaptation into the target language. The transcript
+ * array is embedded
  * as the payload, and continuity, glossary and the caller's custom prompt all
  * live here because they are terminology and tone instructions.
  */
@@ -2929,6 +3251,9 @@ export function buildKhmerDubPrompt(options: {
   glossary?: string;
   index: number;
   count: number;
+  /** Defaults to Khmer; any other supported language takes the generic path. */
+  targetLanguage?: string;
+  sourceLanguage?: string;
   cues: Array<Record<string, unknown>>;
   previousSegments?: Array<{
     original_transcript: string;
@@ -2936,9 +3261,11 @@ export function buildKhmerDubPrompt(options: {
     character_role: string;
   }>;
 }): string {
+  const plan = dubbingLanguagePlan(options.targetLanguage, options.sourceLanguage);
   const parts: string[] = [
-    options.prompt?.trim() || KHMER_DUB_SYSTEM_PROMPT,
-    KHMER_DUB_OUTPUT_CONTRACT,
+    // A caller-supplied prompt still wins, in every language.
+    options.prompt?.trim() || dubbingSystemPrompt(plan),
+    dubbingOutputContract(plan),
   ];
 
   if (options.count > 1) {
@@ -3428,7 +3755,11 @@ function isSchemaRejection(status: number, message: string): boolean {
   return /schema|response_?mime|response_?format|generation_?config/i.test(message);
 }
 
-type DubbingPhase = 'transcription' | 'khmer';
+/**
+ * 'transcription' and 'khmer' are the historical phases; any other target
+ * language carries its own code (e.g. 'en') so logs name what was dubbed.
+ */
+type DubbingPhase = 'transcription' | 'khmer' | (string & {});
 
 interface ModelJsonCall {
   segments: Record<string, unknown>[];
@@ -3447,7 +3778,12 @@ interface TranscriptChunkCall extends ModelJsonCall {
 }
 
 function dubbingPhaseLabel(phase: DubbingPhase): string {
-  return phase === 'transcription' ? 'transcription' : 'Khmer dubbing';
+  if (phase === 'transcription') return 'transcription';
+  // Non-Khmer targets carry their own code as the phase, so the log label
+  // names what was actually dubbed.
+  return phase === 'khmer'
+    ? 'Khmer dubbing'
+    : `${languageLabel(phase) || phase} dubbing`;
 }
 
 /**
@@ -3819,7 +4155,8 @@ async function transcribeChunk(
 }
 
 /**
- * Call 2: add Khmer to the transcript. The array must stay one-to-one with the
+ * Call 2: add the target-language line to the transcript. The array must stay
+ * one-to-one with the
  * transcript; a wrong count would shift every later line, so it gets exactly
  * one corrective retry before the chunk fails.
  */
@@ -3835,17 +4172,21 @@ async function translateChunk(
   log: FastifyRequest['log'],
 ): Promise<ModelJsonCall> {
   const temperature = dubbingPhaseTemperature(options, 'khmer');
+  const plan = dubbingLanguagePlan(options.targetLanguage, options.sourceLanguage);
+  // Khmer keeps the historical 'khmer' phase label; other targets carry their
+  // own code so logs and error details name what was actually dubbed.
+  const phaseLabel = plan.isKhmer ? 'khmer' : plan.code;
   let activePrompt = prompt;
   let retried = false;
 
   for (;;) {
     const call = await requestModelJson({
       chunk,
-      phase: 'khmer',
+      phase: phaseLabel,
       prompt: activePrompt,
       temperature,
       maxOutputTokens,
-      schema: KHMER_DUB_RESPONSE_SCHEMA,
+      schema: dubbingResponseSchema(plan),
       options,
       config,
       deps,
@@ -3864,12 +4205,13 @@ async function translateChunk(
         {
           media: {
             chunk: chunk.index + 1,
-            phase: 'khmer',
+            phase: phaseLabel,
             expectedCues: cueCount,
             returnedCues: call.segments.length,
           },
         },
-        'media: Khmer dubbing returned the wrong cue count; retrying once',
+        'media: %s dubbing returned the wrong cue count; retrying once',
+        plan.label,
       );
       await sleepWithSignal(250, signal);
       continue;
@@ -3878,10 +4220,10 @@ async function translateChunk(
     throw new MediaError(
       502,
       'translation_count_mismatch',
-      `Chunk ${chunk.index + 1} Khmer dubbing returned ${call.segments.length} cue(s) for ${cueCount} transcript cue(s). The arrays must match one-to-one, so the request is failed instead of returning a shifted timeline.`,
+      `Chunk ${chunk.index + 1} ${plan.label} dubbing returned ${call.segments.length} cue(s) for ${cueCount} transcript cue(s). The arrays must match one-to-one, so the request is failed instead of returning a shifted timeline.`,
       {
         chunkIndex: chunk.index,
-        phase: 'khmer',
+        phase: phaseLabel,
         expectedCues: cueCount,
         returnedCues: call.segments.length,
       },
@@ -3919,7 +4261,7 @@ async function dubChunkWithRetry(
   speechSeconds: number | undefined,
   log: FastifyRequest['log'],
 ): Promise<DubbingChunkResult> {
-  // Call 1: media -> timed transcript, no Khmer yet.
+  // Call 1: media -> timed transcript, no dub line yet.
   const transcript = await transcribeChunk(
     chunk,
     transcriptPrompt,
@@ -3932,7 +4274,7 @@ async function dubChunkWithRetry(
     log,
   );
 
-  // Call 2: text-only transcript -> Khmer, with continuity and glossary.
+  // Call 2: text-only transcript -> target language, with continuity/glossary.
   const cues = transcript.transcripts.map((segment) => ({
     start: segment.start,
     end: segment.end,
@@ -3941,59 +4283,102 @@ async function dubChunkWithRetry(
     character_role: segment.character_role,
     original_transcript: segment.original_transcript,
   }));
-  const khmerPrompt = buildKhmerDubPrompt({ ...khmerContext, cues });
-  const khmer = await translateChunk(
-    chunk,
-    khmerPrompt,
-    cues.length,
-    maxOutputTokens,
-    options,
-    config,
-    deps,
-    signal,
-    log,
-  );
-
-  // Metadata lock: only khmer_dubbing is taken from Call 2. Timestamps,
-  // gender, timbre, role and the source line always come from Call 1.
-  const merged = transcript.transcripts.map((segment, index) => {
-    const line = khmer.segments[index] ?? {};
-    return {
-      start: segment.start,
-      end: segment.end,
-      speaker_gender: segment.speaker_gender,
-      vocal_timbre: segment.vocal_timbre,
-      character_role: segment.character_role,
-      original_transcript: segment.original_transcript,
-      khmer_dubbing: firstString(line, [
-        'khmer_dubbing',
-        'khmerDubbing',
-        'khmer',
-        'dubbing',
-        'translation',
-        'translated_text',
-      ]),
-    };
+  const plan = dubbingLanguagePlan(options.targetLanguage, options.sourceLanguage);
+  const khmerPrompt = buildKhmerDubPrompt({
+    ...khmerContext,
+    cues,
+    targetLanguage: options.targetLanguage,
+    sourceLanguage: options.sourceLanguage,
   });
+  // One Call-2 pass. Non-Khmer targets get one cue-quality retry when the
+  // answer came back with unusable cues; Khmer keeps its exact historical
+  // behaviour and fails on the first pass.
+  const runDubPass = async (passPrompt: string) => {
+    const call = await translateChunk(
+      chunk,
+      passPrompt,
+      cues.length,
+      maxOutputTokens,
+      options,
+      config,
+      deps,
+      signal,
+      log,
+    );
 
-  const segments: DubbingSegmentInternal[] = [];
-  let droppedSegments = 0;
-  let cursor = 0;
-  for (const raw of merged) {
-    const segment = normalizeDubbingSegment(raw, chunk, cursor);
-    if (!segment) {
-      droppedSegments++;
-      continue;
+    // Metadata lock: only khmer_dubbing is taken from Call 2. Timestamps,
+    // gender, timbre, role and the source line always come from Call 1.
+    const passMerged = transcript.transcripts.map((segment, index) => {
+      const line = call.segments[index] ?? {};
+      return {
+        start: segment.start,
+        end: segment.end,
+        speaker_gender: segment.speaker_gender,
+        vocal_timbre: segment.vocal_timbre,
+        character_role: segment.character_role,
+        original_transcript: segment.original_transcript,
+        khmer_dubbing: firstString(line, [
+          'khmer_dubbing',
+          'khmerDubbing',
+          'khmer',
+          'dubbing',
+          'translation',
+          'translated_text',
+        ]),
+      };
+    });
+
+    const passSegments: DubbingSegmentInternal[] = [];
+    let passDropped = 0;
+    let passCursor = 0;
+    for (const raw of passMerged) {
+      const segment = normalizeDubbingSegment(raw, chunk, passCursor);
+      if (!segment) {
+        passDropped++;
+        continue;
+      }
+      passSegments.push(segment);
+      passCursor = Math.max(passCursor, segment.endSeconds - chunk.startSeconds);
     }
-    segments.push(segment);
-    cursor = Math.max(cursor, segment.endSeconds - chunk.startSeconds);
-  }
-  segments.sort((a, b) => a.startSeconds - b.startSeconds || a.endSeconds - b.endSeconds);
+    passSegments.sort(
+      (a, b) => a.startSeconds - b.startSeconds || a.endSeconds - b.startSeconds,
+    );
 
-  // Split cues that exceed the TTS ceiling and reject cues that cannot be
-  // repaired. A model that returns one 12-second cue would otherwise reach
-  // the synthesizer unchanged.
-  const ceilings = enforceDubbingCueCeilings(segments);
+    // Split cues that exceed the TTS ceiling and reject cues that cannot be
+    // repaired. A model that returns one 12-second cue would otherwise reach
+    // the synthesizer unchanged.
+    const passCeilings = enforceDubbingCueCeilings(passSegments, plan);
+    return {
+      call,
+      droppedSegments: passDropped,
+      ceilings: passCeilings,
+    };
+  };
+
+  let dubPass = await runDubPass(khmerPrompt);
+  if (
+    !plan.isKhmer &&
+    !signal.aborted &&
+    (dubPass.ceilings.violations.length > 0 || dubPass.ceilings.droppedCues > 0)
+  ) {
+    log.warn(
+      {
+        media: {
+          chunk: chunk.index + 1,
+          violations: dubPass.ceilings.violations.length,
+          droppedCues: dubPass.ceilings.droppedCues,
+        },
+      },
+      'media: %s dubbing returned unusable cues; retrying once',
+      plan.label,
+    );
+    await sleepWithSignal(250, signal);
+    dubPass = await runDubPass(`${khmerPrompt}\n\n${buildDubCueRetryPrompt(plan)}`);
+  }
+
+  const khmer = dubPass.call;
+  const droppedSegments = dubPass.droppedSegments;
+  const ceilings = dubPass.ceilings;
   const repairedSegments = ceilings.segments;
   if (ceilings.droppedCues > 0) {
     log.warn(
@@ -4051,9 +4436,9 @@ async function dubChunkWithRetry(
     const reason = blockingReason;
     const message =
       cueIssue === 'dropped_segments'
-        ? `Chunk ${chunk.index + 1} returned ${droppedSegments} cue(s) with no Khmer dub line. Those lines would be missing from the finished dub, so the request is failed instead of returning a script with holes. Try a smaller chunk_seconds or a different model.`
+        ? `Chunk ${chunk.index + 1} returned ${droppedSegments} cue(s) with no ${plan.label} dub line. Those lines would be missing from the finished dub, so the request is failed instead of returning a script with holes. Try a smaller chunk_seconds or a different model.`
         : cueIssue === 'cue_violations'
-          ? `Chunk ${chunk.index + 1} returned ${ceilings.violations.length} cue(s) that break the TTS ceilings (max ${DUBBING_MAX_CUE_SECONDS}s and ${DUBBING_MAX_KHMER_CHARS} Khmer characters per cue, Khmer script only): ${ceilings.violations
+          ? `Chunk ${chunk.index + 1} returned ${ceilings.violations.length} cue(s) that break the TTS ceilings (max ${DUBBING_MAX_CUE_SECONDS}s and ${plan.maxChars} ${plan.label} characters per cue, ${plan.label} only): ${ceilings.violations
               .slice(0, 3)
               .join('; ')}. The request is failed instead of returning cues the synthesizer cannot speak.`
           : `Chunk ${chunk.index + 1} returned ${repairedSegments.length} segment(s) covering ${verdict.coveredSeconds}s of ${verdict.speechSeconds ?? 0}s of audible speech (${Math.round(
