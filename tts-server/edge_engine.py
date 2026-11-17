@@ -98,7 +98,14 @@ class EngineConfig:
 # --------------------------------------------------------------------------
 
 
-def _proxy_url_from_row(row: Dict[str, Any]) -> Optional[str]:
+@dataclass
+class ProxyInfo:
+    url: str
+    ip: str
+    country: str
+
+
+def _proxy_info_from_row(row: Dict[str, Any]) -> Optional[ProxyInfo]:
     address = row.get("proxy_address") or row.get("proxyAddress")
     if not address:
         return None
@@ -113,11 +120,13 @@ def _proxy_url_from_row(row: Dict[str, Any]) -> Optional[str]:
     auth = ""
     if username:
         auth = f"{urllib.parse.quote(username, safe='')}:{urllib.parse.quote(password, safe='')}@"
-    return f"http://{auth}{address}:{port}"
+    url = f"http://{auth}{address}:{port}"
+    country = str(row.get("country_code") or row.get("country") or "").upper()
+    return ProxyInfo(url=url, ip=str(address), country=country)
 
 
-async def fetch_webshare_proxies(api_key: str) -> List[str]:
-    """Fetch the usable proxy URLs from Webshare.
+async def fetch_webshare_proxies(api_key: str) -> List[ProxyInfo]:
+    """Fetch the usable proxies from Webshare, with their IP and country.
 
     ``mode=direct`` first, ``backbone`` as a fallback, mirroring the bridge's
     ``proxyManager.fetchInventoryFromWebshare``.
@@ -128,7 +137,7 @@ async def fetch_webshare_proxies(api_key: str) -> List[str]:
     timeout = httpx.Timeout(15.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
         for mode in ("direct", "backbone"):
-            urls: List[str] = []
+            proxies: List[ProxyInfo] = []
             for page in range(1, WEBSHARE_MAX_PAGES + 1):
                 url = (
                     f"{WEBSHARE_API_URL}?mode={mode}&page={page}"
@@ -144,13 +153,13 @@ async def fetch_webshare_proxies(api_key: str) -> List[str]:
                 for row in payload.get("results") or []:
                     if row.get("valid") is False:
                         continue
-                    proxy_url = _proxy_url_from_row(row)
-                    if proxy_url:
-                        urls.append(proxy_url)
+                    info = _proxy_info_from_row(row)
+                    if info:
+                        proxies.append(info)
                 if not payload.get("next"):
                     break
-            if urls:
-                return urls
+            if proxies:
+                return proxies
     return []
 
 
@@ -160,14 +169,18 @@ async def fetch_webshare_proxies(api_key: str) -> List[str]:
 
 
 class ProxyPool:
-    """Round-robin proxy selection with a short failure cooldown and a
-    per-IP concurrency cap so 100 concurrent calls spread across the pool
-    instead of stacking on the first addresses."""
+    """Random proxy selection with a short failure cooldown and a per-IP
+    concurrency cap. Every request picks a random healthy proxy with free
+    capacity, so consecutive calls spread across the whole pool instead of
+    hammering one IP; a busy or cooling IP is skipped, never stacked on."""
 
-    def __init__(self, urls: List[str], config: EngineConfig) -> None:
-        self._urls = list(dict.fromkeys(urls))
+    def __init__(self, proxies: List[ProxyInfo], config: EngineConfig) -> None:
+        seen: Dict[str, ProxyInfo] = {}
+        for proxy in proxies:
+            seen.setdefault(proxy.url, proxy)
+        self._info = seen
+        self._urls = list(seen.keys())
         self._config = config
-        self._cursor = random.randrange(len(self._urls)) if self._urls else 0
         self._failed: Dict[str, float] = {}
         self._semaphores: Dict[str, asyncio.Semaphore] = {}
         self._lock = asyncio.Lock()
@@ -176,6 +189,9 @@ class ProxyPool:
     def size(self) -> int:
         return len(self._urls)
 
+    def info(self, url: Optional[str]) -> Optional[ProxyInfo]:
+        return self._info.get(url) if url else None
+
     def stats(self) -> Dict[str, Any]:
         now = time.monotonic()
         cooling = [url for url, at in self._failed.items() if now - at < self._config.proxy_cooldown_seconds]
@@ -183,11 +199,10 @@ class ProxyPool:
             "proxies": len(self._urls),
             "cooling": len(cooling),
             "per_ip_limit": self._config.per_ip_concurrency,
-            "cursor": self._cursor,
         }
 
     async def acquire(self) -> Optional[tuple[str, asyncio.Semaphore]]:
-        """Reserve a proxy and its per-IP semaphore.
+        """Reserve a random healthy proxy and its per-IP semaphore.
 
         Returns ``(url, semaphore)`` with the semaphore already acquired, or
         ``None`` to mean "go direct". The caller must call :meth:`release`
@@ -203,31 +218,29 @@ class ProxyPool:
         for url in [u for u, at in self._failed.items() if now - at >= self._config.proxy_cooldown_seconds]:
             self._failed.pop(url, None)
 
-    def _pick(self) -> Optional[tuple[str, asyncio.Semaphore]]:
-        self._expire()
-        total = len(self._urls)
-        for offset in range(total):
-            index = (self._cursor + offset) % total
-            url = self._urls[index]
-            if url in self._failed:
-                continue
-            semaphore = self._semaphores.setdefault(
-                url, asyncio.Semaphore(self._config.per_ip_concurrency)
-            )
-            if semaphore.locked():
-                continue
-            # Reserve immediately; the pool is single-threaded asyncio so this
-            # cannot be stolen between the check and the acquire.
-            self._cursor = (index + 1) % total
-            return (url, semaphore)
-        # Every healthy proxy is at its per-IP cap. Wait on one of them rather
-        # than exceeding the cap or falling direct.
-        url = self._urls[self._cursor % total]
-        self._cursor = (self._cursor + 1) % total
-        semaphore = self._semaphores.setdefault(
+    def _semaphore(self, url: str) -> asyncio.Semaphore:
+        return self._semaphores.setdefault(
             url, asyncio.Semaphore(self._config.per_ip_concurrency)
         )
-        return (url, semaphore)
+
+    def _pick(self) -> Optional[tuple[str, asyncio.Semaphore]]:
+        self._expire()
+        healthy = [u for u in self._urls if u not in self._failed]
+        if not healthy:
+            # Every proxy is cooling. Re-admit the one that has rested longest
+            # rather than going direct, which is throttled from most hosts.
+            oldest = min(self._failed, key=self._failed.get)
+            self._failed.pop(oldest, None)
+            healthy = [oldest]
+        random.shuffle(healthy)
+        for url in healthy:
+            semaphore = self._semaphore(url)
+            if not semaphore.locked():
+                return (url, semaphore)
+        # Every healthy proxy is at its per-IP cap. Wait on a random one rather
+        # than exceeding the cap or falling direct.
+        url = random.choice(healthy)
+        return (url, self._semaphore(url))
 
     def mark_failed(self, url: Optional[str]) -> None:
         if url:
@@ -312,6 +325,9 @@ class SynthesizeResult:
     duration_seconds: Optional[float]
     words: List[Dict[str, Any]]
     used_proxy: Optional[str]
+    egress_ip: Optional[str] = None
+    egress_country: Optional[str] = None
+    egress_via: str = "direct"
 
 
 class EdgeTtsEngine:
@@ -417,6 +433,7 @@ class EdgeTtsEngine:
                 )
             duration += result["duration"] or 0.0
 
+        info = self.pool.info(used_proxy)
         return SynthesizeResult(
             audio=b"".join(audio_parts),
             voice=voice,
@@ -425,6 +442,9 @@ class EdgeTtsEngine:
             duration_seconds=round(duration, 3) if duration else None,
             words=words,
             used_proxy=used_proxy,
+            egress_ip=info.ip if info else None,
+            egress_country=info.country if info else None,
+            egress_via="proxy" if used_proxy else "direct",
         )
 
     async def _synthesize_one(

@@ -197,8 +197,13 @@ async def speech(
         "x-tts-characters": str(result.characters),
         "x-tts-voice": result.voice,
         "x-tts-format": fmt,
-        "x-tts-proxy": "direct" if not result.used_proxy else "proxy",
+        "x-tts-proxy": result.egress_via,
+        "x-tts-egress-via": result.egress_via,
     }
+    if result.egress_ip:
+        headers["x-tts-egress-ip"] = result.egress_ip
+    if result.egress_country:
+        headers["x-tts-egress-country"] = result.egress_country
     if result.duration_seconds is not None:
         headers["x-tts-seconds"] = str(result.duration_seconds)
 

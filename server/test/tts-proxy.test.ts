@@ -70,6 +70,9 @@ const fake = http.createServer((req, res) => {
       'x-tts-characters': String(body.text.length),
       'x-tts-voice': 'en-US-JennyNeural',
       'x-tts-seconds': '1.5',
+      'x-tts-egress-ip': '203.0.113.7',
+      'x-tts-egress-country': 'DE',
+      'x-tts-egress-via': 'proxy',
     });
     res.end(FAKE_MP3);
   });
@@ -214,6 +217,20 @@ test('the TTS model is advertised in the public catalog', async () => {
   assert.ok(tts, 'tts-1 should be listed');
   assert.equal(tts.kind, 'tts');
   assert.equal(tts.provider, 'Edge TTS');
+});
+
+test('TTS traffic keeps the rotating proxy egress, not the gateway host', async () => {
+  const res = await speech({ input: 'egress check', voice: 'nova', language: 'en' });
+  assert.equal(res.status, 200);
+
+  const traffic = await fetch(`http://127.0.0.1:${bridgePort}/api/traffic`);
+  assert.equal(traffic.status, 200);
+  const rows: any[] = await traffic.json();
+  const tts = rows.find((r) => r.provider === 'tts');
+  assert.ok(tts, 'a TTS row must be present');
+  assert.equal(tts.egressIp, '203.0.113.7');
+  assert.equal(tts.egressCountry, 'DE');
+  assert.equal(tts.egressVia, 'proxy');
 });
 
 test('the TTS route is served by the bridge, not the account pool', async () => {

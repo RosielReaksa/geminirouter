@@ -195,6 +195,13 @@ export function registerTtsRoutes(app: FastifyInstance, deps: TtsRouteDeps): voi
       const characters = Number(upstream.headers.get('x-tts-characters')) || text.length;
       const seconds = Number(upstream.headers.get('x-tts-seconds')) || 0;
       const servedVoice = asString(upstream.headers.get('x-tts-voice')) || voice || 'edge';
+      // The TTS service reports which Webshare proxy actually carried the
+      // request, so the Traffic page shows the rotating egress IP, not the
+      // gateway host.
+      const egressIp = asString(upstream.headers.get('x-tts-egress-ip'));
+      const egressCountry = asString(upstream.headers.get('x-tts-egress-country'));
+      const egressViaRaw = asString(upstream.headers.get('x-tts-egress-via'));
+      const egressVia = egressViaRaw === 'proxy' || egressViaRaw === 'direct' ? egressViaRaw : undefined;
 
       deps.recordTraffic({
         id: `tr-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`,
@@ -215,6 +222,9 @@ export function registerTtsRoutes(app: FastifyInstance, deps: TtsRouteDeps): voi
         voice: servedVoice,
         inputCharacters: characters,
         outputSeconds: seconds || undefined,
+        egressIp: egressIp || undefined,
+        egressCountry: egressCountry || null,
+        egressVia,
       });
 
       if (!upstream.ok) {

@@ -21,6 +21,10 @@ export function applyEgress(
   lookup: (record: TrafficRecord) => EgressInfo | null,
 ): TrafficRecord[] {
   return records.map((record) => {
+    // A record that already carries its own egress identity (e.g. a TTS call
+    // that reports the exact Webshare proxy it used) must not be overwritten
+    // with the gateway host or an account proxy.
+    if (record.egressIp) return record;
     const egress = lookup(record);
     if (!egress) return record;
     return {
