@@ -52,6 +52,11 @@ x-tts-ms: 912             # time spent
 x-egress-provider: tts
 ```
 
+A cue with **no speakable content** — punctuation only, such as `។`, `!` or `?` —
+returns a short silent clip (`x-tts-silent: 1`, `x-tts-seconds: 0.3`) instead of
+failing. This keeps a subtitles timeline intact when one SRT line has nothing to
+say; Edge TTS itself answers "No audio was received" for such input.
+
 When `timestamp_granularities` includes `word`, the response is JSON instead:
 
 ```json

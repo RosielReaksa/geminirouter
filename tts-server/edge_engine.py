@@ -456,6 +456,11 @@ class EdgeTtsEngine:
     ) -> Dict[str, Any]:
         last_error: Optional[Exception] = None
         for attempt in range(self.config.attempts):
+            if last_error is not None and "no audio was received" in str(last_error).lower():
+                # Edge TTS returns this deterministically for input it cannot
+                # speak (punctuation only, unsupported voice). Retrying six
+                # times just stalls the caller for ~18 seconds.
+                break
             reserved = await self.pool.acquire()
             proxy_url: Optional[str] = None
             semaphore: Optional[asyncio.Semaphore] = None

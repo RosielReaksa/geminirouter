@@ -19,6 +19,7 @@ import base64
 import json
 import logging
 import os
+import re
 import tempfile
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
@@ -102,6 +103,52 @@ async def _convert(audio: bytes, fmt: str) -> bytes:
             return handle.read()
 
 
+# A cue may contain only punctuation (an SRT line of "។" or "!"): Edge TTS
+# answers "No audio was received" for it. Treat that as silence instead of
+# retrying six times and failing the caller's whole job.
+_SPEAKABLE_RE = re.compile(r"[^\W_]", re.UNICODE)
+_SILENT_MP3: Optional[bytes] = None
+
+
+def is_speakable(text: str) -> bool:
+    """True when the text contains at least one letter or digit."""
+    return bool(_SPEAKABLE_RE.search(text or ""))
+
+
+async def _silent_mp3(seconds: float = 0.3) -> bytes:
+    global _SILENT_MP3
+    if _SILENT_MP3 is not None:
+        return _SILENT_MP3
+    with tempfile.TemporaryDirectory(prefix="geminirouter-tts-") as tmp:
+        out = os.path.join(tmp, "silence.mp3")
+        process = await asyncio.create_subprocess_exec(
+            "ffmpeg",
+            "-y",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=r=24000:cl=mono",
+            "-t",
+            str(seconds),
+            "-b:a",
+            "48k",
+            out,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await process.communicate()
+        if process.returncode != 0 or not os.path.exists(out):
+            raise HTTPException(
+                status_code=502,
+                detail=f"could not render silence: {stderr.decode('utf-8', 'replace')[:120]}",
+            )
+        with open(out, "rb") as handle:
+            _SILENT_MP3 = handle.read()
+    return _SILENT_MP3
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await ENGINE.start()
@@ -181,6 +228,33 @@ async def speech(
 
     voice = resolve_voice(request.voice, request.language)
     include_words = "word" in {str(item).lower() for item in request.timestamp_granularities}
+
+    if not is_speakable(request.text):
+        # Punctuation-only cue: return silence so the caller's timeline is
+        # preserved, instead of failing the whole job on a line with nothing
+        # to say.
+        silence = await _convert(await _silent_mp3(), fmt)
+        headers = {
+            "x-tts-characters": str(len(request.text)),
+            "x-tts-voice": voice,
+            "x-tts-format": fmt,
+            "x-tts-seconds": "0.3",
+            "x-tts-silent": "1",
+            "x-tts-egress-via": "none",
+        }
+        if include_words:
+            return JSONResponse(
+                content={
+                    "audio_base64": base64.b64encode(silence).decode("ascii"),
+                    "format": fmt,
+                    "characters": len(request.text),
+                    "duration_seconds": 0.3,
+                    "voice": voice,
+                    "words": [],
+                },
+                headers=headers,
+            )
+        return Response(content=silence, media_type=CONTENT_TYPES[fmt], headers=headers)
 
     try:
         result = await ENGINE.synthesize(request.text, voice, speed=request.speed, include_words=include_words)
